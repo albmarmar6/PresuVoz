@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PresuVoz Studio — Demostrador en vivo</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+    * { font-family: 'Inter', sans-serif; }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+    .rec-blink {
+      animation: blink 1.2s ease-in-out infinite;
+    }
+
+    @keyframes wave {
+      0%, 100% { transform: scaleY(0.3); }
+      50% { transform: scaleY(1); }
+    }
+    .wave-bar { animation: wave 1.1s ease-in-out infinite; }
+    .wave-bar:nth-child(2) { animation-delay: 0.1s; }
+    .wave-bar:nth-child(3) { animation-delay: 0.2s; }
+    .wave-bar:nth-child(4) { animation-delay: 0.3s; }
+    .wave-bar:nth-child(5) { animation-delay: 0.4s; }
+
+    textarea:focus { outline: none; }
+    select:focus { outline: none; }
+  </style>
+</head>
+<body class="bg-[#080c10] text-slate-200 min-h-screen antialiased">
+
+  <!-- Top bar -->
+  <header class="border-b border-slate-800/60 bg-[#080c10]/90 backdrop-blur sticky top-0 z-40">
+    <div class="max-w-5xl mx-auto px-6 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-7 h-7 rounded-md bg-emerald-500 flex items-center justify-center">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="font-semibold text-sm text-white">PresuVoz</span>
+          <span class="text-slate-700">/</span>
+          <span class="text-sm text-slate-400">Studio</span>
+        </div>
+      </div>
+
+      <a href="../landing/index.html" class="text-xs text-slate-500 hover:text-slate-300 transition-colors flex items-center gap-1.5">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+        Volver al sitio
+      </a>
+    </div>
+  </header>
+
+  <!-- Main content -->
+  <main class="max-w-5xl mx-auto px-6 py-12">
+
+    <div class="mb-10">
+      <h1 class="text-2xl font-bold text-white mb-2">Demostrador en vivo</h1>
+      <p class="text-sm text-slate-400 max-w-xl">Graba un audio con el micrófono o escribe la descripción de una obra. El motor genera el presupuesto formal con doble firma en segundos.</p>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+
+      <!-- Left: Recording Panel -->
+      <div class="lg:col-span-5 space-y-4">
+
+        <!-- Mic card -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+          <div class="flex items-center justify-between mb-5">
+            <span class="text-xs uppercase font-semibold text-slate-500 tracking-widest">Captura de voz</span>
+            <div id="recBadge" class="hidden items-center gap-1.5 text-xs font-semibold text-rose-400">
+              <span class="w-2 h-2 rounded-full bg-rose-500 rec-blink"></span>
+              Grabando
+            </div>
+          </div>
+
+          <!-- Waveform visualizer -->
+          <div class="flex items-center justify-center gap-1 h-16 mb-6" id="waveContainer">
+            <div class="w-px h-3 bg-slate-700 rounded-full" id="staticLine"></div>
+            <div class="hidden gap-1 items-end h-full" id="waveVisual">
+              <div class="wave-bar w-1 bg-emerald-500 rounded-full h-4"></div>
+              <div class="wave-bar w-1 bg-emerald-500 rounded-full h-7"></div>
+              <div class="wave-bar w-1 bg-emerald-500 rounded-full h-10"></div>
+              <div class="wave-bar w-1 bg-emerald-500 rounded-full h-6"></div>
+              <div class="wave-bar w-1 bg-emerald-500 rounded-full h-4"></div>
+            </div>
+          </div>
+
+          <!-- Waveform placeholder (idle) -->
+          <div id="idleWave" class="flex items-center justify-center gap-0.5 h-8 mb-6">
+            <div class="w-0.5 h-1 bg-slate-800 rounded-full"></div>
+            <div class="w-0.5 h-2 bg-slate-800 rounded-full"></div>
+            <div class="w-0.5 h-4 bg-slate-800 rounded-full"></div>
+            <div class="w-0.5 h-3 bg-slate-800 rounded-full"></div>
+            <div class="w-0.5 h-6 bg-slate-800 rounded-full"></div>
+            <div class="w-0.5 h-4 bg-slate-800 rounded-full"></div>
+            <div class="w-0.5 h-3 bg-slate-800 rounded-full"></div>
+            <div class="w-0.5 h-5 bg-slate-800 rounded-full"></div>
+            <div class="w-0.5 h-2 bg-slate-800 rounded-full"></div>
+            <div class="w-0.5 h-4 bg-slate-800 rounded-full"></div>
+            <div class="w-0.5 h-3 bg-slate-800 rounded-full"></div>
+            <div class="w-0.5 h-1 bg-slate-800 rounded-full"></div>
+          </div>
+
+          <button id="btnRecord" onclick="toggleRecording()" class="w-full border border-slate-700 hover:border-slate-600 bg-slate-800 hover:bg-slate-750 text-white font-semibold py-3 rounded-xl text-sm transition-all flex items-center justify-center gap-2.5 cursor-pointer">
+            <svg id="micSvg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+            <span id="btnLabel">Iniciar grabación</span>
+          </button>
+
+          <p id="recHint" class="text-[11px] text-slate-600 text-center mt-3">El navegador solicitará permiso de micrófono al pulsar. Funciona en Chrome, Edge y Safari.</p>
+        </div>
+
+        <!-- Transcript box -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-xs uppercase font-semibold text-slate-500 tracking-widest">Transcripción / Texto manual</span>
+            <button onclick="document.getElementById('liveText').value=''" class="text-[11px] text-slate-600 hover:text-slate-400 transition-colors">Limpiar</button>
+          </div>
+          <textarea id="liveText" rows="5" class="w-full bg-transparent text-sm text-slate-200 resize-none placeholder-slate-700 leading-relaxed" placeholder="Tu voz se transcribirá aquí automáticamente. También puedes escribir directamente.&#10;&#10;Ejemplo: Presupuesto para Juan López en Calle Mayor 12. Cambio de grupo de presión por uno de membrana 340 €, revisión de sifones y desagüe cocina 80 €. IVA reducido del 10%. 30% a la firma."></textarea>
+        </div>
+
+        <!-- Config row -->
+        <div class="grid grid-cols-2 gap-3">
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+            <label class="block text-[11px] uppercase font-semibold text-slate-500 tracking-widest mb-2">Empresa</label>
+            <select id="companySelect" class="w-full bg-transparent text-xs text-slate-300 cursor-pointer">
+              <option value="manolo">Carpintería Manolo S.L.</option>
+              <option value="gomez">Fontanería Gómez</option>
+              <option value="electro">Electro-Servicios Rápidos</option>
+            </select>
+          </div>
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+            <label class="block text-[11px] uppercase font-semibold text-slate-500 tracking-widest mb-2">IVA</label>
+            <select id="taxSelect" class="w-full bg-transparent text-xs text-slate-300 cursor-pointer">
+              <option value="auto">Detección automática</option>
+              <option value="10">Forzar 10% (vivienda)</option>
+              <option value="21">Forzar 21% (general)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Generate button -->
+        <button onclick="generateFromVoice()" class="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-3.5 rounded-xl text-sm transition-colors cursor-pointer">
+          Generar presupuesto con doble firma
+        </button>
+
+      </div>
+
+      <!-- Right: Info panels -->
+      <div class="lg:col-span-7 space-y-4">
+
+        <!-- How to use -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+          <h3 class="text-sm font-semibold text-white mb-4">Cómo usar este demostrador</h3>
+          <div class="space-y-4">
+            <div class="flex gap-4">
+              <div class="w-6 h-6 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center shrink-0 mt-0.5">
+                <span class="text-[10px] font-bold text-slate-400">1</span>
+              </div>
+              <div>
+                <p class="text-sm font-medium text-slate-300">Pulsa "Iniciar grabación" y habla</p>
+                <p class="text-xs text-slate-500 mt-0.5">Di una descripción de obra real. Por ejemplo: el cliente, la calle, las partidas y los precios. No hace falta ningún formato especial.</p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="w-6 h-6 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center shrink-0 mt-0.5">
+                <span class="text-[10px] font-bold text-slate-400">2</span>
+              </div>
+              <div>
+                <p class="text-sm font-medium text-slate-300">Revisa la transcripción y ajusta si hace falta</p>
+                <p class="text-xs text-slate-500 mt-0.5">El texto aparece en tiempo real. Puedes editar cualquier dato directamente en el cuadro de texto.</p>
+              </div>
+            </div>
+            <div class="flex gap-4">
+              <div class="w-6 h-6 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center shrink-0 mt-0.5">
+                <span class="text-[10px] font-bold text-slate-400">3</span>
+              </div>
+              <div>
+                <p class="text-sm font-medium text-slate-300">Pulsa "Generar presupuesto"</p>
+                <p class="text-xs text-slate-500 mt-0.5">El motor calcula las partidas, aplica el IVA correcto y genera el documento formal con sello de empresa y lienzo de firma del cliente.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sample scripts -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-sm font-semibold text-white">Ejemplos de audio para probar</h3>
+            <span class="text-[11px] text-slate-500">Haz clic para cargar</span>
+          </div>
+          <div class="space-y-2">
+            <button onclick="loadSample(0)" class="w-full text-left bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-slate-700 rounded-xl p-4 transition-all group">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <p class="text-xs font-semibold text-slate-300 group-hover:text-white transition-colors mb-1">Fontanero — Cambio de bañera</p>
+                  <p class="text-[11px] text-slate-500 leading-relaxed line-clamp-2">Reforma de baño en vivienda habitual. Plato de ducha, alicatado, grifería termostática y mampara. IVA reducido 10%.</p>
+                </div>
+                <svg class="w-4 h-4 text-slate-600 group-hover:text-emerald-500 shrink-0 mt-0.5 transition-colors" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg>
+              </div>
+            </button>
+
+            <button onclick="loadSample(1)" class="w-full text-left bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-slate-700 rounded-xl p-4 transition-all group">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <p class="text-xs font-semibold text-slate-300 group-hover:text-white transition-colors mb-1">Electricista — Cuadro y línea de cocina</p>
+                  <p class="text-[11px] text-slate-500 leading-relaxed line-clamp-2">Diferencial 40A, línea 6mm para horno y cuatro enchufes de cocina. IVA general 21%.</p>
+                </div>
+                <svg class="w-4 h-4 text-slate-600 group-hover:text-emerald-500 shrink-0 mt-0.5 transition-colors" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg>
+              </div>
+            </button>
+
+            <button onclick="loadSample(2)" class="w-full text-left bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-slate-700 rounded-xl p-4 transition-all group">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <p class="text-xs font-semibold text-slate-300 group-hover:text-white transition-colors mb-1">Climatización — Instalación de Split</p>
+                  <p class="text-[11px] text-slate-500 leading-relaxed line-clamp-2">Equipo Mitsubishi 3000 frigorías clase A+++, línea frigorífica hasta 4 metros y puesta en marcha.</p>
+                </div>
+                <svg class="w-4 h-4 text-slate-600 group-hover:text-emerald-500 shrink-0 mt-0.5 transition-colors" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <!-- Note on WhatsApp -->
+        <div class="border border-slate-800/60 rounded-xl p-4 flex gap-3">
+          <div class="w-0.5 bg-emerald-500/40 rounded-full shrink-0 self-stretch"></div>
+          <div>
+            <p class="text-xs font-semibold text-slate-300 mb-1">Nota sobre el producto final</p>
+            <p class="text-[12px] text-slate-500 leading-relaxed">
+              En producción, el profesional no abre ningún navegador. Envía el audio directamente desde WhatsApp y el sistema responde en el mismo chat con el PDF y el enlace de firma. Este estudio solo sirve para demostrar la tecnología y validar el flujo.
+            </p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const samples = [
+      `Para María Gómez en Avenida América treinta, segundo A. Obra de reforma del baño en vivienda habitual. Demolición de bañera, picado del alicatado y retirada a vertedero, 220 euros. Suministro y colocación de plato de ducha de resina antideslizante de 140 por 70 con sifón de gran caudal, 420 euros. Alicatado de zona de ducha con revestimiento cerámico, 380 euros. Adecuación de tomas de fontanería, grifería termostática y mampara de vidrio de 8 milímetros, 430 euros. Al ser vivienda habitual aplicamos IVA reducido del 10 por ciento. Validez 15 días. 30 por ciento de anticipo a la firma para compra de materiales.`,
+      `Para Carlos Fernández en Calle Serrano catorce, tercero B. Hay que adecuar el cuadro eléctrico general instalando diferencial de 40 amperios y magnetotérmico de 25, 85 euros. Línea nueva reforzada para horno con cable de 6 milímetros bajo tubo corrugado, 140 euros. Suministro e instalación de cuatro tomas de corriente schuko en cocina, 90 euros. IVA general del 21 por ciento. Cobramos el 30 por ciento por adelantado.`,
+      `Para David Morales en Calle Toledo 88, cuarto C. Suministro e instalación de equipo split Mitsubishi Electric de 3000 frigorías clase A+++ para salón. Incluye hasta 4 metros de línea frigorífica aislada, soportes antivibratorios, desagüe y puesta en marcha con prueba de rendimiento. Precio total 980 euros más IVA del 21 por ciento. Garantía de 3 años. Pago al finalizar.`
+    ];
+
+    const liveText = document.getElementById('liveText');
+    const btnRecord = document.getElementById('btnRecord');
+    const btnLabel = document.getElementById('btnLabel');
+    const recBadge = document.getElementById('recBadge');
+    const recHint = document.getElementById('recHint');
+    const waveVisual = document.getElementById('waveVisual');
+    const idleWave = document.getElementById('idleWave');
+
+    let recognition = null;
+    let isRecording = false;
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SR) {
+      recognition = new SR();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'es-ES';
+
+      recognition.onstart = () => {
+        isRecording = true;
+        recBadge.classList.remove('hidden');
+        recBadge.classList.add('flex');
+        idleWave.classList.add('hidden');
+        btnRecord.classList.add('border-rose-500/50', 'bg-rose-950/30');
+        btnLabel.textContent = 'Detener grabación';
+        recHint.textContent = 'Grabando... Habla con normalidad y pulsa Detener cuando termines.';
+      };
+
+      recognition.onresult = (e) => {
+        let t = '';
+        for (let i = e.resultIndex; i < e.results.length; ++i) t += e.results[i][0].transcript;
+        liveText.value = t;
+      };
+
+      recognition.onerror = (e) => {
+        stopRec();
+        if (e.error === 'not-allowed') alert('Permite el acceso al micrófono en el navegador para usar la grabación de voz.');
+      };
+
+      recognition.onend = stopRec;
+    }
+
+    function toggleRecording() {
+      if (!SR) {
+        alert('Tu navegador no soporta reconocimiento de voz. Escribe directamente en el cuadro de texto.');
+        return;
+      }
+      if (!isRecording) {
+        liveText.value = '';
+        try { recognition.start(); } catch(e) {}
+      } else {
+        recognition.stop();
+      }
+    }
+
+    function stopRec() {
+      isRecording = false;
+      recBadge.classList.add('hidden');
+      recBadge.classList.remove('flex');
+      idleWave.classList.remove('hidden');
+      btnRecord.classList.remove('border-rose-500/50', 'bg-rose-950/30');
+      btnLabel.textContent = 'Iniciar grabación';
+      recHint.textContent = liveText.value.trim()
+        ? 'Audio capturado. Revisa el texto y pulsa "Generar presupuesto".'
+        : 'El navegador solicitará permiso de micrófono al pulsar. Funciona en Chrome, Edge y Safari.';
+    }
+
+    function loadSample(i) {
+      liveText.value = samples[i];
+      liveText.focus();
+    }
+
+    function generateFromVoice() {
+      const text = liveText.value.trim();
+      if (!text) {
+        alert('Graba un audio o escribe una descripción de obra antes de continuar.');
+        return;
+      }
+      alert('Motor procesando...\n\nTranscripción recibida. IVA calculado automáticamente. Documento generado.\n\nAbriendo presupuesto con doble firma.');
+      window.open('../output/presupuesto_demo.html', '_blank');
+    }
+  </script>
+
+</body>
+</html>

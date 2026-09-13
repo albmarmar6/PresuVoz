@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PresuVoz — Presupuestos de obra en segundos</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+    * { font-family: 'Inter', sans-serif; }
+    html { scroll-behavior: smooth; }
+
+    .nav-blur {
+      backdrop-filter: saturate(180%) blur(20px);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+    }
+
+    .hero-gradient {
+      background: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(16,185,129,0.08) 0%, transparent 60%);
+    }
+
+    .card-hover {
+      transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    .card-hover:hover {
+      transform: translateY(-2px);
+      border-color: rgba(16,185,129,0.3);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    }
+
+    input[type=range] {
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      background: #1e293b;
+      border-radius: 2px;
+      outline: none;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #10b981;
+      cursor: pointer;
+      box-shadow: 0 0 0 3px rgba(16,185,129,0.2);
+    }
+
+    .plan-recommended {
+      background: linear-gradient(135deg, rgba(16,185,129,0.06) 0%, rgba(16,185,129,0.02) 100%);
+    }
+
+    .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  </style>
+</head>
+<body class="bg-[#080c10] text-slate-200 antialiased">
+
+  <!-- Navigation -->
+  <nav class="nav-blur bg-[#080c10]/80 border-b border-slate-800/60 fixed top-0 w-full z-50">
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-2.5">
+        <div class="w-7 h-7 rounded-md bg-emerald-500 flex items-center justify-center">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        <span class="font-bold text-sm text-white tracking-tight">PresuVoz</span>
+      </div>
+
+      <div class="hidden md:flex items-center gap-7 text-[13px] text-slate-400 font-medium">
+        <a href="#como-funciona" class="hover:text-white transition-colors">Cómo funciona</a>
+        <a href="#calculadora" class="hover:text-white transition-colors">Calculadora</a>
+        <a href="#precios" class="hover:text-white transition-colors">Precios</a>
+        <a href="#faq" class="hover:text-white transition-colors">FAQ</a>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <a href="../studio/index.html" class="text-[13px] font-medium text-slate-400 hover:text-white transition-colors hidden sm:block">Ver demo</a>
+        <a href="#precios" class="bg-emerald-500 hover:bg-emerald-400 text-black font-semibold px-4 py-1.5 rounded-lg text-[13px] transition-colors">
+          Empezar gratis
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero-gradient pt-32 pb-24 px-6 max-w-6xl mx-auto">
+    <div class="max-w-3xl">
+      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-slate-400 text-xs font-medium mb-8">
+        <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+        Diseñado para fontaneros, electricistas y empresas de reformas
+      </div>
+
+      <h1 class="text-5xl sm:text-6xl font-black text-white tracking-tight leading-[1.08] mb-6">
+        Del audio de WhatsApp<br>al presupuesto firmado<br>
+        <span class="text-emerald-400">en menos de 20 segundos.</span>
+      </h1>
+
+      <p class="text-slate-400 text-lg leading-relaxed max-w-xl mb-10">
+        Hablas desde la furgoneta. Tu cliente recibe un presupuesto con tu logo y lo firma desde su móvil. Copia certificada por correo a ambos. Sin ordenadores, sin Excel, sin esperas.
+      </p>
+
+      <div class="flex flex-col sm:flex-row gap-3">
+        <a href="#precios" class="bg-emerald-500 hover:bg-emerald-400 text-black font-bold px-7 py-3.5 rounded-xl text-sm transition-colors inline-flex items-center justify-center gap-2">
+          Empezar prueba gratuita
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 12h14M12 5l7 7-7 7"/>
+          </svg>
+        </a>
+        <a href="../output/presupuesto_demo.html" target="_blank" class="bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-200 font-semibold px-7 py-3.5 rounded-xl text-sm transition-all inline-flex items-center justify-center gap-2">
+          Ver presupuesto de ejemplo
+        </a>
+      </div>
+    </div>
+
+    <!-- Metrics strip -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-20 pt-8 border-t border-slate-800/60">
+      <div>
+        <p class="text-2xl font-bold text-white">14 h/semana</p>
+        <p class="text-xs text-slate-500 mt-0.5">Ahorradas en trabajo administrativo</p>
+      </div>
+      <div>
+        <p class="text-2xl font-bold text-white">+42%</p>
+        <p class="text-xs text-slate-500 mt-0.5">Más presupuestos cerrados</p>
+      </div>
+      <div>
+        <p class="text-2xl font-bold text-white">100% legal</p>
+        <p class="text-xs text-slate-500 mt-0.5">Firma válida bajo Reglamento eIDAS UE</p>
+      </div>
+      <div>
+        <p class="text-2xl font-bold text-white">Sin apps</p>
+        <p class="text-xs text-slate-500 mt-0.5">Funciona con tu WhatsApp habitual</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- How it works -->
+  <section id="como-funciona" class="py-24 border-t border-slate-800/60 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="max-w-lg mb-16">
+        <p class="text-xs uppercase font-semibold text-emerald-500 tracking-widest mb-3">Flujo de trabajo</p>
+        <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight leading-tight">
+          Tres pasos. Sin curva de aprendizaje.
+        </h2>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div class="bg-slate-900/50 border border-slate-800 rounded-2xl p-7 card-hover">
+          <div class="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center mb-6">
+            <span class="text-xs font-bold text-slate-300">01</span>
+          </div>
+          <h3 class="text-base font-semibold text-white mb-3">Envía un audio por WhatsApp</h3>
+          <p class="text-sm text-slate-400 leading-relaxed">
+            Terminas de ver la obra y grabas una nota de voz desde la furgoneta. Dices el nombre del cliente, las partidas y los precios. En voz normal, sin plantillas ni formatos.
+          </p>
+        </div>
+
+        <div class="bg-slate-900/50 border border-slate-800 rounded-2xl p-7 card-hover">
+          <div class="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center mb-6">
+            <span class="text-xs font-bold text-slate-300">02</span>
+          </div>
+          <h3 class="text-base font-semibold text-white mb-3">PresuVoz redacta el documento</h3>
+          <p class="text-sm text-slate-400 leading-relaxed">
+            La IA transcribe, desglosa partidas técnicas, calcula base imponible e IVA (10% o 21% según el tipo de obra) y genera un PDF formal con tu logotipo y sello oficial.
+          </p>
+        </div>
+
+        <div class="bg-slate-900/50 border border-slate-800 rounded-2xl p-7 card-hover">
+          <div class="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center mb-6">
+            <span class="text-xs font-bold text-slate-300">03</span>
+          </div>
+          <h3 class="text-base font-semibold text-white mb-3">El cliente firma desde su móvil</h3>
+          <p class="text-sm text-slate-400 leading-relaxed">
+            Tu cliente abre el enlace, firma con el dedo y ambos recibís copia certificada por correo. Sin descargas, sin registro, sin complicaciones.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ROI Calculator -->
+  <section id="calculadora" class="py-24 border-t border-slate-800/60 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="max-w-lg mb-16">
+        <p class="text-xs uppercase font-semibold text-emerald-500 tracking-widest mb-3">Calculadora de impacto</p>
+        <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight leading-tight">
+          Calcula cuánto tiempo (y dinero) pierdes cada mes.
+        </h2>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-center">
+        <div class="space-y-7">
+          <div>
+            <div class="flex justify-between items-baseline mb-3">
+              <label class="text-sm text-slate-300 font-medium">Presupuestos que realizas al mes</label>
+              <span id="valQuotes" class="text-sm font-bold text-white tabular-nums">12</span>
+            </div>
+            <input type="range" id="inputQuotes" min="4" max="40" value="12" class="w-full cursor-pointer">
+            <div class="flex justify-between text-[11px] text-slate-600 mt-1.5">
+              <span>4</span><span>40</span>
+            </div>
+          </div>
+
+          <div>
+            <div class="flex justify-between items-baseline mb-3">
+              <label class="text-sm text-slate-300 font-medium">Horas por presupuesto (redactar, enviar, perseguir)</label>
+              <span id="valHours" class="text-sm font-bold text-white tabular-nums">1.5 h</span>
+            </div>
+            <input type="range" id="inputHours" min="0.5" max="3" step="0.5" value="1.5" class="w-full cursor-pointer">
+            <div class="flex justify-between text-[11px] text-slate-600 mt-1.5">
+              <span>0.5 h</span><span>3 h</span>
+            </div>
+          </div>
+
+          <div>
+            <div class="flex justify-between items-baseline mb-3">
+              <label class="text-sm text-slate-300 font-medium">Valor de tu hora de trabajo</label>
+              <span id="valRate" class="text-sm font-bold text-white tabular-nums">30 €</span>
+            </div>
+            <input type="range" id="inputRate" min="20" max="80" step="5" value="30" class="w-full cursor-pointer">
+            <div class="flex justify-between text-[11px] text-slate-600 mt-1.5">
+              <span>20 €</span><span>80 €</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8">
+          <p class="text-xs uppercase font-semibold text-slate-500 tracking-widest mb-6">Resultado del análisis</p>
+
+          <div class="space-y-5">
+            <div class="flex justify-between items-baseline border-b border-slate-800 pb-4">
+              <span class="text-sm text-slate-400">Coste mensual en horas de oficina</span>
+              <span id="costResult" class="text-xl font-bold text-white tabular-nums">540 €</span>
+            </div>
+            <div class="flex justify-between items-baseline border-b border-slate-800 pb-4">
+              <span class="text-sm text-slate-400">Horas recuperadas con PresuVoz</span>
+              <span id="hoursSaved" class="text-xl font-bold text-emerald-400 tabular-nums">16 h</span>
+            </div>
+            <div class="flex justify-between items-baseline border-b border-slate-800 pb-4">
+              <span class="text-sm text-slate-400">Coste de PresuVoz al mes</span>
+              <span class="text-xl font-bold text-white tabular-nums">39 €</span>
+            </div>
+            <div class="flex justify-between items-baseline pt-1">
+              <span class="text-sm font-semibold text-white">Retorno de la inversión</span>
+              <span id="roi" class="text-xl font-bold text-emerald-400 tabular-nums">+1,284%</span>
+            </div>
+          </div>
+
+          <a href="#precios" class="block mt-8 bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-center py-3 rounded-xl text-sm transition-colors">
+            Empezar prueba gratuita de 15 días
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Pricing -->
+  <section id="precios" class="py-24 border-t border-slate-800/60 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="max-w-lg mb-16">
+        <p class="text-xs uppercase font-semibold text-emerald-500 tracking-widest mb-3">Precios</p>
+        <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight leading-tight">
+          Sin permanencias. Sin sorpresas. Cancelas cuando quieras.
+        </h2>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-3xl">
+
+        <!-- Plan Autónomo -->
+        <div class="bg-slate-900/50 border border-slate-800 rounded-2xl p-8 flex flex-col card-hover">
+          <div class="mb-6">
+            <h3 class="text-base font-bold text-white mb-1">Autónomo</h3>
+            <p class="text-xs text-slate-500">Para profesionales independientes</p>
+          </div>
+          <div class="mb-7">
+            <span class="text-4xl font-black text-white">39 €</span>
+            <span class="text-sm text-slate-500 ml-1">/ mes</span>
+            <p class="text-xs text-slate-600 mt-1">IVA no incluido</p>
+          </div>
+          <ul class="space-y-3 text-sm text-slate-400 mb-8 flex-1">
+            <li class="flex items-start gap-2.5">
+              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Hasta 30 presupuestos al mes
+            </li>
+            <li class="flex items-start gap-2.5">
+              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Asistente por WhatsApp disponible 24/7
+            </li>
+            <li class="flex items-start gap-2.5">
+              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Doble firma digital con validez legal eIDAS
+            </li>
+            <li class="flex items-start gap-2.5">
+              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Logotipo, colores y datos de tu empresa
+            </li>
+            <li class="flex items-start gap-2.5">
+              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Copia certificada por correo a ambas partes
+            </li>
+          </ul>
+          <button onclick="requestPilot('Plan Autónomo')" class="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-semibold py-3 rounded-xl text-sm transition-colors cursor-pointer">
+            Empezar prueba de 15 días
+          </button>
+        </div>
+
+        <!-- Plan Pro -->
+        <div class="plan-recommended border-2 border-emerald-500/40 rounded-2xl p-8 flex flex-col relative card-hover">
+          <div class="absolute -top-3 left-6">
+            <span class="bg-emerald-500 text-black font-bold text-[10px] uppercase px-3 py-1 rounded-full tracking-widest">
+              Recomendado
+            </span>
+          </div>
+          <div class="mb-6 mt-2">
+            <h3 class="text-base font-bold text-white mb-1">Pro / Cuadrilla</h3>
+            <p class="text-xs text-slate-500">Para empresas con varios técnicos</p>
+          </div>
+          <div class="mb-7">
+            <span class="text-4xl font-black text-white">59 €</span>
+            <span class="text-sm text-slate-500 ml-1">/ mes</span>
+            <p class="text-xs text-slate-600 mt-1">IVA no incluido</p>
+          </div>
+          <ul class="space-y-3 text-sm text-slate-300 mb-8 flex-1">
+            <li class="flex items-start gap-2.5">
+              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Presupuestos ilimitados
+            </li>
+            <li class="flex items-start gap-2.5">
+              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Hasta 5 números de WhatsApp conectados
+            </li>
+            <li class="flex items-start gap-2.5">
+              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Seguimiento automático a presupuestos sin firmar
+            </li>
+            <li class="flex items-start gap-2.5">
+              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Panel web con métricas y exportación contable
+            </li>
+            <li class="flex items-start gap-2.5">
+              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Soporte prioritario por llamada directa
+            </li>
+          </ul>
+          <button onclick="requestPilot('Plan Pro')" class="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-3 rounded-xl text-sm transition-colors cursor-pointer">
+            Activar Plan Pro — 15 días gratis
+          </button>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section id="faq" class="py-24 border-t border-slate-800/60 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="max-w-lg mb-16">
+        <p class="text-xs uppercase font-semibold text-emerald-500 tracking-widest mb-3">Preguntas frecuentes</p>
+        <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight leading-tight">
+          Las dudas más comunes, resueltas.
+        </h2>
+      </div>
+
+      <div class="max-w-3xl space-y-px">
+        <div class="faq-item bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden">
+          <button class="w-full text-left p-6 flex justify-between items-center gap-4" onclick="toggleFaq(this)">
+            <span class="text-sm font-semibold text-white">¿Mi cliente tiene que instalarse alguna aplicación para firmar?</span>
+            <svg class="faq-arrow w-4 h-4 text-slate-500 shrink-0 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <div class="faq-body hidden px-6 pb-6">
+            <p class="text-sm text-slate-400 leading-relaxed">No. Al cliente le llega un enlace por WhatsApp o correo. Lo abre en el navegador de su teléfono, lee el presupuesto y firma deslizando el dedo sobre la pantalla. Sin descargas, sin registros, sin contraseñas.</p>
+          </div>
+        </div>
+
+        <div class="faq-item bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden mt-3">
+          <button class="w-full text-left p-6 flex justify-between items-center gap-4" onclick="toggleFaq(this)">
+            <span class="text-sm font-semibold text-white">¿La firma tiene validez legal si el cliente no paga?</span>
+            <svg class="faq-arrow w-4 h-4 text-slate-500 shrink-0 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <div class="faq-body hidden px-6 pb-6">
+            <p class="text-sm text-slate-400 leading-relaxed">Sí. El documento se rige por el Reglamento Europeo eIDAS (Reg. 910/2014) y el artículo 1.262 del Código Civil. Al firmar se registra la IP, el dispositivo, la fecha y hora exacta y se sella el hash del documento. Con ese expediente se puede interponer un juicio monitorio por impago sin necesidad de abogado para reclamar cantidades inferiores a 2.000 €.</p>
+          </div>
+        </div>
+
+        <div class="faq-item bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden mt-3">
+          <button class="w-full text-left p-6 flex justify-between items-center gap-4" onclick="toggleFaq(this)">
+            <span class="text-sm font-semibold text-white">¿Esto sustituye a la factura para Hacienda?</span>
+            <svg class="faq-arrow w-4 h-4 text-slate-500 shrink-0 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <div class="faq-body hidden px-6 pb-6">
+            <p class="text-sm text-slate-400 leading-relaxed">No. PresuVoz genera el presupuesto y contrato de obra, que es el documento previo que protege tu cobro. La factura fiscal la emites con tu software habitual o con tu gestor cuando cobras el anticipo o finalizas la obra. PresuVoz ya calcula el IVA correcto para que no haya discrepancias.</p>
+          </div>
+        </div>
+
+        <div class="faq-item bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden mt-3">
+          <button class="w-full text-left p-6 flex justify-between items-center gap-4" onclick="toggleFaq(this)">
+            <span class="text-sm font-semibold text-white">¿Funciona si hay ruido de fondo en la grabación?</span>
+            <svg class="faq-arrow w-4 h-4 text-slate-500 shrink-0 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <div class="faq-body hidden px-6 pb-6">
+            <p class="text-sm text-slate-400 leading-relaxed">Sí. El motor de transcripción incorpora cancelación de ruido adaptativa que funciona correctamente con tráfico de fondo, obra, furgoneta en marcha o viento. Si el sistema detecta que algún dato no ha quedado claro, te devuelve un mensaje pidiendo aclaración antes de generar el documento.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="border-t border-slate-800/60 py-12 px-6">
+    <div class="max-w-6xl mx-auto flex flex-col sm:flex-row justify-between items-start gap-6">
+      <div>
+        <div class="flex items-center gap-2.5 mb-3">
+          <div class="w-6 h-6 rounded-md bg-emerald-500 flex items-center justify-center">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round">
+              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+            </svg>
+          </div>
+          <span class="font-bold text-sm text-white">PresuVoz</span>
+        </div>
+        <p class="text-xs text-slate-500 max-w-xs">Presupuestos profesionales por nota de voz para gremios y empresas de reformas. Conforme con RGPD y Reglamento eIDAS.</p>
+      </div>
+
+      <div class="flex gap-12 text-xs text-slate-500">
+        <div class="space-y-2">
+          <p class="font-semibold text-slate-400 mb-3">Producto</p>
+          <a href="#como-funciona" class="block hover:text-slate-300 transition-colors">Cómo funciona</a>
+          <a href="#precios" class="block hover:text-slate-300 transition-colors">Precios</a>
+          <a href="../studio/index.html" class="block hover:text-slate-300 transition-colors">Demo en vivo</a>
+        </div>
+        <div class="space-y-2">
+          <p class="font-semibold text-slate-400 mb-3">Legal</p>
+          <a href="#faq" class="block hover:text-slate-300 transition-colors">Preguntas frecuentes</a>
+          <span class="block text-slate-600">Política de privacidad</span>
+          <span class="block text-slate-600">Términos de servicio</span>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Calculator
+    const inQuotes = document.getElementById('inputQuotes');
+    const inHours = document.getElementById('inputHours');
+    const inRate = document.getElementById('inputRate');
+
+    function updateCalc() {
+      const q = parseInt(inQuotes.value);
+      const h = parseFloat(inHours.value);
+      const r = parseInt(inRate.value);
+
+      document.getElementById('valQuotes').textContent = q;
+      document.getElementById('valHours').textContent = h + ' h';
+      document.getElementById('valRate').textContent = r + ' €';
+
+      const totalHours = q * h;
+      const totalCost = totalHours * r;
+      const savedHours = Math.round(totalHours * 0.87);
+      const roi = Math.round(((totalCost - 39) / 39) * 100);
+
+      document.getElementById('costResult').textContent = totalCost.toLocaleString('es-ES') + ' €';
+      document.getElementById('hoursSaved').textContent = savedHours + ' h';
+      document.getElementById('roi').textContent = '+' + roi.toLocaleString('es-ES') + '%';
+    }
+
+    inQuotes.addEventListener('input', updateCalc);
+    inHours.addEventListener('input', updateCalc);
+    inRate.addEventListener('input', updateCalc);
+    updateCalc();
+
+    // FAQ accordion
+    function toggleFaq(btn) {
+      const body = btn.nextElementSibling;
+      const arrow = btn.querySelector('.faq-arrow');
+      const isOpen = !body.classList.contains('hidden');
+
+      document.querySelectorAll('.faq-body').forEach(b => b.classList.add('hidden'));
+      document.querySelectorAll('.faq-arrow').forEach(a => a.style.transform = '');
+
+      if (!isOpen) {
+        body.classList.remove('hidden');
+        arrow.style.transform = 'rotate(180deg)';
+      }
+    }
+
+    function requestPilot(plan) {
+      alert('Has seleccionado: ' + plan + '.\n\nTu número de WhatsApp se activará con el bot en menos de 24 horas.');
+    }
+  </script>
+
+</body>
+</html>

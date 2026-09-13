@@ -1,0 +1,19 @@
+{
+  "name": "presuvoz-engine",
+  "version": "1.0.0",
+  "description": "Motor de generación de presupuestos técnicos por voz para gremios y reformas",
+  "type": "module",
+  "main": "src/engine.js",
+  "scripts": {
+    "start": "node src/test_run.js"
+  },
+  "keywords": [
+    "presupuestos",
+    "reformas",
+    "whatsapp",
+    "voz",
+    "gremios"
+  ],
+  "author": "PresuVoz",
+  "license": "ISC"
+}
