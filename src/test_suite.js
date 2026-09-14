@@ -119,20 +119,42 @@ assert(res3.financials.taxAmount === 47.25, `Cuota de IVA 21% calculada: 47.25 �
 console.log("");
 
 // -----------------------------------------------------------------------------
-// CASO 4: Guardarraíl de Seguridad — Audio incompleto donde falta el precio
+// CASO 4: Generación Resiliente — Envía presupuesto y avisa de partidas sin precio
 // -----------------------------------------------------------------------------
-console.log("TEST 4: Detección de errores y seguridad cuando falta el precio");
-const audioIncompleto = `
-Para Pedro en Calle Mayor:
-- Quiero cambiar la bañera por plato de ducha pero no sé cuánto cobrarle todavía.
-- Alicatar la pared del baño.
+console.log("TEST 4: Audio con partidas válidas Y una partida sin precio (Genera + Avisa)");
+const audioConAdvertencia = `
+Para Don Pedro Gómez en Calle Mayor cuarenta:
+- Cambiar la bañera y poner plato de ducha por cuatrocientos cincuenta euros.
+- Alicatar la pared del baño que no sé cuánto cobrarle todavía.
+- Grifería termostática por ochenta euros.
 `;
 
-const res4 = engine.process(audioIncompleto);
-assert(res4.success === false, "El motor RECHAZA generar un presupuesto si faltan importes");
-assert(res4.errors.length > 0, "Devuelve la lista de errores para avisar al profesional");
-console.log(`  Mensaje de alerta emitido: "${res4.errors[0]}"`);
-console.log("");
+const res4 = engine.process(audioConAdvertencia);
+assert(res4.success === true, "El motor GENERA el presupuesto con las partidas valoradas (no se pierde el trabajo)");
+assert(res4.hasWarnings === true, "Activa la bandera de advertencias (hasWarnings: true)");
+assert(res4.items.length === 2, "Incluye las 2 partidas con precio (plato y grifería)");
+assert(res4.financials.subtotal === 530, `Calcula el subtotal exacto de las partidas valoradas (450 + 80 = 530 €)`);
+assert(res4.warnings.length > 0, "Registra la partida pendiente en la lista de avisos");
+assert(res4.warnings[0].includes("Alicatar"), "Identifica con precisión qué partida quedó pendiente ('Alicatar')");
+assert(res4.assistantFeedback.includes("⚠️"), "Genera el mensaje de WhatsApp avisando al instalador con soluciones");
+
+console.log("\n  Mensaje automático que WhatsApp enviará al instalador:");
+console.log("  ------------------------------------------------------------");
+console.log("  " + res4.assistantFeedback.replace(/\n/g, "\n  "));
+console.log("  ------------------------------------------------------------\n");
+
+// -----------------------------------------------------------------------------
+// CASO 5: Audio sin ningún precio — Alerta de ayuda
+// -----------------------------------------------------------------------------
+console.log("TEST 5: Audio sin ningún precio en absoluto (Guía al instalador)");
+const audioSinNadaDePrecio = `
+Hola Pedro, ve a mirar la casa de Calle Mayor y me dices qué hacemos con el baño.
+`;
+
+const res5 = engine.process(audioSinNadaDePrecio);
+assert(res5.success === false, "Si no hay ningún precio, frena y pide aclaración");
+assert(res5.assistantFeedback.includes("❌"), "Emite mensaje de ayuda explicando qué falta");
+console.log(`  Mensaje de ayuda emitido: "${res5.assistantFeedback}"\n`);
 
 // -----------------------------------------------------------------------------
 // RESUMEN FINAL
@@ -140,7 +162,7 @@ console.log("");
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
-  console.log("🛡️  El motor está 100% blindado contra palabras coloquiales y errores.");
+  console.log("🛡️  El motor es resiliente: genera presupuestos sin perder datos y avisa de omisiones.");
 } else {
   console.error(`❌ RESULTADO: ${passedCount}/${totalCount} pruebas superadas.`);
 }

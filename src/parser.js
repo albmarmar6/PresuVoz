@@ -224,7 +224,7 @@ export class PresuVozParser {
       };
     }
 
-    const errors = [];
+    const warnings = [];
     const clientName = this.extractClientName(rawTranscript);
     const clientAddress = this.extractAddress(rawTranscript);
 
@@ -273,25 +273,43 @@ export class PresuVozParser {
           });
         }
       } else {
-        // La línea parecía una partida pero NO tenía precio
-        if (/(cambiar|instalar|poner|alicatar|demolici[oó]n|reparar|revisi[oó]n|arrendamiento|obra)/i.test(line)) {
-          errors.push(`Se detectó la partida "${line.slice(0, 45)}..." pero no se especificó un importe en euros.`);
+        // La línea parecía una partida de trabajo pero NO tenía precio
+        if (/(cambiar|instalar|poner|alicatar|demolici[oó]n|reparar|revisi[oó]n|fabricaci[oó]n|suelo|tuber[ií]a|grifo)/i.test(line)) {
+          const cleanPending = this.cleanRawText(line);
+          warnings.push(`Partida pendiente de valorar: "${cleanPending.slice(0, 50)}" (no se mencionó precio en el audio).`);
+        } else if (line.length > 15 && !/(hola|buenos\s+d[ií]as|adi[oó]s|un\s+saludo)/i.test(line)) {
+          // Fragmento con texto que no se interpretó como partida ni como condición
+          warnings.push(`Fragmento no procesado: "${line.slice(0, 45)}..."`);
         }
       }
     }
 
-    // Validación de seguridad obligatoria
+    // Solo es inválido si NO se pudo rescatar ni una sola partida con precio
     if (rawItems.length === 0) {
       return {
         isValid: false,
-        errors: errors.length > 0 ? errors : ["No se encontraron partidas válidas con precio asignado en el audio."],
+        hasWarnings: true,
+        warnings: warnings.length > 0 ? warnings : ["No se encontraron partidas con precio asignado en el audio."],
+        assistantFeedback: "❌ No he podido generar el presupuesto porque no detecté ningún importe en euros. Por favor, indícame al menos una partida con su precio (ejemplo: 'cambiar plato de ducha 400 euros').",
         data: null
       };
     }
 
+    // Si hay al menos 1 partida válida, SE GENERA EL PRESUPUESTO y se emite el feedback de WhatsApp
+    let assistantFeedback = "";
+    if (warnings.length > 0) {
+      assistantFeedback = `⚠️ He generado el presupuesto con ${rawItems.length} partida(s) valorada(s), pero he detectado estos detalles para tu revisión:\n` +
+        warnings.map(w => `• ${w}`).join("\n") +
+        `\n\n👉 Puedes enviar el presupuesto tal cual o mandarme otro audio para completarlo (ej: "Ponle 200€ al alicatado").`;
+    } else {
+      assistantFeedback = `✅ ¡Presupuesto generado con éxito y sin incidencias! Todas las partidas e importes están perfectamente cuadrados.`;
+    }
+
     return {
       isValid: true,
-      errors,
+      hasWarnings: warnings.length > 0,
+      warnings,
+      assistantFeedback,
       data: {
         clientName,
         clientAddress,

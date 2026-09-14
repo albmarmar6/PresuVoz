@@ -96,6 +96,9 @@ export class PresuVozEngine {
     let clientAddress = rawInput.clientAddress;
     let itemsToProcess = rawInput.items;
 
+    let warnings = [];
+    let assistantFeedback = "✅ ¡Presupuesto generado con éxito y sin incidencias!";
+
     // Si no se proporcionaron partidas pre-estructuradas, parsear la transcripción cruda
     if (!itemsToProcess || !Array.isArray(itemsToProcess) || itemsToProcess.length === 0) {
       const parseResult = PresuVozParser.parseTranscript(rawText);
@@ -103,12 +106,17 @@ export class PresuVozEngine {
       if (!parseResult.isValid) {
         return {
           success: false,
-          errors: parseResult.errors,
+          hasWarnings: true,
+          errors: parseResult.warnings,
+          warnings: parseResult.warnings,
+          assistantFeedback: parseResult.assistantFeedback,
           budget: null
         };
       }
 
       itemsToProcess = parseResult.data.items;
+      warnings = parseResult.warnings || [];
+      assistantFeedback = parseResult.assistantFeedback;
       if (!clientName) clientName = parseResult.data.clientName;
       if (!clientAddress) clientAddress = parseResult.data.clientAddress;
     }
@@ -169,12 +177,18 @@ export class PresuVozEngine {
         conditions: rawInput.customConditions || terms.textConditions
       },
       status: "PENDIENTE_FIRMA",
-      signUrl: `https://presuvoz.app/f/${Math.random().toString(36).substring(2, 9)}`
+      signUrl: `https://presuvoz.app/f/${Math.random().toString(36).substring(2, 9)}`,
+      hasWarnings: warnings.length > 0,
+      warnings,
+      assistantFeedback
     };
 
     // Objeto compatible con desestructuración directa y chequeo de éxito
     return Object.assign(budget, {
       success: true,
+      hasWarnings: warnings.length > 0,
+      warnings,
+      assistantFeedback,
       errors: [],
       budget
     });
