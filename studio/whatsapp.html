@@ -9,7 +9,6 @@
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
     * { font-family: 'Inter', sans-serif; }
 
-    /* Estilo sutil de fondo de WhatsApp */
     .wa-bg {
       background-color: #0b141a;
       background-image: radial-gradient(rgba(255,255,255,0.03) 1px, transparent 0);
@@ -24,6 +23,11 @@
     .pulse-mic {
       animation: pulse-ring 1.5s ease-in-out infinite;
     }
+
+    /* Scrollbar discreto */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2a3942; border-radius: 4px; }
   </style>
 </head>
 <body class="bg-[#05070a] text-slate-200 min-h-screen flex flex-col items-center justify-center p-2 sm:p-6">
@@ -53,21 +57,21 @@
       </div>
 
       <div class="flex items-center gap-2">
-        <button onclick="resetChat()" class="text-xs text-slate-400 hover:text-white bg-slate-800/80 px-2.5 py-1 rounded-lg border border-slate-700 transition-colors">
+        <button onclick="resetChat()" class="text-xs text-slate-400 hover:text-white bg-slate-800/80 px-2.5 py-1 rounded-lg border border-slate-700 transition-colors cursor-pointer">
           Reiniciar
         </button>
       </div>
     </div>
 
     <!-- Suggested chips bar -->
-    <div class="bg-[#182229] px-3 py-2 border-b border-slate-800/80 overflow-x-auto flex gap-2 no-scrollbar shrink-0 text-xs">
-      <button onclick="sendQuick(0)" class="whitespace-nowrap bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-300 px-3 py-1 rounded-full transition-all">
-        Audio 1: Baño completo (con slang)
+    <div class="bg-[#182229] px-3 py-2 border-b border-slate-800/80 overflow-x-auto flex gap-2 shrink-0 text-xs">
+      <button onclick="sendQuick(0)" class="whitespace-nowrap bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-300 px-3 py-1 rounded-full transition-all cursor-pointer">
+        Audio 1: Baño (con slang)
       </button>
-      <button onclick="sendQuick(1)" class="whitespace-nowrap bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-300 px-3 py-1 rounded-full transition-all">
+      <button onclick="sendQuick(1)" class="whitespace-nowrap bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-300 px-3 py-1 rounded-full transition-all cursor-pointer">
         Audio 2: Precio olvidado
       </button>
-      <button onclick="sendQuick(2)" class="whitespace-nowrap bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-300 px-3 py-1 rounded-full transition-all">
+      <button onclick="sendQuick(2)" class="whitespace-nowrap bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-300 px-3 py-1 rounded-full transition-all cursor-pointer">
         Audio 3: Medición sin precios
       </button>
     </div>
@@ -92,7 +96,7 @@
         <span class="w-2.5 h-2.5 rounded-full bg-rose-500 pulse-mic"></span>
         <span class="text-xs text-rose-200 font-medium">Grabando audio... habla con normalidad</span>
       </div>
-      <button onclick="stopVoiceRecord()" class="text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 px-2.5 py-1 rounded-lg">
+      <button onclick="stopVoiceRecord()" class="text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 px-2.5 py-1 rounded-lg cursor-pointer">
         Enviar audio
       </button>
     </div>
@@ -123,21 +127,669 @@
 
   <p class="text-xs text-slate-500 mt-4 text-center">Simulador Web en tiempo real de PresuVoz. Todo el procesamiento se realiza en local sin enviar audios a servidores externos.</p>
 
-  <script type="module">
-    import { PresuVozEngine } from '../src/engine.js';
-    import { PresuVozGenerator } from '../src/generator.js';
+  <!-- STANDALONE INLINE ENGINE & PARSER (Sin módulos externos ni bloqueos CORS en file:///) -->
+  <script>
+    // -------------------------------------------------------------------------
+    // 1. Parser & Sanitizer
+    // -------------------------------------------------------------------------
+    const PresuVozParser = {
+      TECHNICAL_DICTIONARY: [
+        { regex: /(cambiar|quitar|tirar|demoler)\s*(la)?\s*bañera\s*(y|por|\+)\s*(poner|instalar|montar)?\s*(el)?\s*plato/i, formal: "Demolición de bañera existente, desescombro y colocación de plato de ducha de resina antideslizante con válvula" },
+        { regex: /(cambiar|quitar|tirar|demoler)\s*(la)?\s*bañera/i, formal: "Demolición de bañera existente, desescombro y retirada a vertedero o punto limpio autorizado" },
+        { regex: /(poner|instalar|montar|colocar)\s*(un)?\s*(el)?\s*plato\s*(de)?\s*(ducha)?/i, formal: "Suministro e instalación de plato de ducha de resina mineral antideslizante con válvula sifónica de gran caudal" },
+        { regex: /(alicatar|azulejos?|revestimiento)\s*(de)?\s*(la)?\s*(zona)?\s*(de)?\s*(ducha|pared|baño)/i, formal: "Revestimiento y rejuntado de paramentos verticales mediante alicatado cerámico con mortero adhesivo impermeable" },
+        { regex: /(mampara|cristal)\s*(fija?|corredera)?/i, formal: "Suministro y montaje de mampara de seguridad en vidrio templado (8 mm) con perfilería de aluminio y tratamiento antical" },
+        { regex: /(grifer[ií]a|grifo|termost[aá]tic[ao])/i, formal: "Suministro e instalación de conjunto de grifería monomando / termostática con rociador y flexo" },
+        { regex: /(mover|tomas?|tuber[ií]as?)\s*(de)?\s*(agua|fontaner[ií]a|desag[uü]e)/i, formal: "Adecuación de tomas de fontanería para agua fría/caliente y conexión de desagüe a bajante" },
+        { regex: /(cambiar|poner|adecuar)?\s*(el)?\s*diferencial|magnetot[eé]rmico|cuadro\s*(el[eé]ctrico)?/i, formal: "Adecuación de cuadro general de mando y protección mediante suministro e instalación de interruptor diferencial 40A y magnetotérmicos" },
+        { regex: /(l[ií]nea\s*(nueva|reforzada|independiente)?|cable)\s*(para\s*(el)?\s*horno|6\s*mm)/i, formal: "Instalación de línea eléctrica independiente reforzada (sección 6 mm²) bajo tubo corrugado ignífugo para horno y placa" },
+        { regex: /(enchufes?|tomas?\s*de\s*corriente|mecanismos?|rozas)/i, formal: "Suministro y montaje de tomas de corriente tipo Schuko con toma de tierra y embellecedores de primera calidad" },
+        { regex: /(split|aire\s*acondicionado|clima)\s*([0-9]+\s*frigor[ií]as)?/i, formal: "Suministro e instalación de equipo de aire acondicionado tipo Split (unidad interior y exterior) con bomba de calor y alta eficiencia energética" },
+        { regex: /(pintura|pintar|enlucir|alisar)/i, formal: "Preparación de paramentos, emplastecido y aplicación de pintura plástica lisa de alta cubrición en techos y paredes" },
+        { regex: /(armario\s*empotrado|fabricaci[oó]n\s*a\s*medida)/i, formal: "Fabricación a medida e instalación de armario empotrado con puertas correderas, acabado melamínico de alta resistencia y distribución interior a medida" },
+        { regex: /(cepillar|ajustar|manivelas?|puertas?\s*de\s*paso)/i, formal: "Revisión, cepillado de holguras, ajuste perimetral y sustitución de manivelas en puertas de paso de madera" },
+        { regex: /(suelo|tarima\s*flotante|laminado|ac5)/i, formal: "Suministro e instalación de suelo laminado de alta resistencia (AC5) con base aislante acústica y zócalos perimetrales" }
+      ],
 
-    const engine = new PresuVozEngine({
-      name: "Carpintería y Reformas Manolo S.L.",
-      cif: "B-41987654",
-      phone: "620 44 55 66",
-      email: "presupuestos@carpinteriamanolo.es",
-      address: "Polígono Industrial La Negrilla, Nave 12, Sevilla",
-      logoText: "CM",
-      brandColor: "#9a3412",
-      professionalSigner: "Manuel Sánchez (Gerente)"
-    });
+      JUNK_WORDS_PATTERNS: [
+        /oye\s+(carlos|manolo|paco|socio|t[ií]o|compañero)?/gi,
+        /qu[eé]\s+pasa\s+(t[ií]o|socio|paco)?/gi,
+        /mira\s+(que|te\s+grabo)?/gi,
+        /salgo\s+de\s+la\s+obra/gi,
+        /vaya\s+tela/gi,
+        /vengo\s+de\s+ver\s+al\s+cliente/gi,
+        /casi\s+me\s+muerde\s+el\s+perro(\s+del\s+cliente)?/gi,
+        /no\s+sea\s+rata/gi,
+        /a\s+ver\s+si\s+no\s+nos\s+deja\s+tirados/gi,
+        /que\s+no\s+tiene\s+un\s+duro/gi,
+        /ap[uú]ntale?\s+(esto|ah[ií])?/gi,
+        /m[aá]ndaselo\s+(r[aá]pido|ya)?/gi,
+        /dile\s+que/gi,
+        /bueno\s+a\s+ver/gi,
+        /una\s+pasta/gi,
+        /joder/gi,
+        /hostia/gi
+      ],
 
+      SPANISH_NUMBERS: {
+        "cero": 0, "un": 1, "uno": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5,
+        "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10, "once": 11, "doce": 12,
+        "trece": 13, "catorce": 14, "quince": 15, "dieciséis": 16, "diecisiete": 17, "dieciocho": 18,
+        "diecinueve": 19, "veinte": 20, "veintiuno": 21, "veintidós": 22, "veintitrés": 23,
+        "veinticuatro": 24, "veinticinco": 25, "treinta": 30, "cuarenta": 40, "cincuenta": 50,
+        "sesenta": 60, "setenta": 70, "ochenta": 80, "noventa": 90, "cien": 100, "ciento": 100,
+        "doscientos": 200, "trescientos": 300, "cuatrocientos": 400, "quinientos": 500,
+        "seiscientos": 600, "setecientos": 700, "ochocientos": 800, "novecientos": 900, "mil": 1000
+      },
+
+      parsePriceString: function(str) {
+        if (!str) return 0;
+        const cleaned = str.replace(/pavos|eurillos|euros|€/gi, "").trim();
+        const directNum = parseFloat(cleaned.replace(/\./g, "").replace(",", "."));
+        if (!isNaN(directNum) && directNum > 0) return directNum;
+
+        const words = cleaned.toLowerCase().split(/\s+/);
+        let total = 0, current = 0;
+        for (const word of words) {
+          if (word === "y") continue;
+          if (this.SPANISH_NUMBERS[word] !== undefined) {
+            const val = this.SPANISH_NUMBERS[word];
+            if (val === 1000) {
+              current = current === 0 ? 1000 : current * 1000;
+              total += current;
+              current = 0;
+            } else {
+              current += val;
+            }
+          }
+        }
+        total += current;
+        return total > 0 ? total : 0;
+      },
+
+      extractClientName: function(text) {
+        const match = text.match(/(?:para|cliente:?)\s+(?:don|doña)?\s*([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){0,2})(?=\s+(?:en|con|de|del|para|que)\b|:|$)/i);
+        return match ? match[1].trim() : "Cliente Particular";
+      },
+
+      extractAddress: function(text) {
+        const match = text.match(/en\s+((?:calle|avenida|avda\.?|plaza|paseo|camino|carretera)\s+[^,\.\n]+?(?:\d+|[a-záéíóúñ\s]+)?)/i);
+        if (match) {
+          let addr = match[1].replace(/\s+(hay\s+que|para|con|al|que|dile)\b.*/i, "").trim();
+          return addr.replace(/[:,\.\-]+$/, "").trim();
+        }
+        return "Ubicación obra según visita técnica";
+      },
+
+      cleanRawText: function(text) {
+        let result = text;
+        for (const pattern of this.JUNK_WORDS_PATTERNS) {
+          result = result.replace(pattern, " ");
+        }
+        return result.replace(/\s+/g, " ").trim();
+      },
+
+      normalizeItemDescription: function(rawDesc) {
+        const cleaned = this.cleanRawText(rawDesc);
+        for (const entry of this.TECHNICAL_DICTIONARY) {
+          if (entry.regex.test(cleaned)) return entry.formal;
+        }
+        if (cleaned.length > 5) {
+          return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+        }
+        return "Partida técnica de obra / instalación según especificaciones";
+      },
+
+      parseTranscript: function(rawTranscript) {
+        if (!rawTranscript || typeof rawTranscript !== "string") {
+          return { isValid: false, warnings: ["El audio o transcripción está vacío."], assistantFeedback: "El texto está vacío." };
+        }
+
+        const warnings = [];
+        const clientName = this.extractClientName(rawTranscript);
+        const clientAddress = this.extractAddress(rawTranscript);
+
+        const lines = rawTranscript
+          .split(/\n|(?:\s*-\s*)|\b(?:primero|segundo|tercero|luego|adem[aá]s|y\s+tambi[eé]n)\b/i)
+          .map(l => l.trim())
+          .filter(l => l.length > 8);
+
+        const rawItems = [];
+        const priceRegex = /(?:por\s+|[:\s])?((?:\d+(?:[\.,]\d{1,2})?|\b(?:(?:mil|doscient[ao]s|trescient[ao]s|cuatrocient[ao]s|quinient[ao]s|seiscient[ao]s|setecient[ao]s|ochocient[ao]s|novecient[ao]s|cien|ciento|veinte|veinti[a-záéíóúñ]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|diez|once|doce|trece|catorce|quince|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)\s*(?:y\s*)?)+))\s*(?:euros?|pavos|€)\b/i;
+
+        for (const line of lines) {
+          if (/(^para\s+[A-Z]|calle|avenida|paseo|plaza|vivienda\s+habitual|validez|anticipo|cobramos\s+[0-9]+%|pague\s+el\s+[0-9]+%|dile\s+que\s+no\s+sea\s+rata)/i.test(line)) {
+            continue;
+          }
+
+          const priceMatch = line.match(priceRegex);
+
+          if (priceMatch) {
+            const rawPriceStr = priceMatch[1].trim();
+            const price = this.parsePriceString(rawPriceStr);
+            let desc = line.replace(priceMatch[0], "").replace(/^[\s:\-,]+/, "").replace(/[\s\.\-,]+$/, "").trim();
+            desc = this.cleanRawText(desc);
+
+            let qty = 1;
+            const qtyMatch = desc.match(/^([0-9]+)\s+/);
+            if (qtyMatch) {
+              qty = parseInt(qtyMatch[1], 10);
+              desc = desc.replace(qtyMatch[0], "");
+            }
+
+            if (price > 0 && desc.length > 3) {
+              const formalDesc = this.normalizeItemDescription(desc);
+              rawItems.push({
+                description: formalDesc,
+                qty,
+                unitPrice: qty > 1 ? Number((price / qty).toFixed(2)) : price,
+                total: price,
+                isPricePending: false
+              });
+            }
+          } else {
+            if (/(cambiar|instalar|poner|alicatar|demolici[oó]n|reparar|revisi[oó]n|fabricaci[oó]n|suelo|tarima|tuber[ií]a|grifo|baño|cocina|cuadro|puerta|ventana|split|climatizaci[oó]n|pint(ar|ura)|tabique|rozas)/i.test(line)) {
+              const cleanPending = this.cleanRawText(line);
+              const formalDesc = this.normalizeItemDescription(cleanPending);
+              rawItems.push({
+                description: formalDesc,
+                qty: 1,
+                unitPrice: 0,
+                total: 0,
+                isPricePending: true
+              });
+              warnings.push(`Partida pendiente de valorar: "${formalDesc}" (no se mencionó precio en el audio).`);
+            } else if (line.length > 15 && !/(hola|buenos\s+d[ií]as|adi[oó]s|un\s+saludo)/i.test(line)) {
+              warnings.push(`Fragmento no procesado: "${line.slice(0, 45)}..."`);
+            }
+          }
+        }
+
+        if (rawItems.length === 0) {
+          return {
+            isValid: false,
+            isDraft: false,
+            hasWarnings: true,
+            warnings: ["No se detectó ninguna partida de trabajo o instalación en el audio."],
+            assistantFeedback: "❌ No he podido generar el presupuesto porque no detecté ninguna partida de obra. Por favor, indícame qué trabajos hay que realizar (ejemplo: 'cambiar plato de ducha y mampara').",
+            data: null
+          };
+        }
+
+        const hasPricedItems = rawItems.some(it => it.total > 0);
+        const isDraft = !hasPricedItems;
+
+        let assistantFeedback = "";
+        if (isDraft) {
+          assistantFeedback = `📋 He registrado tu visita técnica con ${rawItems.length} partida(s) guardadas (Borrador de medición):\n` +
+            rawItems.map((it, i) => `• ${i + 1}. ${it.description} — [Pendiente de valorar]`).join("\n") +
+            `\n\n👉 Ya tienes el borrador listo. Cuando quieras poner los precios, solo responde por voz o texto (ejemplo: "Ponle 400 al plato y 150 a la mampara").`;
+        } else if (warnings.length > 0) {
+          const pricedCount = rawItems.filter(it => !it.isPricePending).length;
+          assistantFeedback = `⚠️ He generado el presupuesto con ${pricedCount} partida(s) valorada(s), pero he detectado estos detalles para tu revisión:\n` +
+            warnings.map(w => `• ${w}`).join("\n") +
+            `\n\n👉 Puedes enviar el presupuesto tal cual o mandarme otro audio para rellenar lo que falta (ejemplo: "Ponle 250 al alicatado").`;
+        } else {
+          assistantFeedback = `✅ ¡Presupuesto generado con éxito y sin incidencias! Todas las partidas e importes están perfectamente cuadrados.`;
+        }
+
+        return {
+          isValid: true,
+          isDraft,
+          hasWarnings: warnings.length > 0 || isDraft,
+          warnings,
+          assistantFeedback,
+          data: { clientName, clientAddress, items: rawItems }
+        };
+      },
+
+      applyConversationalUpdate: function(items, updateText) {
+        if (!items || items.length === 0 || !updateText) {
+          return { success: false, message: "No hay partidas disponibles para actualizar." };
+        }
+
+        const priceRegex = /(?:por\s+|[:\s])?((?:\d+(?:[\.,]\d{1,2})?|\b(?:(?:mil|doscient[ao]s|trescient[ao]s|cuatrocient[ao]s|quinient[ao]s|seiscient[ao]s|setecient[ao]s|ochocient[ao]s|novecient[ao]s|cien|ciento|veinte|veinti[a-záéíóúñ]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|diez|once|doce|trece|catorce|quince|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)\s*(?:y\s*)?)+))\s*(?:euros?|pavos|€)?\b/i;
+        const priceMatch = updateText.match(priceRegex);
+
+        if (!priceMatch) {
+          return { success: false, message: "No detecté ningún importe en tu mensaje. Por favor indica una cifra (ejemplo: 'Ponle 250 al alicatado')." };
+        }
+
+        const newPrice = this.parsePriceString(priceMatch[1].trim());
+        if (newPrice <= 0) {
+          return { success: false, message: "El importe especificado debe ser superior a cero." };
+        }
+
+        const indexMatch = updateText.match(/(?:partida|l[ií]nea|la|n[uú]mero)\s*([0-9]+)/i);
+        if (indexMatch) {
+          const idx = parseInt(indexMatch[1], 10) - 1;
+          if (items[idx]) {
+            items[idx].unitPrice = newPrice;
+            items[idx].total = Number((newPrice * items[idx].qty).toFixed(2));
+            items[idx].isPricePending = false;
+            return {
+              success: true,
+              updatedItem: items[idx],
+              message: `✅ Partida ${idx + 1} actualizada: "${items[idx].description}" ahora tiene un importe de ${items[idx].total.toFixed(2)} €.`
+            };
+          }
+        }
+
+        const lowerText = updateText.toLowerCase();
+        let targetItem = null;
+        const candidates = items.filter(it => it.isPricePending).concat(items.filter(it => !it.isPricePending));
+
+        for (const item of candidates) {
+          const descWords = item.description.toLowerCase().split(/\s+/).filter(w => w.length > 4);
+          for (const word of descWords) {
+            if (lowerText.includes(word) || lowerText.includes(word.slice(0, -1))) {
+              targetItem = item;
+              break;
+            }
+          }
+          if (targetItem) break;
+        }
+
+        if (!targetItem) {
+          const pending = items.filter(it => it.isPricePending);
+          if (pending.length === 1) targetItem = pending[0];
+        }
+
+        if (targetItem) {
+          targetItem.unitPrice = newPrice;
+          targetItem.total = Number((newPrice * targetItem.qty).toFixed(2));
+          targetItem.isPricePending = false;
+          return {
+            success: true,
+            updatedItem: targetItem,
+            message: `✅ Partida actualizada: "${targetItem.description}" asignada a ${targetItem.total.toFixed(2)} €.`
+          };
+        }
+
+        return {
+          success: false,
+          message: `He detectado el importe de ${newPrice} €, pero no estoy seguro de a qué partida te refieres. Por favor indícamelo con más claridad (ejemplo: 'Ponle ${newPrice} al alicatado').`
+        };
+      }
+    };
+
+    // -------------------------------------------------------------------------
+    // 2. PresuVoz Engine
+    // -------------------------------------------------------------------------
+    function PresuVozEngine(companyConfig) {
+      this.company = companyConfig || {
+        name: "Carpintería y Reformas Manolo S.L.",
+        cif: "B-41987654",
+        phone: "620 44 55 66",
+        email: "presupuestos@carpinteriamanolo.es",
+        address: "Polígono Industrial La Negrilla, Nave 12, Sevilla",
+        logoText: "CM",
+        brandColor: "#9a3412",
+        professionalSigner: "Manuel Sánchez (Gerente)"
+      };
+
+      this.detectTaxRate = function(text) {
+        const lower = text.toLowerCase();
+        const kw = ["reforma de vivienda", "vivienda habitual", "piso particular", "baño", "cocina", "cambio de bañera", "plato de ducha", "iva reducido", "iva del 10"];
+        for (const k of kw) {
+          if (lower.includes(k)) return 0.10;
+        }
+        return 0.21;
+      };
+
+      this.extractTerms = function(text) {
+        const lower = text.toLowerCase();
+        let advancePercentage = 30;
+        let validityDays = 15;
+
+        const advanceDigitMatch = lower.match(/(\d{1,2})\s*(?:%|por\s*ciento)\s*(?:por\s*adelantado|a\s*la\s*firma|al\s*inicio|de\s*anticipo)/);
+        if (advanceDigitMatch) {
+          advancePercentage = parseInt(advanceDigitMatch[1], 10);
+        } else {
+          const advanceWordMatch = lower.match(/(veinte|veinticinco|treinta|cuarenta|cincuenta)\s*por\s*ciento\s*(?:por\s*adelantado|a\s*la\s*firma|al\s*inicio|de\s*anticipo)/);
+          if (advanceWordMatch) {
+            const map = { "veinte": 20, "veinticinco": 25, "treinta": 30, "cuarenta": 40, "cincuenta": 50 };
+            if (map[advanceWordMatch[1]]) advancePercentage = map[advanceWordMatch[1]];
+          }
+        }
+
+        const validityMatch = lower.match(/(\d{1,2}|diez|quince|veinte|treinta)\s*d[ií]as/);
+        if (validityMatch) {
+          const map = { "diez": 10, "quince": 15, "veinte": 20, "treinta": 30 };
+          validityDays = map[validityMatch[1]] || parseInt(validityMatch[1], 10) || 15;
+        }
+
+        return {
+          advancePercentage,
+          validityDays,
+          textConditions: `${advancePercentage}% al aceptar el presupuesto para reserva de fechas y acopio de materiales. ${100 - advancePercentage}% a la finalización de los trabajos.`
+        };
+      };
+
+      this.process = function(input) {
+        const rawInput = typeof input === "string" ? { rawTranscript: input } : (input || {});
+        const rawText = rawInput.rawTranscript || "";
+        let clientName = rawInput.clientName;
+        let clientAddress = rawInput.clientAddress;
+        let itemsToProcess = rawInput.items;
+
+        let warnings = [];
+        let assistantFeedback = "✅ ¡Presupuesto generado con éxito y sin incidencias!";
+
+        if (!itemsToProcess || !Array.isArray(itemsToProcess) || itemsToProcess.length === 0) {
+          const parseResult = PresuVozParser.parseTranscript(rawText);
+          if (!parseResult.isValid) {
+            return {
+              success: false,
+              hasWarnings: true,
+              errors: parseResult.warnings,
+              warnings: parseResult.warnings,
+              assistantFeedback: parseResult.assistantFeedback,
+              budget: null
+            };
+          }
+
+          itemsToProcess = parseResult.data.items;
+          warnings = parseResult.warnings || [];
+          assistantFeedback = parseResult.assistantFeedback;
+          if (!clientName) clientName = parseResult.data.clientName;
+          if (!clientAddress) clientAddress = parseResult.data.clientAddress;
+        }
+
+        const taxRate = rawInput.taxRate !== undefined ? rawInput.taxRate : this.detectTaxRate(rawText);
+        const terms = this.extractTerms(rawText);
+
+        let subtotal = 0;
+        const items = itemsToProcess.map((item, index) => {
+          const qty = item.qty || 1;
+          const unitPrice = item.price !== undefined ? item.price : (item.unitPrice || 0);
+          const total = Number((qty * unitPrice).toFixed(2));
+          subtotal += total;
+
+          const cleanDesc = PresuVozParser.normalizeItemDescription(item.description || "");
+          const isPricePending = item.isPricePending !== undefined ? item.isPricePending : (total === 0);
+
+          return {
+            id: index + 1,
+            description: cleanDesc,
+            qty,
+            unitPrice,
+            total,
+            isPricePending
+          };
+        });
+
+        subtotal = Number(subtotal.toFixed(2));
+        const taxAmount = Number((subtotal * taxRate).toFixed(2));
+        const totalAmount = Number((subtotal + taxAmount).toFixed(2));
+        const advanceAmount = Number(((totalAmount * terms.advancePercentage) / 100).toFixed(2));
+
+        const budgetId = `PRE-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+        const issueDate = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        const isDraft = items.every(it => it.total === 0);
+
+        const budget = {
+          id: budgetId,
+          issueDate,
+          company: this.company,
+          client: {
+            name: clientName || "Cliente Particular",
+            address: clientAddress || "Ubicación obra según visita",
+            phone: rawInput.clientPhone || "No especificado",
+            email: rawInput.clientEmail || null
+          },
+          items,
+          financials: {
+            subtotal,
+            taxRatePercentage: Math.round(taxRate * 100),
+            taxAmount,
+            totalAmount,
+            advancePercentage: terms.advancePercentage,
+            advanceAmount,
+            remainingAmount: Number((totalAmount - advanceAmount).toFixed(2))
+          },
+          terms: {
+            validityDays: terms.validityDays,
+            conditions: rawInput.customConditions || terms.textConditions
+          },
+          isDraft,
+          status: isDraft ? "BORRADOR_MEDICION" : "PENDIENTE_FIRMA",
+          signUrl: `https://presuvoz.app/f/${Math.random().toString(36).substring(2, 9)}`,
+          hasWarnings: warnings.length > 0 || isDraft,
+          warnings,
+          assistantFeedback
+        };
+
+        return Object.assign(budget, {
+          success: true,
+          isDraft,
+          hasWarnings: warnings.length > 0 || isDraft,
+          warnings,
+          assistantFeedback,
+          errors: [],
+          budget
+        });
+      };
+
+      this.updateBudgetPrice = function(budget, updateText) {
+        if (!budget || !budget.items) return { success: false, message: "Presupuesto no válido." };
+
+        const updateRes = PresuVozParser.applyConversationalUpdate(budget.items, updateText);
+        if (!updateRes.success) {
+          return { success: false, budget, assistantMessage: updateRes.message };
+        }
+
+        const taxRate = (budget.financials.taxRatePercentage || 21) / 100;
+        const advancePct = budget.financials.advancePercentage || 30;
+
+        let subtotal = 0;
+        budget.items.forEach(item => { subtotal += item.total || 0; });
+
+        subtotal = Number(subtotal.toFixed(2));
+        const taxAmount = Number((subtotal * taxRate).toFixed(2));
+        const totalAmount = Number((subtotal + taxAmount).toFixed(2));
+        const advanceAmount = Number(((totalAmount * advancePct) / 100).toFixed(2));
+
+        budget.financials.subtotal = subtotal;
+        budget.financials.taxAmount = taxAmount;
+        budget.financials.totalAmount = totalAmount;
+        budget.financials.advanceAmount = advanceAmount;
+        budget.financials.remainingAmount = Number((totalAmount - advanceAmount).toFixed(2));
+
+        const pendingCount = budget.items.filter(it => it.isPricePending).length;
+        budget.hasWarnings = pendingCount > 0;
+        budget.isDraft = budget.items.every(it => it.total === 0);
+        budget.status = budget.isDraft ? "BORRADOR_MEDICION" : "PENDIENTE_FIRMA";
+
+        let finalMsg = updateRes.message;
+        if (pendingCount === 0) {
+          finalMsg += `\n\n🎉 ¡Todas las partidas están ahora completadas y valoradas! Total del presupuesto: ${budget.financials.totalAmount.toFixed(2)} € (IVA ${budget.financials.taxRatePercentage}% incl.). Ya puedes enviar el documento para firmar.`;
+        } else {
+          finalMsg += `\n\nQuedan ${pendingCount} partida(s) pendiente(s) de valorar. Total acumulado actual: ${budget.financials.totalAmount.toFixed(2)} €.`;
+        }
+
+        budget.assistantFeedback = finalMsg;
+        return { success: true, budget, assistantMessage: finalMsg };
+      };
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. PresuVoz Generator (Plantilla HTML v2)
+    // -------------------------------------------------------------------------
+    const PresuVozGenerator = {
+      generateHTML: function(budget) {
+        const itemsRows = budget.items.map(item => {
+          const isPending = item.isPricePending || item.total === 0;
+          const unitPriceDisplay = isPending 
+            ? `<span class="text-slate-400 italic">[Pendiente]</span>`
+            : `${item.unitPrice.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+          const totalDisplay = isPending
+            ? `<span class="text-amber-700 font-medium italic text-[11px] bg-amber-50 px-2 py-0.5 rounded border border-amber-200">A valorar</span>`
+            : `${item.total.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+
+          return `
+            <tr>
+              <td class="py-4 pr-6">
+                <p class="text-sm font-medium text-slate-800">${item.description}</p>
+              </td>
+              <td class="text-right py-4 pl-6 text-slate-500 align-top">${item.qty}</td>
+              <td class="text-right py-4 pl-6 text-slate-500 align-top whitespace-nowrap">${unitPriceDisplay}</td>
+              <td class="text-right py-4 pl-6 font-semibold text-slate-800 align-top whitespace-nowrap">${totalDisplay}</td>
+            </tr>
+          `;
+        }).join('');
+
+        const statusPill = budget.isDraft
+          ? `<span id="statusPill" class="text-xs font-semibold text-sky-700 bg-sky-50 border border-sky-200 px-3 py-1.5 rounded-lg">Borrador de Visita Técnica</span>`
+          : `<span id="statusPill" class="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg">Pendiente de firma</span>`;
+
+        const docTypeLabel = budget.isDraft ? "Borrador de Visita Técnica" : "Presupuesto";
+
+        return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${docTypeLabel} ${budget.id} — ${budget.company.name}</title>
+  <script src="https://cdn.tailwindcss.com"><\/script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+    * { font-family: 'Inter', sans-serif; }
+    @media print { .no-print { display: none !important; } body { background: white !important; } }
+    canvas { touch-action: none; cursor: crosshair; }
+    .sig-line { border-bottom: 1.5px solid #d1d5db; min-height: 64px; }
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen py-8 px-4">
+  <div class="no-print max-w-3xl mx-auto mb-4 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <div class="w-6 h-6 rounded-md bg-emerald-500 flex items-center justify-center">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.5"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+      </div>
+      <span class="text-xs font-semibold text-slate-600">PresuVoz</span>
+      <span class="text-slate-400 text-xs">/</span>
+      <span class="text-xs text-slate-500">${docTypeLabel} #${budget.id}</span>
+    </div>
+    <div class="flex items-center gap-2">
+      <button onclick="window.print()" class="text-xs font-medium text-slate-500 hover:text-slate-800 bg-white border border-slate-200 px-3 py-1.5 rounded-lg cursor-pointer">Imprimir</button>
+      ${statusPill}
+    </div>
+  </div>
+  <div class="max-w-3xl mx-auto bg-white rounded-2xl shadow-lg border border-slate-200/80 overflow-hidden">
+    <div class="p-8 border-b border-slate-100">
+      <div class="flex justify-between items-start gap-6">
+        <div>
+          <div class="flex items-center gap-3 mb-3">
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center font-black text-white text-sm" style="background-color: ${budget.company.brandColor || '#1e40af'};">
+              ${budget.company.logoText}
+            </div>
+            <div>
+              <h1 class="text-base font-bold text-slate-900 leading-tight">${budget.company.name}</h1>
+              <p class="text-xs text-slate-500">CIF: ${budget.company.cif}</p>
+            </div>
+          </div>
+          <div class="text-xs text-slate-400 space-y-0.5 mt-4">
+            <p>${budget.company.address}</p>
+            <p>${budget.company.phone} &middot; ${budget.company.email}</p>
+          </div>
+        </div>
+        <div class="text-right shrink-0">
+          <p class="text-[10px] uppercase font-semibold text-slate-400 tracking-widest mb-1">${docTypeLabel}</p>
+          <p class="text-lg font-bold text-slate-900">#${budget.id}</p>
+          <p class="text-xs text-slate-400 mt-1">Emitido el ${budget.issueDate}</p>
+          <p class="text-xs text-slate-400">Válido hasta: ${budget.terms.validityDays} días</p>
+        </div>
+      </div>
+    </div>
+    <div class="px-8 py-5 bg-slate-50 border-b border-slate-100">
+      <div class="grid grid-cols-2 gap-8">
+        <div>
+          <p class="text-[10px] uppercase font-semibold text-slate-400 tracking-widest mb-2">Datos del cliente</p>
+          <p class="text-sm font-semibold text-slate-800">${budget.client.name}</p>
+          <p class="text-xs text-slate-500 mt-0.5">${budget.client.address}</p>
+        </div>
+        <div>
+          <p class="text-[10px] uppercase font-semibold text-slate-400 tracking-widest mb-2">Condiciones</p>
+          <div class="space-y-1 text-xs text-slate-600">
+            <div class="flex justify-between">
+              <span class="text-slate-400">Tipo de IVA</span>
+              <span class="font-medium text-slate-700">${budget.financials.taxRatePercentage}% (${budget.financials.taxRatePercentage === 10 ? 'Vivienda' : 'General'})</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Anticipo</span>
+              <span class="font-medium text-slate-700">${budget.financials.advancePercentage}% (${budget.financials.advanceAmount.toFixed(2)} €)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="px-8 py-6">
+      <table class="w-full text-xs">
+        <thead>
+          <tr class="border-b border-slate-200">
+            <th class="text-left text-[10px] uppercase font-semibold text-slate-400 pb-3">Descripción</th>
+            <th class="text-right text-[10px] uppercase font-semibold text-slate-400 pb-3 pl-6">Cant.</th>
+            <th class="text-right text-[10px] uppercase font-semibold text-slate-400 pb-3 pl-6">Precio unit.</th>
+            <th class="text-right text-[10px] uppercase font-semibold text-slate-400 pb-3 pl-6">Total</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          ${itemsRows}
+        </tbody>
+      </table>
+    </div>
+    <div class="px-8 pb-6 flex justify-end">
+      <div class="w-64 space-y-2">
+        <div class="flex justify-between text-xs">
+          <span class="text-slate-400">Base imponible</span>
+          <span class="font-medium text-slate-700">${budget.financials.subtotal.toFixed(2)} €</span>
+        </div>
+        <div class="flex justify-between text-xs">
+          <span class="text-slate-400">IVA (${budget.financials.taxRatePercentage}%)</span>
+          <span class="font-medium text-slate-700">${budget.financials.taxAmount.toFixed(2)} €</span>
+        </div>
+        <div class="flex justify-between text-sm font-bold text-slate-900 pt-3 border-t border-slate-200">
+          <span>Total</span>
+          <span style="color: ${budget.company.brandColor || '#1e40af'};">${budget.isDraft ? '[Pendiente]' : budget.financials.totalAmount.toFixed(2) + ' €'}</span>
+        </div>
+      </div>
+    </div>
+    <div class="px-8 py-4 bg-slate-50 border-t border-slate-100 text-xs text-slate-500">
+      <p><span class="font-semibold text-slate-600">Condiciones:</span> ${budget.terms.conditions}</p>
+    </div>
+    <div class="px-8 py-8 border-t border-slate-200">
+      <div class="grid grid-cols-2 gap-8">
+        <div>
+          <p class="text-xs font-semibold text-slate-700 mb-1">Por la empresa emisora</p>
+          <p class="text-xs text-slate-400 mb-3">${budget.company.name}</p>
+          <div class="sig-line flex items-end pb-2 mb-2">
+            <div class="border border-dashed border-slate-300 rounded-lg p-2.5 w-full text-center">
+              <p class="text-[9px] uppercase tracking-widest font-bold text-slate-400">Sello Digital</p>
+              <p class="text-xs font-bold text-slate-700">${budget.company.name}</p>
+              <p class="text-[10px] text-emerald-600 font-semibold mt-1">✓ Emitido y sellado</p>
+            </div>
+          </div>
+          <p class="text-[10px] text-slate-400">${budget.company.professionalSigner}</p>
+        </div>
+        <div>
+          <p class="text-xs font-semibold text-slate-700 mb-1">Por el cliente</p>
+          <p class="text-xs text-slate-400 mb-3">${budget.client.name}</p>
+          <div class="border border-slate-200 rounded-lg h-20 bg-slate-50 flex items-center justify-center">
+            <p class="text-xs text-slate-400 italic">Lienzo interactivo de firma</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+      }
+    };
+
+    // -------------------------------------------------------------------------
+    // 4. Controlador de la interfaz del chat de WhatsApp
+    // -------------------------------------------------------------------------
+    const engine = new PresuVozEngine();
     let activeBudget = null;
 
     const samples = [
@@ -146,24 +798,21 @@
       "Para Don Javier en Calle Sierpes 5: demolición de tabique interior, rozas para enchufes en cocina y pintura plástica lisa en salón."
     ];
 
-    window.sendQuick = function(index) {
+    function sendQuick(index) {
       document.getElementById('chatInput').value = samples[index];
       sendMessage();
-    };
+    }
 
-    window.sendMessage = function() {
+    function sendMessage() {
       const input = document.getElementById('chatInput');
       const text = input.value.trim();
       if (!text) return;
       input.value = '';
 
-      // Agregar mensaje del usuario
       addUserBubble(text);
 
-      // Simular latencia de WhatsApp (300ms)
-      setTimeout(() => {
+      setTimeout(function() {
         if (activeBudget) {
-          // Intentar actualización conversacional
           const updateRes = engine.updateBudgetPrice(activeBudget, text);
           if (updateRes.success) {
             activeBudget = updateRes.budget;
@@ -172,7 +821,6 @@
           }
         }
 
-        // Si no es actualización o no había presupuesto, procesar nuevo audio
         const res = engine.process(text);
         if (res.success) {
           activeBudget = res.budget;
@@ -181,12 +829,11 @@
           addBotBubble(res.assistantFeedback, null);
         }
       }, 350);
-    };
+    }
 
     function addUserBubble(text) {
       const feed = document.getElementById('chatFeed');
       const time = new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
-
       const bubble = document.createElement('div');
       bubble.className = 'flex justify-end';
       bubble.innerHTML = `
@@ -251,15 +898,19 @@
       feed.scrollTop = feed.scrollHeight;
     }
 
-    window.openBudgetModal = function() {
+    function openBudgetModal() {
       if (!activeBudget) return;
       const html = PresuVozGenerator.generateHTML(activeBudget);
-      const blob = new Blob([html], { type: 'text/html' });
-      const url = URL.createObjectURL(blob);
-      window.open(url, '_blank');
-    };
+      const win = window.open('', '_blank');
+      if (win) {
+        win.document.write(html);
+        win.document.close();
+      } else {
+        alert('Por favor permite ventanas emergentes (pop-ups) en tu navegador para ver el presupuesto.');
+      }
+    }
 
-    window.resetChat = function() {
+    function resetChat() {
       activeBudget = null;
       document.getElementById('chatFeed').innerHTML = `
         <div class="flex items-start gap-2 max-w-[88%]">
@@ -270,9 +921,9 @@
           </div>
         </div>
       `;
-    };
+    }
 
-    // Grabación de voz en navegador
+    // Reconocimiento de voz por micrófono en navegador
     let recognition = null;
     let isRecording = false;
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -283,19 +934,19 @@
       recognition.interimResults = true;
       recognition.lang = 'es-ES';
 
-      recognition.onresult = (e) => {
+      recognition.onresult = function(e) {
         let t = '';
         for (let i = e.resultIndex; i < e.results.length; ++i) t += e.results[i][0].transcript;
         document.getElementById('chatInput').value = t;
       };
 
-      recognition.onerror = () => stopVoiceRecord();
-      recognition.onend = () => stopVoiceRecord();
+      recognition.onerror = function() { stopVoiceRecord(); };
+      recognition.onend = function() { stopVoiceRecord(); };
     }
 
-    window.toggleVoiceRecord = function() {
+    function toggleVoiceRecord() {
       if (!SR) {
-        alert('Tu navegador no soporta dictado directo. Puedes escribir o pegar el audio en el campo de texto.');
+        alert('Tu navegador no soporta dictado por voz directo. Puedes escribir o pulsar uno de los botones rápidos de ejemplo.');
         return;
       }
       if (!isRecording) {
@@ -308,26 +959,34 @@
         stopVoiceRecord();
         sendMessage();
       }
-    };
+    }
 
-    window.stopVoiceRecord = function() {
+    function stopVoiceRecord() {
       if (isRecording) {
         isRecording = false;
         document.getElementById('recordingBanner').classList.add('hidden');
         document.getElementById('btnMic').classList.remove('bg-rose-600', 'text-white');
         try { recognition.stop(); } catch(e) {}
       }
-    };
+    }
 
-    document.getElementById('chatInput').addEventListener('keydown', (e) => {
+    document.getElementById('chatInput').addEventListener('keydown', function(e) {
       if (e.key === 'Enter') {
         sendMessage();
       }
     });
 
     function escapeHtml(str) {
-      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
+
+    // Asignación explícita al objeto window para compatibilidad total con onclick
+    window.sendQuick = sendQuick;
+    window.sendMessage = sendMessage;
+    window.resetChat = resetChat;
+    window.toggleVoiceRecord = toggleVoiceRecord;
+    window.stopVoiceRecord = stopVoiceRecord;
+    window.openBudgetModal = openBudgetModal;
   </script>
 
 </body>
