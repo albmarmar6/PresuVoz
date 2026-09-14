@@ -138,6 +138,139 @@ export class PresuVozParser {
   };
 
   /**
+   * Índice geográfico de referencia: provincias, municipios y barrios destacados
+   */
+  static SPANISH_GEO_INDEX = {
+    "Sevilla": {
+      province: "Sevilla",
+      aliases: ["sevilla"],
+      municipalities: [
+        "sevilla", "dos hermanas", "alcala de guadaira", "utrera", "mairena del aljarafe",
+        "ecija", "la rinconada", "los palacios", "los palacios y villafranca", "coria del rio",
+        "carmona", "moron de la frontera", "moron", "lebrija", "camas", "tomares",
+        "mairena del alcor", "san juan de aznalfarache", "bormujos", "marchena", "arahal",
+        "el viso del alcor", "lora del rio", "osuna", "castilleja de la cuesta",
+        "las cabezas de san juan", "la algaba", "espartinas", "gines", "sanlucar la mayor",
+        "pilas", "guillena", "brenes", "estepa", "puebla del rio", "bollullos de la mitacion",
+        "cantillana", "torreblanca", "triana", "nervion", "macarena", "los remedios", "aljarafe"
+      ]
+    },
+    "Madrid": {
+      province: "Madrid",
+      aliases: ["madrid"],
+      municipalities: [
+        "madrid", "mostoles", "alcala de henares", "fuenlabrada", "leganes", "getafe",
+        "alcorcon", "torrejon de ardoz", "parla", "alcobendas", "las rozas",
+        "san sebastian de los reyes", "rivas", "rivas-vaciamadrid", "pozuelo de alarcon", "pozuelo",
+        "coslada", "valdemoro", "majadahonda", "collado villalba", "villalba", "aranjuez",
+        "arganda del rey", "arganda", "boadilla del monte", "boadilla", "pinto", "colmenar viejo",
+        "san fernando de henares", "tres cantos", "galapagar", "villaviciosa de odon"
+      ]
+    },
+    "Barcelona": {
+      province: "Barcelona",
+      aliases: ["barcelona", "barna"],
+      municipalities: [
+        "barcelona", "hospitalet de llobregat", "hospitalet", "badalona", "terrassa", "tarrasa",
+        "sabadell", "mataro", "santa coloma de gramenet", "sant cugat", "sant cugat del valles",
+        "cornella de llobregat", "cornella", "sant boi de llobregat", "sant boi", "rubi",
+        "manresa", "vilanova i la geltru", "viladecans", "castelldefels", "el prat de llobregat",
+        "granollers", "cerdanyola del valles", "mollet del valles", "vic", "esplugues de llobregat",
+        "gava", "sant feliu de llobregat", "igualada", "ripollet"
+      ]
+    },
+    "Valencia": {
+      province: "Valencia",
+      aliases: ["valencia", "valencia"],
+      municipalities: [
+        "valencia", "torrent", "torrente", "gandia", "paterna", "sagunto",
+        "alzira", "mislata", "burjassot", "ontinyent", "onteniente", "aldaia", "manises",
+        "alaquas", "xativa", "jativa", "chirivella", "xirivella", "sueca", "catarroja",
+        "algemesi", "paiporta", "oliva", "quart de poblet", "alboraya", "betera"
+      ]
+    },
+    "Málaga": {
+      province: "Málaga",
+      aliases: ["malaga"],
+      municipalities: [
+        "malaga", "marbella", "mijas", "fuengirola", "velez-malaga", "torremolinos",
+        "benalmadena", "estepona", "rincon de la victoria", "antequera", "alhaurin de la torre",
+        "ronda", "cartama", "alhaurin el grande", "coin", "nerja", "manilva"
+      ]
+    },
+    "Cantabria": {
+      province: "Cantabria",
+      aliases: ["cantabria", "santander"],
+      municipalities: [
+        "santander", "torrelavega", "torrelavella", "castro urdiales", "camargo", "pielagos",
+        "el astillero", "laredo", "santona", "los corrales de buelna", "reinosa",
+        "cabezon de la sal", "suances", "colindres", "reocin", "medio cudeyo"
+      ]
+    },
+    "Alicante": {
+      province: "Alicante",
+      aliases: ["alicante", "alacant"],
+      municipalities: [
+        "alicante", "elche", "elx", "torrevieja", "orihuela", "benidorm", "alcoy", "alcoi",
+        "elda", "san vicente del raspeig", "denia", "villena", "petrer", "santa pola",
+        "villajoyosa", "javea", "xabia", "calpe", "crevillente", "el campello"
+      ]
+    },
+    "Cádiz": {
+      province: "Cádiz",
+      aliases: ["cadiz"],
+      municipalities: [
+        "cadiz", "jerez de la frontera", "jerez", "algeciras", "san fernando",
+        "el puerto de santa maria", "el puerto", "chiclana de la frontera", "chiclana",
+        "sanlucar de barrameda", "la linea de la concepcion", "la linea", "puerto real",
+        "arcos de la frontera", "san roque", "rota", "barbate", "conil de la frontera", "tarifa"
+      ]
+    },
+    "Zaragoza": {
+      province: "Zaragoza",
+      aliases: ["zaragoza"],
+      municipalities: [
+        "zaragoza", "calatayud", "utebo", "ejea de los caballeros", "tarazona", "caspe",
+        "cuarte de huerva", "la almunia de dona godina", "zuera"
+      ]
+    }
+  };
+
+  /**
+   * Elimina tildes y diacríticos para comparaciones fonético-léxicas
+   */
+  static stripAccents(str) {
+    if (!str) return "";
+    return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+  }
+
+  /**
+   * Calcula la similitud relativa entre dos cadenas mediante distancia de Levenshtein (0 a 1)
+   */
+  static stringSimilarity(str1, str2) {
+    const s1 = this.stripAccents(str1);
+    const s2 = this.stripAccents(str2);
+    if (s1 === s2) return 1.0;
+    if (s1.includes(s2) || s2.includes(s1)) return 0.85;
+
+    const m = s1.length, n = s2.length;
+    if (m === 0 || n === 0) return 0;
+
+    const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
+        dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+      }
+    }
+    const maxLen = Math.max(m, n);
+    return maxLen === 0 ? 1.0 : (1.0 - dp[m][n] / maxLen);
+  }
+
+  /**
    * Convierte expresiones numéricas coloquiales o en letras a número
    */
   static parsePriceString(str) {
@@ -187,8 +320,11 @@ export class PresuVozParser {
       return addr.replace(/[:,\.\-]+$/, "").trim();
     }
 
-    // 2. Ciudad / Pueblo / Localidad (ej: "una casa en torrelavella en Sevilla")
-    match = text.match(/(?:casa|piso|chalet|local|obra|reforma|trabajo)\s+en\s+([a-záéíóúñ\s]+?)(?=\s+(?:con|de|para|hay|habr[ií]a|donde)\b|:|$)/i);
+    // 2. Ciudad / Pueblo / Localidad (ej: "una casa en torrelavella en Sevilla", "en Marbella en Sevilla")
+    match = text.match(/(?:(?:casa|piso|chalet|local|obra|reforma|trabajo)\s+en|para\s+[a-záéíóúñ\s]+?\s+en|\ben)\s+([a-záéíóúñ\s]+?\s+en\s+[a-záéíóúñ]+)(?=\s+(?:con|de|para|hay|habr[ií]a|donde)\b|:|$)/i);
+    if (!match) {
+      match = text.match(/(?:casa|piso|chalet|local|obra|reforma|trabajo)\s+en\s+([a-záéíóúñ\s]+?)(?=\s+(?:con|de|para|hay|habr[ií]a|donde)\b|:|$)/i);
+    }
     if (match) {
       let loc = match[1].trim().replace(/\s+en\s+/i, ", ");
       return loc
@@ -198,6 +334,112 @@ export class PresuVozParser {
     }
 
     return "Ubicación obra según visita técnica";
+  }
+
+  /**
+   * Valida la coherencia geográfica de una dirección (pueblo / municipio vs provincia)
+   * Detecta si un pueblo pertenece a otra provincia o posibles erratas de transcripción.
+   */
+  static validateAddress(addressText) {
+    if (!addressText || typeof addressText !== "string") {
+      return { hasWarning: false };
+    }
+
+    const clean = addressText.trim();
+    if (clean === "Ubicación obra según visita técnica") {
+      return { hasWarning: false };
+    }
+
+    // Identificar partes: "Pueblo, Provincia" o "Pueblo en Provincia"
+    const parts = clean.split(/,\s*|\s+en\s+/i).map(p => p.trim()).filter(Boolean);
+    if (parts.length < 2) {
+      return { hasWarning: false };
+    }
+
+    const town = parts[0];
+    const prov = parts[parts.length - 1];
+
+    // Si la primera parte es una calle ordinaria (calle, avenida, etc.), no evaluarla como pueblo
+    if (/^(?:calle|avenida|avda\.?|plaza|paseo|camino|carretera)\b/i.test(town)) {
+      return { hasWarning: false };
+    }
+
+    const normTown = this.stripAccents(town);
+    const normProv = this.stripAccents(prov);
+
+    // Buscar la provincia indicada en el índice geográfico
+    let targetProvKey = null;
+    for (const [key, data] of Object.entries(this.SPANISH_GEO_INDEX)) {
+      if (this.stripAccents(key) === normProv || data.aliases.some(a => this.stripAccents(a) === normProv)) {
+        targetProvKey = key;
+        break;
+      }
+    }
+
+    if (!targetProvKey) {
+      return { hasWarning: false };
+    }
+
+    const provData = this.SPANISH_GEO_INDEX[targetProvKey];
+    const provMunis = provData.municipalities.map(m => this.stripAccents(m));
+
+    // 1. ¿El municipio está en la provincia mencionada?
+    if (provMunis.includes(normTown) || provMunis.some(m => normTown.includes(m) || m.includes(normTown))) {
+      return { hasWarning: false };
+    }
+
+    // 2. Buscar si el municipio dictado pertenece en realidad a otra provincia
+    let actualProv = null;
+    let matchedName = null;
+
+    for (const [otherKey, otherData] of Object.entries(this.SPANISH_GEO_INDEX)) {
+      if (otherKey === targetProvKey) continue;
+      for (const m of otherData.municipalities) {
+        const normM = this.stripAccents(m);
+        if (normM === normTown || this.stringSimilarity(normTown, normM) >= 0.75) {
+          actualProv = otherData.province;
+          matchedName = m.charAt(0).toUpperCase() + m.slice(1);
+          break;
+        }
+      }
+      if (actualProv) break;
+    }
+
+    // 3. Buscar sugerencia dentro de la provincia mencionada (por fonética o prefijo común)
+    let suggestedInProv = null;
+    let bestSim = 0;
+    for (const m of provData.municipalities) {
+      const normM = this.stripAccents(m);
+      const sim = this.stringSimilarity(normTown, normM);
+      const sharePrefix = normTown.length >= 4 && normM.startsWith(normTown.slice(0, 4));
+      if (sim > bestSim && (sim >= 0.5 || sharePrefix)) {
+        bestSim = sim;
+        suggestedInProv = m.charAt(0).toUpperCase() + m.slice(1);
+      }
+    }
+
+    // 4. Formular mensaje de advertencia y pregunta de confirmación
+    let warningMessage = "";
+    if (actualProv && actualProv.toLowerCase() !== targetProvKey.toLowerCase()) {
+      if (suggestedInProv) {
+        warningMessage = `📍 ¿Estás seguro de que "${clean}" es la dirección correcta? "${town}" no figura entre los municipios de ${targetProvKey} (${matchedName} pertenece a ${actualProv}, ¿o quizás quisiste decir ${suggestedInProv} en ${targetProvKey}?).`;
+      } else {
+        warningMessage = `📍 ¿Estás seguro de que "${clean}" es la dirección correcta? ${matchedName} pertenece a la provincia de ${actualProv}, no a ${targetProvKey}.`;
+      }
+    } else if (suggestedInProv) {
+      warningMessage = `📍 ¿Estás seguro de que "${clean}" es la dirección correcta? No coincide con los municipios habituales de ${targetProvKey} (¿quizás te refieres a ${suggestedInProv}?).`;
+    } else {
+      warningMessage = `📍 ¿Estás seguro de que "${clean}" es la dirección correcta? No se ha podido verificar "${town}" como municipio o zona habitual de ${targetProvKey}.`;
+    }
+
+    return {
+      hasWarning: true,
+      warningMessage,
+      town,
+      province: targetProvKey,
+      actualProv,
+      suggestedInProv
+    };
   }
 
   /**
@@ -247,6 +489,12 @@ export class PresuVozParser {
     const warnings = [];
     const clientName = this.extractClientName(rawTranscript);
     const clientAddress = this.extractAddress(rawTranscript);
+
+    // Validación de coherencia geográfica en la dirección
+    const addressValidation = this.validateAddress(clientAddress);
+    if (addressValidation.hasWarning) {
+      warnings.push(addressValidation.warningMessage);
+    }
 
     // Separar por saltos de línea, guiones o conectores verbales de obra ("habría que", "hay que", "con una", etc.)
     const segRegex = /(?:\n|\.|\;|\s*-\s*|\b(?:habr[ií]a\s+que|hay\s+que|tambi[eé]n\s+(?:habr[ií]a\s+que|hay\s+que|habr[ií]a|vamos\s+a|quiero|poner|cambiar|instalar|hacer)|y\s+tambi[eé]n|y\s+adem[aá]s|adem[aá]s\s+(?:de\s+eso|de\s+esto)?|luego|despu[eé]s|por\s+otro\s+lado|con\s+un[ao]?)\b)/i;
@@ -339,7 +587,7 @@ export class PresuVozParser {
       const pricedCount = rawItems.filter(it => !it.isPricePending).length;
       assistantFeedback = `⚠️ He generado el presupuesto con ${pricedCount} partida(s) valorada(s), pero he detectado estos detalles para tu revisión:\n` +
         warnings.map(w => `• ${w}`).join("\n") +
-        `\n\n👉 Puedes enviar el presupuesto tal cual o mandarme otro audio para rellenar lo que falta (ejemplo: "Ponle 250 al alicatado").`;
+        `\n\n👉 Puedes enviar el presupuesto tal cual o mandarme otro audio para rellenar lo que falta (ejemplo: "Ponle 250 al alicatado" o "Es en Torreblanca").`;
     } else {
       assistantFeedback = `✅ ¡Presupuesto generado con éxito y sin incidencias! Todas las partidas e importes están perfectamente cuadrados.`;
     }
@@ -356,6 +604,71 @@ export class PresuVozParser {
         items: rawItems
       }
     };
+  }
+
+  /**
+   * Procesa cualquier respuesta conversacional de WhatsApp:
+   * - Corrección de dirección ("Es en Torreblanca", "La dirección es Torreblanca")
+   * - Confirmación de dirección ("Sí, es correcta", "La dirección está bien")
+   * - Asignación/actualización de precio ("Ponle 180 euros al suelo", "partida 1 son 300")
+   */
+  static applyConversationalReply(budget, replyText) {
+    if (!budget || !replyText) {
+      return { success: false, message: "Mensaje o presupuesto no válido." };
+    }
+
+    const trimmed = replyText.trim();
+    const lower = trimmed.toLowerCase();
+
+    // 1. Confirmación de dirección existente ("sí, es correcta", "es correcta", "la dirección está bien")
+    if (/^(?:s[ií],?\s*)?(?:es\s*correct[ao]|est[aá]\s*bien|la\s+direcci[oó]n\s+es\s+correcta|es\s+v[aá]lida)$/i.test(trimmed) ||
+        /(?:la\s+direcci[oó]n\s+(?:es\s+correcta|est[aá]\s+bien)|s[ií]\s+es\s+en)/i.test(trimmed)) {
+      if (budget.warnings) {
+        budget.warnings = budget.warnings.filter(w => !w.includes("dirección correcta") && !w.includes("📍"));
+      }
+      budget.hasWarnings = (budget.warnings && budget.warnings.length > 0) || (budget.items && budget.items.some(it => it.isPricePending));
+      const confirmedAddr = (budget.client && budget.client.address) ? budget.client.address : "especificada";
+      return {
+        success: true,
+        type: "ADDRESS_CONFIRMED",
+        budget,
+        message: `👍 Perfecto, confirmada la dirección "${confirmedAddr}". He verificado los datos del presupuesto.`
+      };
+    }
+
+    // 2. Corrección de dirección ("Es en Torreblanca", "Es Torreblanca", "La dirección es Torreblanca, Sevilla")
+    const addrPrefixMatch = trimmed.match(/^(?:es\s+en|es\s+para|la\s+direcci[oó]n\s+es|la\s+calle\s+es|direcci[oó]n:?|cambia\s+(?:la\s+)?direcci[oó]n\s+a)\s+([a-záéíóúñ0-9\s,\.\-]+)$/i);
+    const isDirectTownCorrection = !addrPrefixMatch && !/(?:euros?|pavos|€|\d+)/i.test(trimmed) && trimmed.split(/\s+/).length <= 4 && /(?:torreblanca|cantabria|alcorcon|sevilla|madrid|barcelona|malaga|valencia)/i.test(lower);
+
+    if (addrPrefixMatch || isDirectTownCorrection) {
+      let newPlace = addrPrefixMatch ? addrPrefixMatch[1].trim() : trimmed;
+      
+      // Si el usuario dijo "Torreblanca" y antes teníamos "Torrelavella, Sevilla", preservar la provincia si no se especificó
+      if (!newPlace.includes(",") && budget.client && budget.client.address && budget.client.address.includes(",")) {
+        const oldProv = budget.client.address.split(/,\s*/).pop().trim();
+        newPlace = `${newPlace.charAt(0).toUpperCase() + newPlace.slice(1)}, ${oldProv}`;
+      } else {
+        newPlace = newPlace.charAt(0).toUpperCase() + newPlace.slice(1);
+      }
+
+      if (budget.client) {
+        budget.client.address = newPlace;
+      }
+      if (budget.warnings) {
+        budget.warnings = budget.warnings.filter(w => !w.includes("dirección correcta") && !w.includes("📍"));
+      }
+      budget.hasWarnings = (budget.warnings && budget.warnings.length > 0) || (budget.items && budget.items.some(it => it.isPricePending));
+
+      return {
+        success: true,
+        type: "ADDRESS_UPDATED",
+        budget,
+        message: `✅ Dirección actualizada a "${newPlace}". He corregido la ficha del presupuesto.`
+      };
+    }
+
+    // 3. Actualización de partidas y precios
+    return this.applyConversationalUpdate(budget.items, trimmed);
   }
 
   /**

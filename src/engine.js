@@ -202,27 +202,39 @@ export class PresuVozEngine {
   }
 
   /**
-   * Actualiza interactivamente una partida del presupuesto mediante un mensaje corto de texto o audio
-   * Ejemplo: "Ponle 250 al alicatado" o "Partida 2: 300 euros"
+  /**
+   * Actualiza interactivamente el presupuesto mediante un mensaje conversacional de WhatsApp:
+   * Permite corregir o confirmar direcciones ("Es en Torreblanca", "Sí, es correcta")
+   * o asignar precios a partidas pendientes ("Ponle 250 al alicatado").
    * @param {object} budget - Objeto de presupuesto existente
    * @param {string} updateText - Mensaje de actualización
    * @returns {object} { success, budget, assistantMessage }
    */
-  updateBudgetPrice(budget, updateText) {
+  updateBudget(budget, updateText) {
     if (!budget || !budget.items) {
       return { success: false, message: "Presupuesto no válido." };
     }
 
-    const updateRes = PresuVozParser.applyConversationalUpdate(budget.items, updateText);
-    if (!updateRes.success) {
+    const replyRes = PresuVozParser.applyConversationalReply(budget, updateText);
+    if (!replyRes.success) {
       return {
         success: false,
         budget,
-        assistantMessage: updateRes.message
+        assistantMessage: replyRes.message
       };
     }
 
-    // Recalcular finanzas
+    // Si fue una actualización o confirmación de dirección
+    if (replyRes.type === "ADDRESS_UPDATED" || replyRes.type === "ADDRESS_CONFIRMED") {
+      budget.assistantFeedback = replyRes.message;
+      return {
+        success: true,
+        budget,
+        assistantMessage: replyRes.message
+      };
+    }
+
+    // Si fue una actualización de partida / importe, recalcular finanzas
     const taxRate = (budget.financials.taxRatePercentage || 21) / 100;
     const advancePct = budget.financials.advancePercentage || 30;
 
@@ -243,11 +255,14 @@ export class PresuVozEngine {
     budget.financials.remainingAmount = Number((totalAmount - advanceAmount).toFixed(2));
 
     const pendingCount = budget.items.filter(it => it.isPricePending).length;
-    budget.hasWarnings = pendingCount > 0;
+    if (pendingCount === 0 && budget.warnings) {
+      budget.warnings = budget.warnings.filter(w => !w.includes("pendiente de valorar"));
+    }
+    budget.hasWarnings = pendingCount > 0 || (budget.warnings && budget.warnings.length > 0);
     budget.isDraft = budget.items.every(it => it.total === 0);
     budget.status = budget.isDraft ? "BORRADOR_MEDICION" : "PENDIENTE_FIRMA";
 
-    let finalMsg = updateRes.message;
+    let finalMsg = replyRes.message;
     if (pendingCount === 0) {
       finalMsg += `\n\n🎉 ¡Todas las partidas están ahora completadas y valoradas! Total del presupuesto: ${budget.financials.totalAmount.toFixed(2)} € (IVA ${budget.financials.taxRatePercentage}% incl.). Ya puedes enviar el documento para firmar.`;
     } else {
@@ -261,5 +276,12 @@ export class PresuVozEngine {
       budget,
       assistantMessage: finalMsg
     };
+  }
+
+  /**
+   * Alias de compatibilidad hacia atrás
+   */
+  updateBudgetPrice(budget, updateText) {
+    return this.updateBudget(budget, updateText);
   }
 }

@@ -202,6 +202,40 @@ assert(upd7.budget.financials.totalAmount === 803, `Nuevo total con IVA recalcul
 console.log(`  Respuesta de WhatsApp al completar la partida:\n  "${upd7.assistantMessage}"\n`);
 
 // -----------------------------------------------------------------------------
+// CASO 8: Validación Geográfica de Direcciones y Corrección Interactiva
+// -----------------------------------------------------------------------------
+console.log("TEST 8: Detección de inconsistencias geográficas y corrección de dirección");
+
+// 8.1 Inconsistencia Torrelavella vs Sevilla (Torrelavega es Cantabria / ¿Torreblanca?)
+const audioGeoInconsistente = "hola buenas tardes me gustaría presupuestar una casa en torrelavella en Sevilla con una mampara de 250 euros";
+const res8 = engine.process(audioGeoInconsistente);
+assert(res8.success === true, "Genera el presupuesto a pesar de la duda en la dirección");
+assert(res8.hasWarnings === true, "Activa avisos por sospecha geográfica");
+const hasGeoWarning = res8.warnings.some(w => w.includes("dirección correcta") && w.includes("Torrelavella"));
+assert(hasGeoWarning, "Genera advertencia explícita preguntando si 'Torrelavella en Sevilla' es correcta");
+assert(res8.assistantFeedback.includes("Torrelavega") || res8.assistantFeedback.includes("Torreblanca"), "Menciona Cantabria o sugiere el barrio de Torreblanca");
+
+console.log(`  Pregunta del bot al instalador:\n  "${res8.warnings[0]}"\n`);
+
+// 8.2 Corrección interactiva por chat ("Es en Torreblanca")
+const upd8 = engine.updateBudget(res8.budget, "Es en Torreblanca");
+assert(upd8.success === true, "Procesa la corrección de dirección por chat");
+assert(upd8.budget.client.address === "Torreblanca, Sevilla", `Actualiza la dirección manteniendo la provincia: ${upd8.budget.client.address}`);
+const remainingGeoWarning = upd8.budget.warnings.some(w => w.includes("dirección correcta"));
+assert(!remainingGeoWarning, "Elimina la advertencia de dirección tras ser corregida");
+console.log(`  Respuesta del bot tras corrección:\n  "${upd8.assistantMessage}"\n`);
+
+// 8.3 Mismatch cruzado de provincias (Marbella en Sevilla -> Alerta de Málaga)
+const audioMarbellaSevilla = "Para Don Antonio en Marbella en Sevilla: cambiar termo eléctrico 200 euros";
+const resMarbella = engine.process(audioMarbellaSevilla);
+assert(resMarbella.warnings.some(w => w.includes("Málaga") && w.includes("Marbella")), "Detecta que Marbella pertenece a Málaga y no a Sevilla");
+
+// 8.4 Dirección correcta no genera falsos positivos (Dos Hermanas en Sevilla)
+const audioCorrecto = "Para Doña Luisa en Dos Hermanas en Sevilla: instalación de aire acondicionado 400 euros";
+const resCorrecto = engine.process(audioCorrecto);
+assert(!resCorrecto.warnings.some(w => w.includes("dirección correcta")), "No emite advertencias para municipios legítimos ('Dos Hermanas, Sevilla')");
+
+// -----------------------------------------------------------------------------
 // RESUMEN FINAL
 // -----------------------------------------------------------------------------
 console.log("==========================================================");
