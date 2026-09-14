@@ -4,6 +4,8 @@
  * con cálculo impositivo conforme a la normativa fiscal española (IVA 10% vs 21%).
  */
 
+import { PresuVozParser } from './parser.js';
+
 export class PresuVozEngine {
   constructor(companyConfig = {}) {
     this.company = {
@@ -56,14 +58,22 @@ export class PresuVozEngine {
     let advancePercentage = 30; // 30% estándar para acopio de materiales
     let validityDays = 15;
 
-    const advanceMatch = lower.match(/(\d{1,2})\s*%\s*(por adelantado|a la firma|al inicio|de anticipo)/);
-    if (advanceMatch) {
-      advancePercentage = parseInt(advanceMatch[1], 10);
+    // Detectar porcentaje con dígitos ("30%") o con palabras ("cuarenta por ciento")
+    const advanceDigitMatch = lower.match(/(\d{1,2})\s*(?:%|por\s*ciento)\s*(?:por\s*adelantado|a\s*la\s*firma|al\s*inicio|de\s*anticipo)/);
+    if (advanceDigitMatch) {
+      advancePercentage = parseInt(advanceDigitMatch[1], 10);
+    } else {
+      const advanceWordMatch = lower.match(/(veinte|veinticinco|treinta|cuarenta|cincuenta)\s*por\s*ciento\s*(?:por\s*adelantado|a\s*la\s*firma|al\s*inicio|de\s*anticipo)/);
+      if (advanceWordMatch) {
+        const map = { "veinte": 20, "veinticinco": 25, "treinta": 30, "cuarenta": 40, "cincuenta": 50 };
+        if (map[advanceWordMatch[1]]) advancePercentage = map[advanceWordMatch[1]];
+      }
     }
 
-    const validityMatch = lower.match(/(\d{1,2})\s*d[ií]as/);
+    const validityMatch = lower.match(/(\d{1,2}|diez|quince|veinte|treinta)\s*d[ií]as/);
     if (validityMatch) {
-      validityDays = parseInt(validityMatch[1], 10);
+      const map = { "diez": 10, "quince": 15, "veinte": 20, "treinta": 30 };
+      validityDays = map[validityMatch[1]] || parseInt(validityMatch[1], 10) || 15;
     }
 
     return {
@@ -74,26 +84,52 @@ export class PresuVozEngine {
   }
 
   /**
-   * Procesa un caso estructurado o semi-estructurado y calcula el desglose financiero exacto
-   * @param {object} input 
-   * @returns {object} Presupuesto completo listo para visualización y firma
+   * Procesa una transcripción cruda o un caso semi-estructurado, sanitiza
+   * las partidas y calcula el desglose financiero exacto.
+   * @param {object|string} input - Objeto de entrada o string directo de transcripción
+   * @returns {object} Resultado con { success, budget, errors }
    */
   process(input) {
-    const rawText = input.rawTranscript || "";
-    const taxRate = input.taxRate !== undefined ? input.taxRate : this.detectTaxRate(rawText);
+    const rawInput = typeof input === "string" ? { rawTranscript: input } : (input || {});
+    const rawText = rawInput.rawTranscript || "";
+    let clientName = rawInput.clientName;
+    let clientAddress = rawInput.clientAddress;
+    let itemsToProcess = rawInput.items;
+
+    // Si no se proporcionaron partidas pre-estructuradas, parsear la transcripción cruda
+    if (!itemsToProcess || !Array.isArray(itemsToProcess) || itemsToProcess.length === 0) {
+      const parseResult = PresuVozParser.parseTranscript(rawText);
+
+      if (!parseResult.isValid) {
+        return {
+          success: false,
+          errors: parseResult.errors,
+          budget: null
+        };
+      }
+
+      itemsToProcess = parseResult.data.items;
+      if (!clientName) clientName = parseResult.data.clientName;
+      if (!clientAddress) clientAddress = parseResult.data.clientAddress;
+    }
+
+    const taxRate = rawInput.taxRate !== undefined ? rawInput.taxRate : this.detectTaxRate(rawText);
     const terms = this.extractTerms(rawText);
 
-    // Calcular partidas
+    // Calcular y sanitizar estrictamente cada partida
     let subtotal = 0;
-    const items = (input.items || []).map((item, index) => {
+    const items = itemsToProcess.map((item, index) => {
       const qty = item.qty || 1;
-      const unitPrice = item.price || 0;
+      const unitPrice = item.price !== undefined ? item.price : (item.unitPrice || 0);
       const total = Number((qty * unitPrice).toFixed(2));
       subtotal += total;
 
+      // Sanitización contra palabras sueltas o muletillas
+      const cleanDesc = PresuVozParser.normalizeItemDescription(item.description || "");
+
       return {
         id: index + 1,
-        description: item.description || "Partida de obra/instalación",
+        description: cleanDesc,
         qty,
         unitPrice,
         total
@@ -108,14 +144,15 @@ export class PresuVozEngine {
     const budgetId = `PRE-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
     const issueDate = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
-    return {
+    const budget = {
       id: budgetId,
       issueDate,
       company: this.company,
       client: {
-        name: input.clientName || "Cliente Particular",
-        address: input.clientAddress || "Ubicación obra según visita",
-        phone: input.clientPhone || "No especificado"
+        name: clientName || "Cliente Particular",
+        address: clientAddress || "Ubicación obra según visita",
+        phone: rawInput.clientPhone || "No especificado",
+        email: rawInput.clientEmail || null
       },
       items,
       financials: {
@@ -129,10 +166,17 @@ export class PresuVozEngine {
       },
       terms: {
         validityDays: terms.validityDays,
-        conditions: input.customConditions || terms.textConditions
+        conditions: rawInput.customConditions || terms.textConditions
       },
       status: "PENDIENTE_FIRMA",
       signUrl: `https://presuvoz.app/f/${Math.random().toString(36).substring(2, 9)}`
     };
+
+    // Objeto compatible con desestructuración directa y chequeo de éxito
+    return Object.assign(budget, {
+      success: true,
+      errors: [],
+      budget
+    });
   }
 }
