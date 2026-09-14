@@ -5,7 +5,9 @@
   "type": "module",
   "main": "src/engine.js",
   "scripts": {
-    "start": "node src/test_run.js"
+    "start": "node src/test_run.js",
+    "test": "node src/test_suite.js",
+    "simulador": "node src/interactive_cli.js"
   },
   "keywords": [
     "presupuestos",
