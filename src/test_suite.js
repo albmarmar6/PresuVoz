@@ -282,10 +282,86 @@ assert(res9_2.budget.financials.subtotal === 830, `Recalcula subtotal acumulado 
 assert(res9_2.budget.financials.totalAmount === 913, `Total con IVA 10% exacto (913.00 €). Obtenido: ${res9_2.budget.financials.totalAmount} €`);
 
 console.log(`  Respuesta de WhatsApp al procesar Audio 2:\n  "${res9_2.assistantMessage.slice(0, 180)}..."\n`);
+
+// -----------------------------------------------------------------------------
+// CASO 10: Caso Real de Obra Completa — 5 Capítulos Maestros de Reforma Integral
+// Tratamiento de rangos de precios (Math.max recomendado en obra), Whisper glitch (4.205.000)
+// y eliminación radical de la trampa del 'porque'
+// -----------------------------------------------------------------------------
+console.log("TEST 10: Obra Completa — 5 Capítulos, Rangos de Precio (Math.max), Glitch Whisper y Sin Fugas de 'porque'");
+
+const audioObraCompleta = "oye te voy a comentar la partida primera partida eh demoliciones y de escombro uno un corte un corte estimado de unos 4.500 a 6000 euros porque habría que hacer un picado de azulejos de arriba de tabiquería interior vieja retirada de carpintería etc luego la partida segunda sería albañilería general y distribución un levantado tabique nuevo en maestrado y regresión solo para nivelar enfocado falso techo de pladur en toda vivienda eso podría costar unos 8.000 a 11.000 euros luego vamos con la partida tercera fontanería y saneamiento red completa nuevas multicapa o polietileno reticulado unos 4.205.000 euros electricidad y telecomunicaciones sería la cuarta partida entre unos 4.000 y 5.500 euros porque habría que hacer un cuadro general nuevo según RBT con protaciones completas y por último la partida cinco alicatados y solados que sería unos 5.500 7.500 euros porque habría que hacer una colocación de suelo porcelánico o grespe en, que esta bastante bien, sinceramente.";
+
+const res10 = engine.process(audioObraCompleta);
+
+assert(res10.success === true, "Procesa el audio completo de reforma integral de 5 capítulos");
+assert(res10.items.length === 5, `Detecta exactamente 5 capítulos de obra (sin items fantasma ni duplicados). Obtenido: ${res10.items.length}`);
+
+// Validar precios de cada capítulo con la regla de obra (cota superior / Math.max para salvaguardar márgenes)
+assert(res10.items[0].total === 6000, `Capítulo 1 (Demolición y escombro): Cota superior 6.000,00 €. Obtenido: ${res10.items[0].total} €`);
+assert(res10.items[1].total === 11000, `Capítulo 2 (Albañilería y distribución): Cota superior 11.000,00 €. Obtenido: ${res10.items[1].total} €`);
+assert(res10.items[2].total === 5000, `Capítulo 3 (Fontanería y saneamiento): Resuelve fallo fonético Whisper (4.205.000 -> 5.000,00 €). Obtenido: ${res10.items[2].total} €`);
+assert(res10.items[3].total === 5500, `Capítulo 4 (Electricidad y REBT): Cota superior 5.500,00 €. Obtenido: ${res10.items[3].total} €`);
+assert(res10.items[4].total === 7500, `Capítulo 5 (Alicatados y solados): Cota superior 7.500,00 €. Obtenido: ${res10.items[4].total} €`);
+
+// Validar suma y base imponible total: 6.000 + 11.000 + 5.000 + 5.500 + 7.500 = 35.000 €
+assert(res10.financials.subtotal === 35000, `Base imponible exacta calculada (35.000,00 €). Obtenido: ${res10.financials.subtotal} €`);
+assert(res10.financials.taxRatePercentage === 10, "Aplica IVA reducido del 10% por tratarse de reforma de vivienda");
+assert(res10.financials.totalAmount === 38500, `Total con IVA exacto (38.500,00 €). Obtenido: ${res10.financials.totalAmount} €`);
+
+// Verificación anti-fugas: Ninguna descripción técnica debe contener "porque", "bastante bien", "sinceramente", "corte estimado"
+let leakFound10 = false;
+for (const it of res10.items) {
+  if (/\b(?:porque|ya\s+que|bastante\s+bien|sinceramente|corte\s+estimado|eh|oye)\b/i.test(it.description)) {
+    leakFound10 = true;
+    console.error(`  ALERTA: Fuga en partida: "${it.description}"`);
+  }
+}
+assert(!leakFound10, "Cero fugas de explicaciones verbales ('porque habría que...') ni muletillas en los 5 capítulos");
+
+console.log("\n  Capítulos maestros generados para la reforma integral:");
+res10.items.forEach((it, i) => console.log(`    Capítulo ${i + 1} [${it.unit}]: ${it.description} — ${it.total.toLocaleString('es-ES')} €`));
+console.log(`    TOTAL: ${res10.financials.totalAmount.toLocaleString('es-ES')} € (IVA 10% incl.)\n`);
+
+// -----------------------------------------------------------------------------
+// CASO 11: Unidades de Medida (m², ml, ud, pa) y Descuentos Comerciales
+// -----------------------------------------------------------------------------
+console.log("TEST 11: Unidades de Medida (m², ml, ud) y Descuentos Dictados");
+
+const audioConDescuentoYUnidades = `
+Para Don Carlos Gómez en Calle Gran Vía 12:
+- 45 m2 de alicatado porcelánico en cocina por novecientos euros.
+- 15 ml de rodapié cerámico por ciento cincuenta euros.
+- 6 mecanismos y tomas de corriente por ciento ochenta euros.
+Aplicar un descuento del 10% por promoción especial.
+`;
+
+const res11 = engine.process(audioConDescuentoYUnidades);
+assert(res11.success === true, "Procesa presupuesto con unidades y descuento comercial");
+assert(res11.items[0].unit === "m²", `Partida 1 detecta unidad 'm²'. Obtenido: ${res11.items[0].unit}`);
+assert(res11.items[0].qty === 45, `Partida 1 detecta 45 m². Obtenido: ${res11.items[0].qty}`);
+assert(res11.items[1].unit === "ml", `Partida 2 detecta unidad 'ml'. Obtenido: ${res11.items[1].unit}`);
+assert(res11.items[1].qty === 15, `Partida 2 detecta 15 ml. Obtenido: ${res11.items[1].qty}`);
+assert(res11.items[2].unit === "ud", `Partida 3 detecta unidad 'ud'. Obtenido: ${res11.items[2].unit}`);
+assert(res11.items[2].qty === 6, `Partida 3 detecta 6 uds. Obtenido: ${res11.items[2].qty}`);
+
+// Subtotal bruto: 900 + 150 + 180 = 1230 €
+assert(res11.financials.subtotal === 1230, `Subtotal bruto exacto (1.230,00 €). Obtenido: ${res11.financials.subtotal} €`);
+// Descuento 10%: 123 €
+assert(res11.financials.discountPercentage === 10, "Detecta descuento comercial del 10%");
+assert(res11.financials.discountAmount === 123, `Calcula importe del descuento (123,00 €). Obtenido: ${res11.financials.discountAmount} €`);
+// Base imponible: 1230 - 123 = 1107 €
+assert(res11.financials.taxableBase === 1107, `Base imponible tras descuento: 1.107,00 €. Obtenido: ${res11.financials.taxableBase} €`);
+// IVA 10% (reforma en cocina de vivienda) sobre 1107 = 110.70 €
+assert(res11.financials.taxRatePercentage === 10, "Aplica IVA reducido del 10% por incluir cocina");
+assert(res11.financials.taxAmount === 110.7, `IVA 10% calculado: 110,70 €. Obtenido: ${res11.financials.taxAmount} €`);
+// Total final: 1107 + 110.7 = 1217.70 €
+assert(res11.financials.totalAmount === 1217.7, `Total final con descuento e IVA: 1.217,70 €. Obtenido: ${res11.financials.totalAmount} €`);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
-  console.log("🛡️  El motor es 100% conversacional, tolerante a fallos y soporta borradores.");
+  console.log("🛡️  El motor es 100% conversacional, tolerante a fallos y soporta borradores, capítulos y descuentos.");
 } else {
   console.error(`❌ RESULTADO: ${passedCount}/${totalCount} pruebas superadas.`);
 }

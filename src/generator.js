@@ -24,7 +24,7 @@ export class PresuVozGenerator {
             <td class="py-4 pr-6">
               <p class="text-sm font-medium text-slate-800">${item.description}</p>
             </td>
-            <td class="text-right py-4 pl-6 text-slate-500 align-top">${item.qty}</td>
+            <td class="text-right py-4 pl-6 text-slate-500 align-top whitespace-nowrap">${item.qty} <span class="text-[10px] text-slate-400 uppercase">${item.unit || 'pa'}</span></td>
             <td class="text-right py-4 pl-6 text-slate-500 align-top whitespace-nowrap">${unitPriceDisplay}</td>
             <td class="text-right py-4 pl-6 font-semibold text-slate-800 align-top whitespace-nowrap">${totalDisplay}</td>
           </tr>
@@ -168,9 +168,19 @@ export class PresuVozGenerator {
     <div class="px-8 pb-6 flex justify-end">
       <div class="w-64 space-y-2">
         <div class="flex justify-between text-xs">
-          <span class="text-slate-400">Base imponible</span>
+          <span class="text-slate-400">Subtotal</span>
           <span class="font-medium text-slate-700">${budget.financials.subtotal.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €</span>
         </div>
+        ${budget.financials.discountAmount > 0 ? `
+        <div class="flex justify-between text-xs text-emerald-600 font-medium">
+          <span>Descuento (${budget.financials.discountPercentage}%)</span>
+          <span>-${budget.financials.discountAmount.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €</span>
+        </div>
+        <div class="flex justify-between text-xs">
+          <span class="text-slate-400">Base imponible</span>
+          <span class="font-medium text-slate-700">${(budget.financials.taxableBase !== undefined ? budget.financials.taxableBase : budget.financials.subtotal).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €</span>
+        </div>
+        ` : ''}
         <div class="flex justify-between text-xs">
           <span class="text-slate-400">IVA (${budget.financials.taxRatePercentage}%)</span>
           <span class="font-medium text-slate-700">${budget.financials.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €</span>

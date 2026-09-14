@@ -147,15 +147,32 @@ export class PresuVozEngine {
         id: index + 1,
         description: cleanDesc,
         qty,
+        unit: item.unit || 'pa',
         unitPrice,
         total,
         isPricePending
       };
     });
 
+    // Detección o asignación de descuento comercial
+    const discountInfo = rawInput.discount || PresuVozParser.extractDiscount(rawText);
+    let discountPercentage = 0;
+    let discountAmount = 0;
+
+    if (discountInfo) {
+      if (discountInfo.type === 'percentage') {
+        discountPercentage = discountInfo.value;
+        discountAmount = Number(((subtotal * discountPercentage) / 100).toFixed(2));
+      } else if (discountInfo.type === 'fixed') {
+        discountAmount = discountInfo.value;
+        discountPercentage = subtotal > 0 ? Number(((discountAmount / subtotal) * 100).toFixed(1)) : 0;
+      }
+    }
+
     subtotal = Number(subtotal.toFixed(2));
-    const taxAmount = Number((subtotal * taxRate).toFixed(2));
-    const totalAmount = Number((subtotal + taxAmount).toFixed(2));
+    const taxableBase = Number((subtotal - discountAmount).toFixed(2));
+    const taxAmount = Number((taxableBase * taxRate).toFixed(2));
+    const totalAmount = Number((taxableBase + taxAmount).toFixed(2));
     const advanceAmount = Number(((totalAmount * terms.advancePercentage) / 100).toFixed(2));
 
     const budgetId = `PRE-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -176,6 +193,9 @@ export class PresuVozEngine {
       items,
       financials: {
         subtotal,
+        discountPercentage,
+        discountAmount,
+        taxableBase,
         taxRatePercentage: Math.round(taxRate * 100),
         taxAmount,
         totalAmount,
@@ -250,11 +270,23 @@ export class PresuVozEngine {
     });
 
     subtotal = Number(subtotal.toFixed(2));
-    const taxAmount = Number((subtotal * taxRate).toFixed(2));
-    const totalAmount = Number((subtotal + taxAmount).toFixed(2));
+
+    let discountAmount = 0;
+    const discountPct = budget.financials.discountPercentage || 0;
+    if (discountPct > 0) {
+      discountAmount = Number(((subtotal * discountPct) / 100).toFixed(2));
+    } else if (budget.financials.discountAmount > 0) {
+      discountAmount = budget.financials.discountAmount;
+    }
+
+    const taxableBase = Number((subtotal - discountAmount).toFixed(2));
+    const taxAmount = Number((taxableBase * taxRate).toFixed(2));
+    const totalAmount = Number((taxableBase + taxAmount).toFixed(2));
     const advanceAmount = Number(((totalAmount * advancePct) / 100).toFixed(2));
 
     budget.financials.subtotal = subtotal;
+    budget.financials.discountAmount = discountAmount;
+    budget.financials.taxableBase = taxableBase;
     budget.financials.taxAmount = taxAmount;
     budget.financials.totalAmount = totalAmount;
     budget.financials.advanceAmount = advanceAmount;

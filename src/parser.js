@@ -70,6 +70,28 @@ export class PresuVozParser {
       formal: "Preparación de paramentos, emplastecido y aplicación de pintura plástica lisa de alta cubrición en techos y paredes"
     },
 
+    // Capítulos de Reforma Integral y Edificación
+    {
+      regex: /(?:demoliciones?\s+y\s+(?:de\s+)?escombros?|desescombro|demoliciones\s+generales)/i,
+      formal: "Demolición de revestimientos, tabiquería interior y retirada de escombros a vertedero homologado"
+    },
+    {
+      regex: /(?:albañiler[ií]a\s+general|distribuci[oó]n|enmaestrado|maestreado|regresi[oó]n|recrecido|falso\s*techo\s*de\s*pladur)/i,
+      formal: "Albañilería general, redistribución de tabiquería, trasdosados de pladur y recrecido autonivelante de suelos"
+    },
+    {
+      regex: /(?:fontaner[ií]a\s+y\s+saneamiento|saneamiento|multicapa|polietileno\s*reticulado|red\s*(?:completa)?\s*(?:de\s+agua)?)/i,
+      formal: "Instalación integral de fontanería y saneamiento con red de tubería multicapa / polietileno reticulado y desagües"
+    },
+    {
+      regex: /(?:electricidad\s+y\s+telecomunicaciones|telecomunicaciones|rbt|rebt)/i,
+      formal: "Instalación eléctrica y telecomunicaciones según REBT con nuevo cuadro general de mando y protecciones"
+    },
+    {
+      regex: /(?:alicatados?\s*y\s*solados?|alicatar\s*y\s*solar|porcel[aá]nico|grespe)/i,
+      formal: "Suministro y colocación de alicatados y solados en gres porcelánico con adhesivo flexible C2TE y rejuntado"
+    },
+
     // Demolición y Tabiquería / Reforma Integral
     {
       regex: /(quitar|tirar|demoler|derribar)\s*(las)?\s*(paredes?|tabiques?)|reforma\s*integral/i,
@@ -318,6 +340,65 @@ export class PresuVozParser {
   }
 
   /**
+   * Extrae el importe de una frase soportando rangos de precios (Math.max en obra),
+   * fallos fonéticos de transcripción de Whisper (ej. 4.205.000 -> 5.000) y formatos mixtos.
+   */
+  static extractPrice(str) {
+    if (!str || typeof str !== "string") return 0;
+
+    // 1. Whisper phonetic glitch: "4.205.000" (significa "4.200 a 5.000")
+    const whisperGlitch = str.match(/\b([1-9])\.(\d{2,3})([1-9])\.000\b/);
+    if (whisperGlitch) {
+      const high = parseInt(whisperGlitch[3], 10) * 1000;
+      return high;
+    }
+
+    // 2. Rango con separador: "4.500 a 6000", "8.000 a 11.000", "4.000 y 5.500", "5.500 7.500"
+    const rangeMatch = str.match(/(?:(?:de|entre|unos?)\s+)?(\d+(?:[\.,]\d{3})*|\d+)\s*(?:a|y|-|hasta|\s+)\s*(\d+(?:[\.,]\d{3})*|\d+)\s*(?:euros?|pavos|€)?/i);
+    if (rangeMatch) {
+      const clean1 = parseFloat(rangeMatch[1].replace(/\./g, "").replace(",", "."));
+      const clean2 = parseFloat(rangeMatch[2].replace(/\./g, "").replace(",", "."));
+      if (!isNaN(clean1) && !isNaN(clean2) && clean1 > 0 && clean2 > 0) {
+        return Math.max(clean1, clean2);
+      }
+    }
+
+    // 3. Número con unidad monetaria ("por cuatrocientos pavos", "por 250 euros", "300 euros")
+    const moneyMatch = str.match(/(?:(?:a|en|aún|aun|un)?\s*total\s+de\s+|por\s+|de\s+|costar\s+|salir\s+por\s+|[:\s])?((?:\d+(?:[\.,]\d{1,3})*|\b(?:(?:mil|doscient[ao]s|trescient[ao]s|cuatrocient[ao]s|quinient[ao]s|seiscient[ao]s|setecient[ao]s|ochocient[ao]s|novecient[ao]s|cien|ciento|veinte|veinti[a-záéíóúñ]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|diez|once|doce|trece|catorce|quince|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)\s*(?:y\s*)?)+))\s*(?:euros?|pavos|€)\b/i);
+    if (moneyMatch) {
+      return this.parsePriceString(moneyMatch[1].trim());
+    }
+
+    return this.parsePriceString(str);
+  }
+
+  /**
+   * Extrae descuentos dictados por el usuario (% o importe fijo)
+   */
+  static extractDiscount(text) {
+    if (!text || typeof text !== "string") return null;
+
+    const pctMatch = text.match(/(?:descuento|rebaja)\s+(?:del?\s+)?(\d{1,2}|diez|quince|veinte|veinticinco)\s*(?:%|por\s*ciento)?/i);
+    if (pctMatch) {
+      const numWords = { "diez": 10, "quince": 15, "veinte": 20, "veinticinco": 25 };
+      const val = numWords[pctMatch[1].toLowerCase()] || parseInt(pctMatch[1], 10);
+      if (!isNaN(val) && val > 0 && val <= 100) {
+        return { type: "percentage", value: val };
+      }
+    }
+
+    const fixedMatch = text.match(/(?:descuento|rebaja)\s+(?:de\s+)?(\d+(?:[\.,]\d{1,2})?)\s*(?:euros?|pavos|€)/i);
+    if (fixedMatch) {
+      const val = parseFloat(fixedMatch[1].replace(/\./g, "").replace(",", "."));
+      if (!isNaN(val) && val > 0) {
+        return { type: "fixed", value: val };
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Extrae el nombre del cliente eliminando preposiciones y fórmulas de cortesía
    */
   static extractClientName(text) {
@@ -492,6 +573,9 @@ export class PresuVozParser {
     result = result.replace(/\b(?:y\s+)?(?:eso|esto)\s+(?:ser[ií]a|es)\s+todo\b/gi, "");
     result = result.replace(/\b(?:y\s+)?ya\s+est[aá]\b/gi, "");
     result = result.replace(/\b(?:y\s+)?nada\s+m[aá]s\b/gi, "");
+    result = result.replace(/\bque\s+est[aá]\s+bastante\s+bien.*$/gi, "");
+    result = result.replace(/\bsinceramente\b/gi, "");
+    result = result.replace(/\bun\s+corte\s+(?:un\s+corte\s+)?estimado\s+de\b/gi, "");
     return result.replace(/\s+/g, " ").trim();
   }
 
@@ -545,69 +629,163 @@ export class PresuVozParser {
       warnings.push(addressValidation.warningMessage);
     }
 
-    // Separar por saltos de línea, guiones, conectores verbales o transiciones de partida
-    const segRegex = /(?:\n|\.|\;|\s*-\s*|\b(?:y\s+)?(?:habr[ií]a\s+que|hay\s+que|tambi[eé]n\s+(?:habr[ií]a\s+que|hay\s+que|habr[ií]a|vamos\s+a|quiero|poner|cambiar|instalar|hacer)|y\s+tambi[eé]n|y\s+adem[aá]s|adem[aá]s\s+(?:de\s+eso|de\s+esto)?|luego|despu[eé]s|por\s+otro\s+lado|con\s+un[ao]?)\b|(?<=(?:euros?|pavos|€))\s+(?=(?:demoler|derribar|quitar|tirar|cambiar|poner|instalar|remoquetar|hacer|alicatar|mampara|plato|bañera|suelo)\b)|(?<=(?:ventanas?|tabiques?|paredes?|cocina|baño|sal[oó]n|habitaci[oó]n))\s+(?=(?:cambiar|poner|instalar|remoquetar|alicatar|demoler|derribar|hacer)\b))/i;
+    // Normalizar patrones invertidos de gremios/capítulos: "X sería la cuarta partida" -> "luego la partida cuarta X"
+    let normalized = rawTranscript.replace(/(\b(?:euros?|pavos|€|\.|\;|\,)\s+|^)([a-záéíóúñ\s]+?)\s+ser[ií]a\s+la\s+(primera|segunda|tercera|cuarta|quinta|sexta|cuarto|quinto|[0-9]+)\s+partida/gi, (match, prefix, trade, num) => {
+      return `${prefix} luego la partida ${num} ${trade} `;
+    });
 
-    const lines = rawTranscript
-      .split(segRegex)
-      .map(l => l.trim())
-      .filter(l => l.length > 3);
+    const numWords = "primera|primero|segunda|segundo|tercera|tercero|cuarta|cuarto|quinta|quinto|sexta|sexto|uno|dos|tres|cuatro|cinco|seis|[0-9]+";
+    const chapterMatchRegex = new RegExp(`\\bpartida\\s+(?:${numWords})\\b`, "i");
+    const isChapterBased = chapterMatchRegex.test(normalized);
 
     const rawItems = [];
 
-    // Regex de precio: dígitos o palabras numéricas españolas con prefijos coloquiales ("a un total de", "por", "de")
-    const priceRegex = /(?:(?:a|en|aún|aun|un)?\s*total\s+de\s+|por\s+|de\s+|[:\s])?((?:\d+(?:[\.,]\d{1,2})?|\b(?:(?:mil|doscient[ao]s|trescient[ao]s|cuatrocient[ao]s|quinient[ao]s|seiscient[ao]s|setecient[ao]s|ochocient[ao]s|novecient[ao]s|cien|ciento|veinte|veinti[a-záéíóúñ]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|diez|once|doce|trece|catorce|quince|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)\s*(?:y\s*)?)+))\s*(?:euros?|pavos|€)\b/i;
+    if (isChapterBased) {
+      // Audio estructurado por capítulos de gremios / partidas maestras
+      const chapterSplitRegex = new RegExp(`\\b(?:y\s+)?(?:luego\s+)?(?:vamos\s+con\s+)?(?:por\s+[uú]ltimo\s+)?(?:la\s+)?partida\\s+(?:${numWords})\\b`, "gi");
+      const parts = normalized.split(chapterSplitRegex).map(p => p.trim()).filter(p => p.length > 5);
 
-    for (const line of lines) {
-      const priceMatch = line.match(priceRegex);
-
-      // Omitir líneas que son solo presentación, dirección, ubicación o condiciones de pago
-      if (/(^para\s+[A-Z]|calle|avenida|paseo|plaza|vivienda\s+habitual|validez|anticipo|cobramos\s+[0-9]+%|pague\s+el\s+[0-9]+%|dile\s+que\s+no\s+sea\s+rata|hola|buen(?:as?|os?)\s+(?:tardes|d[ií]as)|me\s+gustar[ií]a\s+presupuestar|(?:casa|piso|chalet|local|obra)\s+en)/i.test(line) && !priceMatch && !/(?:cambiar|instalar|poner|alicatar|demolici|suelo|baño|cocina|mampara|tabique|grifo|puerta|ventana|split|pint)/i.test(line)) {
-        continue;
-      }
-
-      if (priceMatch) {
-        const rawPriceStr = priceMatch[1].trim();
-        const price = this.parsePriceString(rawPriceStr);
-        
-        // Extraer descripción quitando el precio y las muletillas
-        let desc = line.replace(priceMatch[0], "").replace(/^[\s:\-,]+/, "").replace(/[\s\.\-,]+$/, "").trim();
-        desc = this.cleanRawText(desc);
-
-        // Detectar cantidad (ej: "4 enchufes", "5 puertas")
-        let qty = 1;
-        const qtyMatch = desc.match(/^([0-9]+)\s+/);
-        if (qtyMatch) {
-          qty = parseInt(qtyMatch[1], 10);
-          desc = desc.replace(qtyMatch[0], "");
+      for (const part of parts) {
+        // Omitir preámbulo inicial si no contiene conceptos de obra ni precio
+        if (/^(?:oye|hola|buen(?:as|os)|te\s+voy\s+a\s+comentar)/i.test(part) && !/(?:euros?|pavos|€|\d{3,})/i.test(part)) {
+          continue;
         }
 
-        if (price > 0 && desc.length > 3) {
+        const price = this.extractPrice(part);
+
+        // Limpiar justificaciones tipo "porque...", "ya que...", coletillas y estimaciones
+        let desc = part.replace(/\b(?:porque|ya\s+que|puesto\s+que)\b.*$/i, "");
+        desc = desc.replace(/\b(?:que\s+est[aá]\s+bastante\s+bien|sinceramente|y\s+ya\s+est[aá]|eso\s+ser[ií]a\s+todo)\b.*$/i, "");
+        desc = desc.replace(/(?:un\s+corte\s+(?:un\s+corte\s+)?estimado\s+de\s+|eso\s+podr[ií]a\s+costar\s+|va\s+a\s+costar\s+|va\s+a\s+salir\s+por\s+).*/i, "");
+        desc = desc.replace(/^(?:(?:y\s+)?(?:luego\s+)?(?:vamos\s+con\s+)?(?:por\s+[uú]ltimo\s+)?(?:la\s+)?partida\s*(?:primera|primero|segunda|segundo|tercera|tercero|cuarta|cuarto|quinta|quinto|sexta|sexto|uno|dos|tres|cuatro|cinco|seis|[0-9]+)\s*[:\-]*)?/i, "");
+        desc = desc.replace(/^(?:partida\s+eh\s+|ser[ií]a\s+|que\s+ser[ií]a\s+)/i, "");
+
+        // Quitar menciones de precio que hayan quedado en el texto
+        desc = desc.replace(/(?:(?:entre|unos?|de)\s+)?(?:\d+(?:[\.,]\d{3})*|\d+)\s*(?:a|y|-|hasta|\s+)\s*(?:\d+(?:[\.,]\d{3})*|\d+)\s*(?:euros?|pavos|€)?/gi, "");
+        desc = desc.replace(/\b[1-9]\.\d{2,3}[1-9]\.000\s*(?:euros?|pavos|€)?/gi, "");
+        desc = desc.replace(/\b\d+(?:[\.,]\d{1,3})*\s*(?:euros?|pavos|€)\b/gi, "");
+
+        desc = this.cleanRawText(desc);
+
+        // Detectar unidades
+        let unit = 'pa'; // Por defecto partida alzada en capítulos
+        let qty = 1;
+        const m2Match = desc.match(/(\d+(?:[\.,]\d+)?)\s*(?:m2|m²|metros?\s*cuadrados?)\b/i);
+        const mlMatch = desc.match(/(\d+(?:[\.,]\d+)?)\s*(?:ml|m\.l\.|metros?\s*lineales?)\b/i);
+        const udMatch = desc.match(/(\d+)\s*(?:ud|uds|unidades?|piezas?|puntos?)\b/i);
+
+        if (m2Match) {
+          qty = parseFloat(m2Match[1].replace(',', '.'));
+          unit = 'm²';
+          desc = desc.replace(m2Match[0], "").trim();
+        } else if (mlMatch) {
+          qty = parseFloat(mlMatch[1].replace(',', '.'));
+          unit = 'ml';
+          desc = desc.replace(mlMatch[0], "").trim();
+        } else if (udMatch) {
+          qty = parseInt(udMatch[1], 10);
+          unit = 'ud';
+          desc = desc.replace(udMatch[0], "").trim();
+        }
+
+        if (desc.length > 3) {
           const formalDesc = this.normalizeItemDescription(desc);
           rawItems.push({
             description: formalDesc,
             qty,
+            unit,
             unitPrice: qty > 1 ? Number((price / qty).toFixed(2)) : price,
             total: price,
-            isPricePending: false
+            isPricePending: price === 0
           });
         }
-      } else {
-        // La línea describe una partida de trabajo pero NO tenía precio (modo borrador / medición)
-        if (/(cambiar|instalar|poner|alicatar|demolici[oó]n|reparar|revisi[oó]n|fabricaci[oó]n|suelo|tarima|tuber[ií]a|grifo|baño|cocina|cuadro|puerta|ventana|split|climatizaci[oó]n|pint(ar|ura)|tabique|rozas)/i.test(line)) {
-          const cleanPending = this.cleanRawText(line);
-          const formalDesc = this.normalizeItemDescription(cleanPending);
-          rawItems.push({
-            description: formalDesc,
-            qty: 1,
-            unitPrice: 0,
-            total: 0,
-            isPricePending: true
-          });
-          warnings.push(`Partida pendiente de valorar: "${formalDesc}" (no se mencionó precio en el audio).`);
-        } else if (line.length > 15 && !/(hola|buenos\s+d[ií]as|adi[oó]s|un\s+saludo)/i.test(line)) {
-          // Fragmento con texto que no se interpretó como partida ni como condición
-          warnings.push(`Fragmento no procesado: "${line.slice(0, 45)}..."`);
+      }
+    } else {
+      // Separar por saltos de línea, guiones, conectores verbales o transiciones de partida
+      const segRegex = /(?:\n|\.|\;|\s*-\s*|\b(?:y\s+)?(?:habr[ií]a\s+que|hay\s+que|tambi[eé]n\s+(?:habr[ií]a\s+que|hay\s+que|habr[ií]a|vamos\s+a|quiero|poner|cambiar|instalar|hacer)|y\s+tambi[eé]n|y\s+adem[aá]s|adem[aá]s\s+(?:de\s+eso|de\s+esto)?|luego|despu[eé]s|por\s+otro\s+lado|con\s+un[ao]?)\b|(?<=(?:euros?|pavos|€))\s+(?=(?:demoler|derribar|quitar|tirar|cambiar|poner|instalar|remoquetar|hacer|alicatar|mampara|plato|bañera|suelo)\b)|(?<=(?:ventanas?|tabiques?|paredes?|cocina|baño|sal[oó]n|habitaci[oó]n))\s+(?=(?:cambiar|poner|instalar|remoquetar|alicatar|demoler|derribar|hacer)\b))/i;
+
+      const lines = normalized
+        .split(segRegex)
+        .map(l => l.trim())
+        .filter(l => l.length > 3);
+
+      const priceRegex = /(?:(?:a|en|aún|aun|un)?\s*total\s+de\s+|por\s+|de\s+|[:\s])?((?:\d+(?:[\.,]\d{1,2})?|\b(?:(?:mil|doscient[ao]s|trescient[ao]s|cuatrocient[ao]s|quinient[ao]s|seiscient[ao]s|setecient[ao]s|ochocient[ao]s|novecient[ao]s|cien|ciento|veinte|veinti[a-záéíóúñ]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|diez|once|doce|trece|catorce|quince|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)\s*(?:y\s*)?)+))\s*(?:euros?|pavos|€)\b/i;
+
+      for (const line of lines) {
+        const priceMatch = line.match(priceRegex);
+
+        // Omitir líneas que son solo presentación, dirección, ubicación o condiciones de pago
+        if (/(^para\s+[A-Z]|calle|avenida|paseo|plaza|vivienda\s+habitual|validez|anticipo|cobramos\s+[0-9]+%|pague\s+el\s+[0-9]+%|dile\s+que\s+no\s+sea\s+rata|hola|buen(?:as?|os?)\s+(?:tardes|d[ií]as)|me\s+gustar[ií]a\s+presupuestar|(?:casa|piso|chalet|local|obra)\s+en)/i.test(line) && !priceMatch && !/(?:cambiar|instalar|poner|alicatar|demolici|suelo|baño|cocina|mampara|tabique|grifo|puerta|ventana|split|pint)/i.test(line)) {
+          continue;
+        }
+
+        if (priceMatch) {
+          const rawPriceStr = priceMatch[1].trim();
+          const price = this.parsePriceString(rawPriceStr);
+          
+          // Extraer descripción quitando el precio y las muletillas
+          let desc = line.replace(priceMatch[0], "").replace(/^[\s:\-,]+/, "").replace(/[\s\.\-,]+$/, "").trim();
+          desc = desc.replace(/\b(?:porque|ya\s+que|puesto\s+que)\b.*$/i, "");
+          desc = this.cleanRawText(desc);
+
+          let unit = 'pa';
+          let qty = 1;
+
+          const m2Match = desc.match(/(\d+(?:[\.,]\d+)?)\s*(?:m2|m²|metros?\s*cuadrados?)\b/i);
+          const mlMatch = desc.match(/(\d+(?:[\.,]\d+)?)\s*(?:ml|m\.l\.|metros?\s*lineales?)\b/i);
+          const udMatch = desc.match(/(\d+)\s*(?:ud|uds|unidades?|piezas?|puntos?)\b/i);
+
+          if (m2Match) {
+            qty = parseFloat(m2Match[1].replace(',', '.'));
+            unit = 'm²';
+            desc = desc.replace(m2Match[0], "").trim();
+          } else if (mlMatch) {
+            qty = parseFloat(mlMatch[1].replace(',', '.'));
+            unit = 'ml';
+            desc = desc.replace(mlMatch[0], "").trim();
+          } else if (udMatch) {
+            qty = parseInt(udMatch[1], 10);
+            unit = 'ud';
+            desc = desc.replace(udMatch[0], "").trim();
+          } else {
+            const qtyMatch = desc.match(/^([0-9]+)\s+/);
+            if (qtyMatch) {
+              qty = parseInt(qtyMatch[1], 10);
+              unit = 'ud';
+              desc = desc.replace(qtyMatch[0], "");
+            }
+          }
+
+          if (price > 0 && desc.length > 3) {
+            const formalDesc = this.normalizeItemDescription(desc);
+            rawItems.push({
+              description: formalDesc,
+              qty,
+              unit,
+              unitPrice: qty > 1 ? Number((price / qty).toFixed(2)) : price,
+              total: price,
+              isPricePending: false
+            });
+          }
+        } else {
+          // La línea describe una partida de trabajo pero NO tenía precio (modo borrador / medición)
+          if (/(cambiar|instalar|poner|alicatar|demolici[oó]n|reparar|revisi[oó]n|fabricaci[oó]n|suelo|tarima|tuber[ií]a|grifo|baño|cocina|cuadro|puerta|ventana|split|climatizaci[oó]n|pint(ar|ura)|tabique|rozas)/i.test(line)) {
+            let cleanPending = line.replace(/\b(?:porque|ya\s+que|puesto\s+que)\b.*$/i, "");
+            cleanPending = this.cleanRawText(cleanPending);
+            const formalDesc = this.normalizeItemDescription(cleanPending);
+            rawItems.push({
+              description: formalDesc,
+              qty: 1,
+              unit: 'pa',
+              unitPrice: 0,
+              total: 0,
+              isPricePending: true
+            });
+            warnings.push(`Partida pendiente de valorar: "${formalDesc}" (no se mencionó precio en el audio).`);
+          } else if (line.length > 15 && !/(hola|buenos\s+d[ií]as|adi[oó]s|un\s+saludo)/i.test(line)) {
+            // Fragmento con texto que no se interpretó como partida ni como condición
+            warnings.push(`Fragmento no procesado: "${line.slice(0, 45)}..."`);
+          }
         }
       }
     }
@@ -781,6 +959,7 @@ export class PresuVozParser {
             id: budget.items.length + 1,
             description: formalDesc,
             qty: 1,
+            unit: 'pa',
             unitPrice: price,
             total: price,
             isPricePending: price === 0
