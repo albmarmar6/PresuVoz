@@ -70,6 +70,16 @@ export class PresuVozParser {
       formal: "Preparación de paramentos, emplastecido y aplicación de pintura plástica lisa de alta cubrición en techos y paredes"
     },
 
+    // Demolición y Tabiquería / Reforma Integral
+    {
+      regex: /(quitar|tirar|demoler|derribar)\s*(las)?\s*(paredes?|tabiques?)|reforma\s*integral/i,
+      formal: "Demolición y derribo de tabiquería interior en estancias señaladas, desescombro y transporte a vertedero homologado"
+    },
+    {
+      regex: /(cambiar|poner|sustituir|renovar)?\s*(el)?\s*suelo\s*(del)?\s*(baño|cocina|piso)/i,
+      formal: "Suministro e instalación de pavimento cerámico en cuarto de baño con mortero de agarre"
+    },
+
     // Carpintería y Reformas
     {
       regex: /(armario\s*empotrado|fabricaci[oó]n\s*a\s*medida)/i,
@@ -89,6 +99,10 @@ export class PresuVozParser {
    * Lista negra de palabras coloquiales, muletillas y frases que NUNCA deben aparecer en el presupuesto
    */
   static JUNK_WORDS_PATTERNS = [
+    /hola\s+(buenas\s+tardes|buenos\s+d[ií]as|qu[eé]\s+tal)?/gi,
+    /me\s+gustar[ií]a\s+presupuestar(\s+una\s+casa)?/gi,
+    /eso\s+(lo\s+)?llevar[ií]a\s+(a|en|aún|aun|un)?\s*(total\s+de)?/gi,
+    /y\s+ya\s+est[aá]/gi,
     /oye\s+(carlos|manolo|paco|socio|t[ií]o|compañero)?/gi,
     /qu[eé]\s+pasa\s+(t[ií]o|socio|paco)?/gi,
     /mira\s+(que|te\s+grabo)?/gi,
@@ -125,25 +139,15 @@ export class PresuVozParser {
 
   /**
    * Convierte expresiones numéricas coloquiales o en letras a número
-   * Ejemplo: "mil doscientos" -> 1200, "400 pavos" -> 400
    */
   static parsePriceString(str) {
     if (!str) return 0;
-
-    // Normalizar slang: "pavos", "euros", "eurillos"
     const cleaned = str.replace(/pavos|eurillos|euros|€/gi, "").trim();
-
-    // Si ya es un número directo (ej: "400", "56.50", "1250")
     const directNum = parseFloat(cleaned.replace(/\./g, "").replace(",", "."));
-    if (!isNaN(directNum) && directNum > 0) {
-      return directNum;
-    }
+    if (!isNaN(directNum) && directNum > 0) return directNum;
 
-    // Procesar números en palabras en español (ej: "mil doscientos", "ochenta y cinco")
     const words = cleaned.toLowerCase().split(/\s+/);
-    let total = 0;
-    let current = 0;
-
+    let total = 0, current = 0;
     for (const word of words) {
       if (word === "y") continue;
       if (this.SPANISH_NUMBERS[word] !== undefined) {
@@ -165,7 +169,6 @@ export class PresuVozParser {
    * Extrae el nombre del cliente eliminando preposiciones y fórmulas de cortesía
    */
   static extractClientName(text) {
-    // Busca: "Para [Don/Doña]? [Nombre Apellido]" delimitado por "en", "de", "con" o fin de línea
     const match = text.match(/(?:para|cliente:?)\s+(?:don|doña)?\s*([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){0,2})(?=\s+(?:en|con|de|del|para|que)\b|:|$)/i);
     if (match) {
       return match[1].trim();
@@ -174,15 +177,26 @@ export class PresuVozParser {
   }
 
   /**
-   * Extrae la dirección o ubicación de la obra
+   * Extrae la dirección o ubicación de la obra (calles o localidades)
    */
   static extractAddress(text) {
-    // Busca: "en Calle/Avenida/Plaza/Paseo/Ctra... número..."
-    const match = text.match(/en\s+((?:calle|avenida|avda\.?|plaza|paseo|camino|carretera)\s+[^,\.\n]+?(?:\d+|[a-záéíóúñ\s]+)?)/i);
+    // 1. Calle / Avenida tradicional
+    let match = text.match(/en\s+((?:calle|avenida|avda\.?|plaza|paseo|camino|carretera)\s+[^,\.\n]+?(?:\d+|[a-záéíóúñ\s]+)?)/i);
     if (match) {
       let addr = match[1].replace(/\s+(hay\s+que|para|con|al|que|dile)\b.*/i, "").trim();
       return addr.replace(/[:,\.\-]+$/, "").trim();
     }
+
+    // 2. Ciudad / Pueblo / Localidad (ej: "una casa en torrelavella en Sevilla")
+    match = text.match(/(?:casa|piso|chalet|local|obra|reforma|trabajo)\s+en\s+([a-záéíóúñ\s]+?)(?=\s+(?:con|de|para|hay|habr[ií]a|donde)\b|:|$)/i);
+    if (match) {
+      let loc = match[1].trim().replace(/\s+en\s+/i, ", ");
+      return loc
+        .split(/,\s*/)
+        .map(part => part.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" "))
+        .join(", ");
+    }
+
     return "Ubicación obra según visita técnica";
   }
 
@@ -234,24 +248,26 @@ export class PresuVozParser {
     const clientName = this.extractClientName(rawTranscript);
     const clientAddress = this.extractAddress(rawTranscript);
 
-    // Separar por líneas, guiones o conectores comunes ("hay que hacer:", "-", "y también")
+    // Separar por saltos de línea, guiones o conectores verbales de obra ("habría que", "hay que", "con una", etc.)
+    const segRegex = /(?:\n|\.|\;|\s*-\s*|\b(?:habr[ií]a\s+que|hay\s+que|tambi[eé]n\s+(?:habr[ií]a\s+que|hay\s+que|habr[ií]a|vamos\s+a|quiero|poner|cambiar|instalar|hacer)|y\s+tambi[eé]n|y\s+adem[aá]s|adem[aá]s\s+(?:de\s+eso|de\s+esto)?|luego|despu[eé]s|por\s+otro\s+lado|con\s+un[ao]?)\b)/i;
+
     const lines = rawTranscript
-      .split(/\n|(?:\s*-\s*)|\b(?:primero|segundo|tercero|luego|adem[aá]s|y\s+tambi[eé]n)\b/i)
+      .split(segRegex)
       .map(l => l.trim())
-      .filter(l => l.length > 8);
+      .filter(l => l.length > 3);
 
     const rawItems = [];
 
-    // Regex de precio: dígitos o palabras numéricas españolas
-    const priceRegex = /(?:por\s+|[:\s])?((?:\d+(?:[\.,]\d{1,2})?|\b(?:(?:mil|doscient[ao]s|trescient[ao]s|cuatrocient[ao]s|quinient[ao]s|seiscient[ao]s|setecient[ao]s|ochocient[ao]s|novecient[ao]s|cien|ciento|veinte|veinti[a-záéíóúñ]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|diez|once|doce|trece|catorce|quince|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)\s*(?:y\s*)?)+))\s*(?:euros?|pavos|€)\b/i;
+    // Regex de precio: dígitos o palabras numéricas españolas con prefijos coloquiales ("a un total de", "por", "de")
+    const priceRegex = /(?:(?:a|en|aún|aun|un)?\s*total\s+de\s+|por\s+|de\s+|[:\s])?((?:\d+(?:[\.,]\d{1,2})?|\b(?:(?:mil|doscient[ao]s|trescient[ao]s|cuatrocient[ao]s|quinient[ao]s|seiscient[ao]s|setecient[ao]s|ochocient[ao]s|novecient[ao]s|cien|ciento|veinte|veinti[a-záéíóúñ]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|diez|once|doce|trece|catorce|quince|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)\s*(?:y\s*)?)+))\s*(?:euros?|pavos|€)\b/i;
 
     for (const line of lines) {
-      // Omitir líneas que son solo presentación, dirección o condiciones de pago
-      if (/(^para\s+[A-Z]|calle|avenida|paseo|plaza|vivienda\s+habitual|validez|anticipo|cobramos\s+[0-9]+%|pague\s+el\s+[0-9]+%|dile\s+que\s+no\s+sea\s+rata)/i.test(line)) {
+      const priceMatch = line.match(priceRegex);
+
+      // Omitir líneas que son solo presentación, dirección, ubicación o condiciones de pago
+      if (/(^para\s+[A-Z]|calle|avenida|paseo|plaza|vivienda\s+habitual|validez|anticipo|cobramos\s+[0-9]+%|pague\s+el\s+[0-9]+%|dile\s+que\s+no\s+sea\s+rata|hola|buen(?:as?|os?)\s+(?:tardes|d[ií]as)|me\s+gustar[ií]a\s+presupuestar|(?:casa|piso|chalet|local|obra)\s+en)/i.test(line) && !priceMatch && !/(?:cambiar|instalar|poner|alicatar|demolici|suelo|baño|cocina|mampara|tabique|grifo|puerta|ventana|split|pint)/i.test(line)) {
         continue;
       }
-
-      const priceMatch = line.match(priceRegex);
 
       if (priceMatch) {
         const rawPriceStr = priceMatch[1].trim();

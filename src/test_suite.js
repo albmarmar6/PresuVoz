@@ -177,6 +177,31 @@ assert(res6.assistantFeedback.includes("Borrador"), "Emite confirmación con el 
 console.log(`  Respuesta de WhatsApp al instalador:\n  "${res6.assistantFeedback}"\n`);
 
 // -----------------------------------------------------------------------------
+// CASO 7: Audio continuo corrido sin puntuación (Voz natural en una sola frase)
+// -----------------------------------------------------------------------------
+console.log("TEST 7: Audio continuo sin signos de puntuación ni saltos de línea");
+const audioContinuo = "hola buenas tardes me gustaría presupuestar una casa en torrelavella en Sevilla con una mampara de 250 euros habría que cambiar el suelo del baño habría que hacer una reforma integral de quitar las paredes de la cocina también de la habitación eso lo llevaría aún total de 300 euros y ya está";
+
+const res7 = engine.process(audioContinuo);
+assert(res7.success === true, "Procesa con éxito un audio continuo sin pausas ni puntuación");
+assert(res7.client.address === "Torrelavella, Sevilla", `Extrae la localidad limpia ('Torrelavella, Sevilla'). Obtenido: ${res7.client.address}`);
+assert(res7.items.length === 3, `Segmenta con precisión las 3 partidas descritas. Obtenido: ${res7.items.length}`);
+assert(res7.items[0].total === 250, "Partida 1 (Mampara): 250.00 €");
+assert(res7.items[1].isPricePending === true, "Partida 2 (Suelo del baño): Marcada como pendiente de valorar");
+assert(res7.items[2].total === 300, "Partida 3 (Demolición paredes/cocina/habitación): 300.00 €");
+assert(res7.financials.subtotal === 550, `Subtotal exacto (250 + 300 = 550 €). Obtenido: ${res7.financials.subtotal} €`);
+assert(res7.financials.taxRatePercentage === 10, "Aplica IVA reducido del 10% para reforma de vivienda");
+assert(res7.financials.totalAmount === 605, `Total exacto con IVA (605.00 €). Obtenido: ${res7.financials.totalAmount} €`);
+assert(res7.hasWarnings === true, "Avisa al usuario de que el suelo del baño no tenía precio en el audio");
+
+// Prueba de actualización conversacional para completar el suelo
+const upd7 = engine.updateBudgetPrice(res7.budget, "Ponle 180 euros al suelo");
+assert(upd7.success === true, "Permite completar el precio del suelo del baño por chat");
+assert(upd7.budget.financials.subtotal === 730, `Nuevo subtotal recalculado: 730.00 €. Obtenido: ${upd7.budget.financials.subtotal} €`);
+assert(upd7.budget.financials.totalAmount === 803, `Nuevo total con IVA recalculado: 803.00 €. Obtenido: ${upd7.budget.financials.totalAmount} €`);
+console.log(`  Respuesta de WhatsApp al completar la partida:\n  "${upd7.assistantMessage}"\n`);
+
+// -----------------------------------------------------------------------------
 // RESUMEN FINAL
 // -----------------------------------------------------------------------------
 console.log("==========================================================");

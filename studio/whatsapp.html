@@ -146,12 +146,18 @@
         { regex: /(enchufes?|tomas?\s*de\s*corriente|mecanismos?|rozas)/i, formal: "Suministro y montaje de tomas de corriente tipo Schuko con toma de tierra y embellecedores de primera calidad" },
         { regex: /(split|aire\s*acondicionado|clima)\s*([0-9]+\s*frigor[ií]as)?/i, formal: "Suministro e instalación de equipo de aire acondicionado tipo Split (unidad interior y exterior) con bomba de calor y alta eficiencia energética" },
         { regex: /(pintura|pintar|enlucir|alisar)/i, formal: "Preparación de paramentos, emplastecido y aplicación de pintura plástica lisa de alta cubrición en techos y paredes" },
+        { regex: /(quitar|tirar|demoler|derribar)\s*(las)?\s*(paredes?|tabiques?)|reforma\s*integral/i, formal: "Demolición y derribo de tabiquería interior en estancias señaladas, desescombro y transporte a vertedero homologado" },
+        { regex: /(cambiar|poner|sustituir|renovar)?\s*(el)?\s*suelo\s*(del)?\s*(baño|cocina|piso)/i, formal: "Suministro e instalación de pavimento cerámico en cuarto de baño con mortero de agarre" },
         { regex: /(armario\s*empotrado|fabricaci[oó]n\s*a\s*medida)/i, formal: "Fabricación a medida e instalación de armario empotrado con puertas correderas, acabado melamínico de alta resistencia y distribución interior a medida" },
         { regex: /(cepillar|ajustar|manivelas?|puertas?\s*de\s*paso)/i, formal: "Revisión, cepillado de holguras, ajuste perimetral y sustitución de manivelas en puertas de paso de madera" },
         { regex: /(suelo|tarima\s*flotante|laminado|ac5)/i, formal: "Suministro e instalación de suelo laminado de alta resistencia (AC5) con base aislante acústica y zócalos perimetrales" }
       ],
 
       JUNK_WORDS_PATTERNS: [
+        /hola\s+(buenas\s+tardes|buenos\s+d[ií]as|qu[eé]\s+tal)?/gi,
+        /me\s+gustar[ií]a\s+presupuestar(\s+una\s+casa)?/gi,
+        /eso\s+(lo\s+)?llevar[ií]a\s+(a|en|aún|aun|un)?\s*(total\s+de)?/gi,
+        /y\s+ya\s+est[aá]/gi,
         /oye\s+(carlos|manolo|paco|socio|t[ií]o|compañero)?/gi,
         /qu[eé]\s+pasa\s+(t[ií]o|socio|paco)?/gi,
         /mira\s+(que|te\s+grabo)?/gi,
@@ -213,10 +219,18 @@
       },
 
       extractAddress: function(text) {
-        const match = text.match(/en\s+((?:calle|avenida|avda\.?|plaza|paseo|camino|carretera)\s+[^,\.\n]+?(?:\d+|[a-záéíóúñ\s]+)?)/i);
+        let match = text.match(/en\s+((?:calle|avenida|avda\.?|plaza|paseo|camino|carretera)\s+[^,\.\n]+?(?:\d+|[a-záéíóúñ\s]+)?)/i);
         if (match) {
           let addr = match[1].replace(/\s+(hay\s+que|para|con|al|que|dile)\b.*/i, "").trim();
           return addr.replace(/[:,\.\-]+$/, "").trim();
+        }
+        match = text.match(/(?:casa|piso|chalet|local|obra|reforma|trabajo)\s+en\s+([a-záéíóúñ\s]+?)(?=\s+(?:con|de|para|hay|habr[ií]a|donde)\b|:|$)/i);
+        if (match) {
+          let loc = match[1].trim().replace(/\s+en\s+/i, ", ");
+          return loc
+            .split(/,\s*/)
+            .map(part => part.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" "))
+            .join(", ");
         }
         return "Ubicación obra según visita técnica";
       },
@@ -249,20 +263,22 @@
         const clientName = this.extractClientName(rawTranscript);
         const clientAddress = this.extractAddress(rawTranscript);
 
+        const segRegex = /(?:\n|\.|\;|\s*-\s*|\b(?:habr[ií]a\s+que|hay\s+que|tambi[eé]n\s+(?:habr[ií]a\s+que|hay\s+que|habr[ií]a|vamos\s+a|quiero|poner|cambiar|instalar|hacer)|y\s+tambi[eé]n|y\s+adem[aá]s|adem[aá]s\s+(?:de\s+eso|de\s+esto)?|luego|despu[eé]s|por\s+otro\s+lado|con\s+un[ao]?)\b)/i;
+
         const lines = rawTranscript
-          .split(/\n|(?:\s*-\s*)|\b(?:primero|segundo|tercero|luego|adem[aá]s|y\s+tambi[eé]n)\b/i)
+          .split(segRegex)
           .map(l => l.trim())
-          .filter(l => l.length > 8);
+          .filter(l => l.length > 3);
 
         const rawItems = [];
-        const priceRegex = /(?:por\s+|[:\s])?((?:\d+(?:[\.,]\d{1,2})?|\b(?:(?:mil|doscient[ao]s|trescient[ao]s|cuatrocient[ao]s|quinient[ao]s|seiscient[ao]s|setecient[ao]s|ochocient[ao]s|novecient[ao]s|cien|ciento|veinte|veinti[a-záéíóúñ]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|diez|once|doce|trece|catorce|quince|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)\s*(?:y\s*)?)+))\s*(?:euros?|pavos|€)\b/i;
+        const priceRegex = /(?:(?:a|en|aún|aun|un)?\s*total\s+de\s+|por\s+|de\s+|[:\s])?((?:\d+(?:[\.,]\d{1,2})?|\b(?:(?:mil|doscient[ao]s|trescient[ao]s|cuatrocient[ao]s|quinient[ao]s|seiscient[ao]s|setecient[ao]s|ochocient[ao]s|novecient[ao]s|cien|ciento|veinte|veinti[a-záéíóúñ]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|diez|once|doce|trece|catorce|quince|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)\s*(?:y\s*)?)+))\s*(?:euros?|pavos|€)\b/i;
 
         for (const line of lines) {
-          if (/(^para\s+[A-Z]|calle|avenida|paseo|plaza|vivienda\s+habitual|validez|anticipo|cobramos\s+[0-9]+%|pague\s+el\s+[0-9]+%|dile\s+que\s+no\s+sea\s+rata)/i.test(line)) {
+          const priceMatch = line.match(priceRegex);
+
+          if (/(^para\s+[A-Z]|calle|avenida|paseo|plaza|vivienda\s+habitual|validez|anticipo|cobramos\s+[0-9]+%|pague\s+el\s+[0-9]+%|dile\s+que\s+no\s+sea\s+rata|hola|buen(?:as?|os?)\s+(?:tardes|d[ií]as)|me\s+gustar[ií]a\s+presupuestar|(?:casa|piso|chalet|local|obra)\s+en)/i.test(line) && !priceMatch && !/(?:cambiar|instalar|poner|alicatar|demolici|suelo|baño|cocina|mampara|tabique|grifo|puerta|ventana|split|pint)/i.test(line)) {
             continue;
           }
-
-          const priceMatch = line.match(priceRegex);
 
           if (priceMatch) {
             const rawPriceStr = priceMatch[1].trim();
