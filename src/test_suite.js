@@ -132,10 +132,11 @@ Para Don Pedro Gómez en Calle Mayor cuarenta:
 const res4 = engine.process(audioConAdvertencia);
 assert(res4.success === true, "El motor GENERA el presupuesto con las partidas valoradas (no se pierde el trabajo)");
 assert(res4.hasWarnings === true, "Activa la bandera de advertencias (hasWarnings: true)");
-assert(res4.items.length === 2, "Incluye las 2 partidas con precio (plato y grifería)");
+assert(res4.items.filter(it => !it.isPricePending).length === 2, "Incluye las 2 partidas con precio valoradas (plato y grifería)");
+assert(res4.items.length === 3, "Conserva además la partida pendiente en el presupuesto");
 assert(res4.financials.subtotal === 530, `Calcula el subtotal exacto de las partidas valoradas (450 + 80 = 530 €)`);
 assert(res4.warnings.length > 0, "Registra la partida pendiente en la lista de avisos");
-assert(res4.warnings[0].includes("Alicatar"), "Identifica con precisión qué partida quedó pendiente ('Alicatar')");
+assert(res4.warnings[0].toLowerCase().includes("alicata"), "Identifica con precisión qué partida quedó pendiente ('alicatado')");
 assert(res4.assistantFeedback.includes("⚠️"), "Genera el mensaje de WhatsApp avisando al instalador con soluciones");
 
 console.log("\n  Mensaje automático que WhatsApp enviará al instalador:");
@@ -144,17 +145,36 @@ console.log("  " + res4.assistantFeedback.replace(/\n/g, "\n  "));
 console.log("  ------------------------------------------------------------\n");
 
 // -----------------------------------------------------------------------------
-// CASO 5: Audio sin ningún precio — Alerta de ayuda
+// CASO 5: Actualización Conversacional — Rellenar precio pendiente con mensaje
 // -----------------------------------------------------------------------------
-console.log("TEST 5: Audio sin ningún precio en absoluto (Guía al instalador)");
-const audioSinNadaDePrecio = `
-Hola Pedro, ve a mirar la casa de Calle Mayor y me dices qué hacemos con el baño.
+console.log("TEST 5: Rellenar campo pendiente mediante mensaje corto ('Ponle 250 al alicatado')");
+const updateRes = engine.updateBudgetPrice(res4.budget, "Ponle 250 al alicatado");
+assert(updateRes.success === true, "El motor procesa la actualización conversacional con éxito");
+assert(updateRes.budget.items[1].total === 250, "Asigna 250.00 € a la partida de alicatado");
+assert(updateRes.budget.financials.subtotal === 780, `Recalcula el subtotal automáticamente (530 + 250 = 780 €). Obtenido: ${updateRes.budget.financials.subtotal} €`);
+assert(updateRes.budget.hasWarnings === false, "Todas las partidas quedan valoradas (hasWarnings: false)");
+assert(updateRes.budget.status === "PENDIENTE_FIRMA", "El estado pasa a 'PENDIENTE_FIRMA'");
+console.log(`  Respuesta de WhatsApp al instalador:\n  "${updateRes.assistantMessage}"\n`);
+
+// -----------------------------------------------------------------------------
+// CASO 6: Audio sin ningún precio en absoluto — Borrador de Visita Técnica
+// -----------------------------------------------------------------------------
+console.log("TEST 6: Audio sin precios — Generación de Borrador de Visita Técnica (Medición)");
+const audioVisitaSinPrecios = `
+Para Don Javier en Calle Sierpes cinco:
+- Demolición de tabique interior.
+- Rozas para enchufes e instalación eléctrica de cocina.
+- Pintura plástica lisa en paredes y techos.
 `;
 
-const res5 = engine.process(audioSinNadaDePrecio);
-assert(res5.success === false, "Si no hay ningún precio, frena y pide aclaración");
-assert(res5.assistantFeedback.includes("❌"), "Emite mensaje de ayuda explicando qué falta");
-console.log(`  Mensaje de ayuda emitido: "${res5.assistantFeedback}"\n`);
+const res6 = engine.process(audioVisitaSinPrecios);
+assert(res6.success === true, "Genera el borrador de visita técnica sin rechazar el audio");
+assert(res6.isDraft === true, "Identifica el documento como Borrador (isDraft: true)");
+assert(res6.status === "BORRADOR_MEDICION", "Estado asignado: 'BORRADOR_MEDICION'");
+assert(res6.items.length === 3, "Conserva íntegramente las 3 partidas descritas en la visita");
+assert(res6.items[0].isPricePending === true, "Marca la partida como pendiente de valorar");
+assert(res6.assistantFeedback.includes("Borrador"), "Emite confirmación con el listado de partidas guardadas");
+console.log(`  Respuesta de WhatsApp al instalador:\n  "${res6.assistantFeedback}"\n`);
 
 // -----------------------------------------------------------------------------
 // RESUMEN FINAL
@@ -162,7 +182,7 @@ console.log(`  Mensaje de ayuda emitido: "${res5.assistantFeedback}"\n`);
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
-  console.log("🛡️  El motor es resiliente: genera presupuestos sin perder datos y avisa de omisiones.");
+  console.log("🛡️  El motor es 100% conversacional, tolerante a fallos y soporta borradores.");
 } else {
   console.error(`❌ RESULTADO: ${passedCount}/${totalCount} pruebas superadas.`);
 }

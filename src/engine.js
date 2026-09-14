@@ -135,12 +135,15 @@ export class PresuVozEngine {
       // Sanitización contra palabras sueltas o muletillas
       const cleanDesc = PresuVozParser.normalizeItemDescription(item.description || "");
 
+      const isPricePending = item.isPricePending !== undefined ? item.isPricePending : (total === 0);
+
       return {
         id: index + 1,
         description: cleanDesc,
         qty,
         unitPrice,
-        total
+        total,
+        isPricePending
       };
     });
 
@@ -151,6 +154,8 @@ export class PresuVozEngine {
 
     const budgetId = `PRE-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
     const issueDate = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
+    const isDraft = items.every(it => it.total === 0);
 
     const budget = {
       id: budgetId,
@@ -176,9 +181,10 @@ export class PresuVozEngine {
         validityDays: terms.validityDays,
         conditions: rawInput.customConditions || terms.textConditions
       },
-      status: "PENDIENTE_FIRMA",
+      isDraft,
+      status: isDraft ? "BORRADOR_MEDICION" : "PENDIENTE_FIRMA",
       signUrl: `https://presuvoz.app/f/${Math.random().toString(36).substring(2, 9)}`,
-      hasWarnings: warnings.length > 0,
+      hasWarnings: warnings.length > 0 || isDraft,
       warnings,
       assistantFeedback
     };
@@ -186,11 +192,74 @@ export class PresuVozEngine {
     // Objeto compatible con desestructuración directa y chequeo de éxito
     return Object.assign(budget, {
       success: true,
-      hasWarnings: warnings.length > 0,
+      isDraft,
+      hasWarnings: warnings.length > 0 || isDraft,
       warnings,
       assistantFeedback,
       errors: [],
       budget
     });
+  }
+
+  /**
+   * Actualiza interactivamente una partida del presupuesto mediante un mensaje corto de texto o audio
+   * Ejemplo: "Ponle 250 al alicatado" o "Partida 2: 300 euros"
+   * @param {object} budget - Objeto de presupuesto existente
+   * @param {string} updateText - Mensaje de actualización
+   * @returns {object} { success, budget, assistantMessage }
+   */
+  updateBudgetPrice(budget, updateText) {
+    if (!budget || !budget.items) {
+      return { success: false, message: "Presupuesto no válido." };
+    }
+
+    const updateRes = PresuVozParser.applyConversationalUpdate(budget.items, updateText);
+    if (!updateRes.success) {
+      return {
+        success: false,
+        budget,
+        assistantMessage: updateRes.message
+      };
+    }
+
+    // Recalcular finanzas
+    const taxRate = (budget.financials.taxRatePercentage || 21) / 100;
+    const advancePct = budget.financials.advancePercentage || 30;
+
+    let subtotal = 0;
+    budget.items.forEach(item => {
+      subtotal += item.total || 0;
+    });
+
+    subtotal = Number(subtotal.toFixed(2));
+    const taxAmount = Number((subtotal * taxRate).toFixed(2));
+    const totalAmount = Number((subtotal + taxAmount).toFixed(2));
+    const advanceAmount = Number(((totalAmount * advancePct) / 100).toFixed(2));
+
+    budget.financials.subtotal = subtotal;
+    budget.financials.taxAmount = taxAmount;
+    budget.financials.totalAmount = totalAmount;
+    budget.financials.advanceAmount = advanceAmount;
+    budget.financials.remainingAmount = Number((totalAmount - advanceAmount).toFixed(2));
+
+    const pendingCount = budget.items.filter(it => it.isPricePending).length;
+    budget.hasWarnings = pendingCount > 0;
+    budget.isDraft = budget.items.every(it => it.total === 0);
+    budget.status = budget.isDraft ? "BORRADOR_MEDICION" : "PENDIENTE_FIRMA";
+
+    let finalMsg = updateRes.message;
+    if (pendingCount === 0) {
+      finalMsg += `\n\n🎉 ¡Todas las partidas están ahora completadas y valoradas! Total del presupuesto: ${budget.financials.totalAmount.toFixed(2)} € (IVA ${budget.financials.taxRatePercentage}% incl.). Ya puedes enviar el documento para firmar.`;
+    } else {
+      finalMsg += `\n\nQuedan ${pendingCount} partida(s) pendiente(s) de valorar. Total acumulado actual: ${budget.financials.totalAmount.toFixed(2)} €.`;
+    }
+
+    budget.assistantFeedback = finalMsg;
+
+    return {
+      success: true,
+      budget,
+      assistantMessage: finalMsg
+    };
   }
 }

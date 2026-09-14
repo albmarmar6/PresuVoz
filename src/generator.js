@@ -10,23 +10,39 @@ export class PresuVozGenerator {
    * @returns {string} HTML renderizable
    */
   static generateHTML(budget) {
-    const itemsRows = budget.items.map(item => `
+    const itemsRows = budget.items.map(item => {
+      const isPending = item.isPricePending || item.total === 0;
+      const unitPriceDisplay = isPending 
+        ? `<span class="text-slate-400 italic">[Pendiente]</span>`
+        : `${item.unitPrice.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+      const totalDisplay = isPending
+        ? `<span class="text-amber-700 font-medium italic text-[11px] bg-amber-50 px-2 py-0.5 rounded border border-amber-200">A valorar</span>`
+        : `${item.total.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+
+      return `
           <tr>
             <td class="py-4 pr-6">
               <p class="text-sm font-medium text-slate-800">${item.description}</p>
             </td>
             <td class="text-right py-4 pl-6 text-slate-500 align-top">${item.qty}</td>
-            <td class="text-right py-4 pl-6 text-slate-500 align-top whitespace-nowrap">${item.unitPrice.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €</td>
-            <td class="text-right py-4 pl-6 font-semibold text-slate-800 align-top whitespace-nowrap">${item.total.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €</td>
+            <td class="text-right py-4 pl-6 text-slate-500 align-top whitespace-nowrap">${unitPriceDisplay}</td>
+            <td class="text-right py-4 pl-6 font-semibold text-slate-800 align-top whitespace-nowrap">${totalDisplay}</td>
           </tr>
-    `).join('');
+      `;
+    }).join('');
+
+    const statusPill = budget.isDraft
+      ? `<span id="statusPill" class="text-xs font-semibold text-sky-700 bg-sky-50 border border-sky-200 px-3 py-1.5 rounded-lg">Borrador de Visita Técnica</span>`
+      : `<span id="statusPill" class="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg">Pendiente de firma</span>`;
+
+    const docTypeLabel = budget.isDraft ? "Borrador de Visita Técnica" : "Presupuesto";
 
     return `<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Presupuesto ${budget.id} — ${budget.company.name}</title>
+  <title>${docTypeLabel} ${budget.id} — ${budget.company.name}</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
@@ -58,14 +74,14 @@ export class PresuVozGenerator {
       </div>
       <span class="text-xs font-semibold text-slate-600">PresuVoz</span>
       <span class="text-slate-400 text-xs">/</span>
-      <span class="text-xs text-slate-500">Presupuesto #${budget.id}</span>
+      <span class="text-xs text-slate-500">${docTypeLabel} #${budget.id}</span>
     </div>
     <div class="flex items-center gap-2">
       <button onclick="window.print()" class="text-xs font-medium text-slate-500 hover:text-slate-800 bg-white border border-slate-200 hover:border-slate-300 px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
         Imprimir
       </button>
-      <span id="statusPill" class="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg">Pendiente de firma</span>
+      ${statusPill}
     </div>
   </div>
 

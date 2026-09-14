@@ -64,6 +64,12 @@ export class PresuVozParser {
       formal: "Tendido de línea frigorífica aislada, soportes exteriores con amortiguadores antivibratorios silentblock y línea de desagüe"
     },
 
+    // Pintura y Acabados
+    {
+      regex: /(pintura|pintar|enlucir|alisar)/i,
+      formal: "Preparación de paramentos, emplastecido y aplicación de pintura plástica lisa de alta cubrición en techos y paredes"
+    },
+
     // Carpintería y Reformas
     {
       regex: /(armario\s*empotrado|fabricaci[oó]n\s*a\s*medida)/i,
@@ -269,14 +275,23 @@ export class PresuVozParser {
             description: formalDesc,
             qty,
             unitPrice: qty > 1 ? Number((price / qty).toFixed(2)) : price,
-            total: price
+            total: price,
+            isPricePending: false
           });
         }
       } else {
-        // La línea parecía una partida de trabajo pero NO tenía precio
-        if (/(cambiar|instalar|poner|alicatar|demolici[oó]n|reparar|revisi[oó]n|fabricaci[oó]n|suelo|tuber[ií]a|grifo)/i.test(line)) {
+        // La línea describe una partida de trabajo pero NO tenía precio (modo borrador / medición)
+        if (/(cambiar|instalar|poner|alicatar|demolici[oó]n|reparar|revisi[oó]n|fabricaci[oó]n|suelo|tarima|tuber[ií]a|grifo|baño|cocina|cuadro|puerta|ventana|split|climatizaci[oó]n|pint(ar|ura)|tabique|rozas)/i.test(line)) {
           const cleanPending = this.cleanRawText(line);
-          warnings.push(`Partida pendiente de valorar: "${cleanPending.slice(0, 50)}" (no se mencionó precio en el audio).`);
+          const formalDesc = this.normalizeItemDescription(cleanPending);
+          rawItems.push({
+            description: formalDesc,
+            qty: 1,
+            unitPrice: 0,
+            total: 0,
+            isPricePending: true
+          });
+          warnings.push(`Partida pendiente de valorar: "${formalDesc}" (no se mencionó precio en el audio).`);
         } else if (line.length > 15 && !/(hola|buenos\s+d[ií]as|adi[oó]s|un\s+saludo)/i.test(line)) {
           // Fragmento con texto que no se interpretó como partida ni como condición
           warnings.push(`Fragmento no procesado: "${line.slice(0, 45)}..."`);
@@ -284,30 +299,39 @@ export class PresuVozParser {
       }
     }
 
-    // Solo es inválido si NO se pudo rescatar ni una sola partida con precio
+    // Si no se encontró ninguna partida (ni con precio ni sin precio)
     if (rawItems.length === 0) {
       return {
         isValid: false,
+        isDraft: false,
         hasWarnings: true,
-        warnings: warnings.length > 0 ? warnings : ["No se encontraron partidas con precio asignado en el audio."],
-        assistantFeedback: "❌ No he podido generar el presupuesto porque no detecté ningún importe en euros. Por favor, indícame al menos una partida con su precio (ejemplo: 'cambiar plato de ducha 400 euros').",
+        warnings: ["No se detectó ninguna partida de trabajo o instalación en el audio."],
+        assistantFeedback: "❌ No he podido generar el presupuesto porque no detecté ninguna partida de obra. Por favor, indícame qué trabajos hay que realizar (ejemplo: 'cambiar plato de ducha y mampara').",
         data: null
       };
     }
 
-    // Si hay al menos 1 partida válida, SE GENERA EL PRESUPUESTO y se emite el feedback de WhatsApp
+    const hasPricedItems = rawItems.some(it => it.total > 0);
+    const isDraft = !hasPricedItems;
+
     let assistantFeedback = "";
-    if (warnings.length > 0) {
-      assistantFeedback = `⚠️ He generado el presupuesto con ${rawItems.length} partida(s) valorada(s), pero he detectado estos detalles para tu revisión:\n` +
+    if (isDraft) {
+      assistantFeedback = `📋 He registrado tu visita técnica con ${rawItems.length} partida(s) guardadas (Borrador de medición):\n` +
+        rawItems.map((it, i) => `• ${i + 1}. ${it.description} — [Pendiente de valorar]`).join("\n") +
+        `\n\n👉 Ya tienes el borrador listo. Cuando quieras poner los precios, solo responde por voz o texto (ejemplo: "Ponle 400 al plato y 150 a la mampara").`;
+    } else if (warnings.length > 0) {
+      const pricedCount = rawItems.filter(it => !it.isPricePending).length;
+      assistantFeedback = `⚠️ He generado el presupuesto con ${pricedCount} partida(s) valorada(s), pero he detectado estos detalles para tu revisión:\n` +
         warnings.map(w => `• ${w}`).join("\n") +
-        `\n\n👉 Puedes enviar el presupuesto tal cual o mandarme otro audio para completarlo (ej: "Ponle 200€ al alicatado").`;
+        `\n\n👉 Puedes enviar el presupuesto tal cual o mandarme otro audio para rellenar lo que falta (ejemplo: "Ponle 250 al alicatado").`;
     } else {
       assistantFeedback = `✅ ¡Presupuesto generado con éxito y sin incidencias! Todas las partidas e importes están perfectamente cuadrados.`;
     }
 
     return {
       isValid: true,
-      hasWarnings: warnings.length > 0,
+      isDraft,
+      hasWarnings: warnings.length > 0 || isDraft,
       warnings,
       assistantFeedback,
       data: {
@@ -315,6 +339,86 @@ export class PresuVozParser {
         clientAddress,
         items: rawItems
       }
+    };
+  }
+
+  /**
+   * Actualiza el precio de una partida existente a partir de un mensaje corto de WhatsApp
+   * Ejemplo: "Ponle 250 al alicatado" o "La partida 2 son 300 euros"
+   */
+  static applyConversationalUpdate(items, updateText) {
+    if (!items || items.length === 0 || !updateText) {
+      return { success: false, message: "No hay partidas disponibles para actualizar." };
+    }
+
+    const priceRegex = /(?:por\s+|[:\s])?((?:\d+(?:[\.,]\d{1,2})?|\b(?:(?:mil|doscient[ao]s|trescient[ao]s|cuatrocient[ao]s|quinient[ao]s|seiscient[ao]s|setecient[ao]s|ochocient[ao]s|novecient[ao]s|cien|ciento|veinte|veinti[a-záéíóúñ]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|diez|once|doce|trece|catorce|quince|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)\s*(?:y\s*)?)+))\s*(?:euros?|pavos|€)?\b/i;
+    const priceMatch = updateText.match(priceRegex);
+
+    if (!priceMatch) {
+      return { success: false, message: "No detecté ningún importe en tu mensaje. Por favor indica una cifra (ejemplo: 'Ponle 250 al alicatado')." };
+    }
+
+    const newPrice = this.parsePriceString(priceMatch[1].trim());
+    if (newPrice <= 0) {
+      return { success: false, message: "El importe especificado debe ser superior a cero." };
+    }
+
+    // 1. Buscar coincidencia por número de partida (ej: "partida 2", "la 1", "segunda")
+    const indexMatch = updateText.match(/(?:partida|l[ií]nea|la|n[uú]mero)\s*([0-9]+)/i);
+    if (indexMatch) {
+      const idx = parseInt(indexMatch[1], 10) - 1;
+      if (items[idx]) {
+        items[idx].unitPrice = newPrice;
+        items[idx].total = Number((newPrice * items[idx].qty).toFixed(2));
+        items[idx].isPricePending = false;
+        return {
+          success: true,
+          updatedItem: items[idx],
+          message: `✅ Partida ${idx + 1} actualizada: "${items[idx].description}" ahora tiene un importe de ${items[idx].total.toFixed(2)} €.`
+        };
+      }
+    }
+
+    // 2. Buscar por coincidencia semántica de palabras clave
+    const lowerText = updateText.toLowerCase();
+    let targetItem = null;
+
+    // Priorizar partidas que estaban pendientes de valorar
+    const candidates = items.filter(it => it.isPricePending).concat(items.filter(it => !it.isPricePending));
+
+    for (const item of candidates) {
+      const descWords = item.description.toLowerCase().split(/\s+/).filter(w => w.length > 4);
+      for (const word of descWords) {
+        if (lowerText.includes(word) || lowerText.includes(word.slice(0, -1))) {
+          targetItem = item;
+          break;
+        }
+      }
+      if (targetItem) break;
+    }
+
+    // Si aún no se encontró y solo hay 1 partida pendiente, asignárselo a esa
+    if (!targetItem) {
+      const pending = items.filter(it => it.isPricePending);
+      if (pending.length === 1) {
+        targetItem = pending[0];
+      }
+    }
+
+    if (targetItem) {
+      targetItem.unitPrice = newPrice;
+      targetItem.total = Number((newPrice * targetItem.qty).toFixed(2));
+      targetItem.isPricePending = false;
+      return {
+        success: true,
+        updatedItem: targetItem,
+        message: `✅ Partida actualizada: "${targetItem.description}" asignada a ${targetItem.total.toFixed(2)} €.`
+      };
+    }
+
+    return {
+      success: false,
+      message: `He detectado el importe de ${newPrice} €, pero no estoy seguro de a qué partida te refieres. Por favor indícamelo con más claridad (ejemplo: 'Ponle ${newPrice} a la mampara' o 'Partida 2: ${newPrice}€').`
     };
   }
 }
