@@ -31,11 +31,17 @@ export class PresuVozEngine {
     const reducedKeywords = [
       "reforma de vivienda",
       "vivienda habitual",
+      "vivienda",
+      "la casa",
+      "una casa",
+      "casa particular",
       "piso particular",
+      "piso",
       "baño",
       "cocina",
       "cambio de bañera",
       "plato de ducha",
+      "mampara",
       "iva reducido",
       "iva del 10"
     ];

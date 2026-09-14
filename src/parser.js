@@ -42,8 +42,8 @@ export class PresuVozParser {
 
     // Electricidad
     {
-      regex: /(cambiar|poner|adecuar)?\s*(el)?\s*diferencial|magnetot[eé]rmico|cuadro\s*(el[eé]ctrico)?/i,
-      formal: "Adecuación de cuadro general de mando y protección mediante suministro e instalación de interruptor diferencial 40A y magnetotérmicos"
+      regex: /(cambiar|poner|adecuar|revisar)?\s*(el)?\s*(?:diferencial|magnetot[eé]rmico|cuadro\s*(?:el[eé]ctrico)?|soporte\s*el[eé]ctrico|instalaci[oó]n\s*el[eé]ctrica)/i,
+      formal: "Adecuación de cuadro general de mando y protección e instalación eléctrica"
     },
     {
       regex: /(l[ií]nea\s*(nueva|reforzada|independiente)?|cable)\s*(para\s*(el)?\s*horno|6\s*mm)/i,
@@ -60,7 +60,7 @@ export class PresuVozParser {
       formal: "Suministro e instalación de equipo de aire acondicionado tipo Split (unidad interior y exterior) con bomba de calor y alta eficiencia energética"
     },
     {
-      regex: /(l[ií]nea\s*frigor[ií]fica|tubos?|soporte)/i,
+      regex: /(l[ií]nea\s*frigor[ií]fica|tubos?\s*frigor[ií]ficos|soporte\s*(?:exterior|silentblock|clima|para\s+split))/i,
       formal: "Tendido de línea frigorífica aislada, soportes exteriores con amortiguadores antivibratorios silentblock y línea de desagüe"
     },
 
@@ -82,6 +82,18 @@ export class PresuVozParser {
 
     // Carpintería y Reformas
     {
+      regex: /(ventanas?|reestructuraci[oó]n\s+de\s+(?:las\s+)?ventanas?|carpinter[ií]a\s+exterior|climalit|pvc|aluminio)/i,
+      formal: "Suministro e instalación de carpintería exterior y ventanas con doble acristalamiento aislante"
+    },
+    {
+      regex: /(remoquetar|moqueta|zarum|zaguan|entarimado)/i,
+      formal: "Suministro y colocación de revestimiento textil continuo (moqueta de alto tránsito) o entarimado en estancia"
+    },
+    {
+      regex: /(cambiar|poner|sustituir|renovar|solado|pavimento)?\s*(el)?\s*suelo(\s*(?:del?)?\s*(?:baño|cocina|piso|vivienda|casa))?/i,
+      formal: "Suministro e instalación de pavimento cerámico y solado con mortero de agarre"
+    },
+    {
       regex: /(armario\s*empotrado|fabricaci[oó]n\s*a\s*medida)/i,
       formal: "Fabricación a medida e instalación de armario empotrado con puertas correderas, acabado melamínico de alta resistencia y distribución interior a medida"
     },
@@ -102,7 +114,14 @@ export class PresuVozParser {
     /hola\s+(buenas\s+tardes|buenos\s+d[ií]as|qu[eé]\s+tal)?/gi,
     /me\s+gustar[ií]a\s+presupuestar(\s+una\s+casa)?/gi,
     /eso\s+(lo\s+)?llevar[ií]a\s+(a|en|aún|aun|un)?\s*(total\s+de)?/gi,
-    /y\s+ya\s+est[aá]/gi,
+    /(?:y\s+)?(?:eso|esto)\s+(?:ser[ií]a|es|va\s+a\s+ser)\s+todo/gi,
+    /(?:y\s+)?ya\s+est[aá]/gi,
+    /(?:y\s+)?nada\s+m[aá]s/gi,
+    /(?:con\s+eso\s+(?:acabamos|terminamos|estar[ií]a))/gi,
+    /(?:suministros?\s+(?:eh\s*)?te\s+voy\s+a\s+decir\s+lo\s+que\s+va\s+a\s+costar|suministros?\s+eh\b)/gi,
+    /te\s+voy\s+a\s+decir\s+lo\s+que\s+va\s+a\s+costar/gi,
+    /(?:eso\s+)?va\s+a\s+salir\s+por\s+(?:unos?\s+|uno\s+o\s+)?/gi,
+    /(?:eso\s+)?va\s+a\s+costar\s+(?:unos?\s+|uno\s+o\s+)?/gi,
     /oye\s+(carlos|manolo|paco|socio|t[ií]o|compañero)?/gi,
     /qu[eé]\s+pasa\s+(t[ií]o|socio|paco)?/gi,
     /mira\s+(que|te\s+grabo)?/gi,
@@ -302,9 +321,9 @@ export class PresuVozParser {
    * Extrae el nombre del cliente eliminando preposiciones y fórmulas de cortesía
    */
   static extractClientName(text) {
-    const match = text.match(/(?:para|cliente:?)\s+(?:don|doña)?\s*([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){0,2})(?=\s+(?:en|con|de|del|para|que)\b|:|$)/i);
+    const match = text.match(/(?:para|cliente:?)\s+(?:don|doña)?\s*((?:(?!en\b|de\b|del\b|la\b|el\b|calle\b|avenida\b)[a-záéíóúñ]+\s*){1,3})(?=\s+(?:en|con|de|del|para|que|la|el|donde|se|calle|avenida)\b|:|$)/i);
     if (match) {
-      return match[1].trim();
+      return match[1].trim().split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
     }
     return "Cliente Particular";
   }
@@ -313,20 +332,37 @@ export class PresuVozParser {
    * Extrae la dirección o ubicación de la obra (calles o localidades)
    */
   static extractAddress(text) {
-    // 1. Calle / Avenida tradicional
-    let match = text.match(/en\s+((?:calle|avenida|avda\.?|plaza|paseo|camino|carretera)\s+[^,\.\n]+?(?:\d+|[a-záéíóúñ\s]+)?)/i);
-    if (match) {
-      let addr = match[1].replace(/\s+(hay\s+que|para|con|al|que|dile)\b.*/i, "").trim();
-      return addr.replace(/[:,\.\-]+$/, "").trim();
+    if (!text || typeof text !== "string") return "Ubicación obra según visita técnica";
+
+    // 1. Calle / Avenida tradicional (con o sin provincia antes o después)
+    let streetMatch = text.match(/(?:(?:en|de)\s+(?:la\s+)?)?((?:calle|avenida|avda\.?|plaza|paseo|camino|carretera)\s+[a-záéíóúñ0-9\s,\.\-ºª°/]+?)(?=\s+(?:hacer|cambiar|poner|instalar|quitar|tirar|demoler|derribar|remoquetar|reparar|reformar|alicatar|reestructuraci[oó]n|suministro|mampara|plato|bañera|suelo|tabique|con|para|hay|habr[ií]a|donde|que\s+va|y\s+vamos|y\s+hay|\d+\s*(?:euros?|pavos|€))\b|:|$)/i);
+    if (streetMatch) {
+      let rawStreet = streetMatch[1].trim().replace(/[:,\.\-]+$/, "");
+      rawStreet = rawStreet.replace(/\s+numero\s+/i, " nº ").replace(/\s*,\s*/g, ", ");
+      let formattedStreet = rawStreet.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+
+      // Detectar si se mencionó una provincia / ciudad en el texto (ej: "en sevilla en la calle...")
+      const knownProvs = ["Sevilla", "Madrid", "Barcelona", "Valencia", "Málaga", "Cantabria", "Alicante", "Cádiz", "Zaragoza", "Córdoba", "Granada"];
+      let detectedProv = "";
+      for (const p of knownProvs) {
+        if (new RegExp("\\b(?:en\\s+)?" + p + "\\b", "i").test(text)) {
+          detectedProv = p;
+          break;
+        }
+      }
+      if (detectedProv && !formattedStreet.toLowerCase().includes(detectedProv.toLowerCase())) {
+        return formattedStreet + ", " + detectedProv;
+      }
+      return formattedStreet;
     }
 
     // 2. Ciudad / Pueblo / Localidad (ej: "una casa en torrelavella en Sevilla", "en Marbella en Sevilla")
-    match = text.match(/(?:(?:casa|piso|chalet|local|obra|reforma|trabajo)\s+en|para\s+[a-záéíóúñ\s]+?\s+en|\ben)\s+([a-záéíóúñ\s]+?\s+en\s+[a-záéíóúñ]+)(?=\s+(?:con|de|para|hay|habr[ií]a|donde)\b|:|$)/i);
-    if (!match) {
-      match = text.match(/(?:casa|piso|chalet|local|obra|reforma|trabajo)\s+en\s+([a-záéíóúñ\s]+?)(?=\s+(?:con|de|para|hay|habr[ií]a|donde)\b|:|$)/i);
+    let locMatch = text.match(/(?:(?:casa|piso|chalet|local|obra|reforma|trabajo)\s+en|para\s+[a-záéíóúñ\s]+?\s+en|\ben)\s+([a-záéíóúñ\s]+?\s+en\s+[a-záéíóúñ]+)(?=\s+(?:con|de|para|hay|habr[ií]a|donde)\b|:|$)/i);
+    if (!locMatch) {
+      locMatch = text.match(/(?:casa|piso|chalet|local|obra|reforma|trabajo)\s+en\s+([a-záéíóúñ\s]+?)(?=\s+(?:con|de|para|hay|habr[ií]a|donde)\b|:|$)/i);
     }
-    if (match) {
-      let loc = match[1].trim().replace(/\s+en\s+/i, ", ");
+    if (locMatch) {
+      let loc = locMatch[1].trim().replace(/\s+en\s+/i, ", ");
       return loc
         .split(/,\s*/)
         .map(part => part.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" "))
@@ -446,10 +482,16 @@ export class PresuVozParser {
    * Limpia una frase cruda eliminando muletillas e improperios
    */
   static cleanRawText(text) {
+    if (!text || typeof text !== "string") return "";
     let result = text;
     for (const pattern of this.JUNK_WORDS_PATTERNS) {
       result = result.replace(pattern, " ");
     }
+    // Eliminar coletillas de cierre coloquiales
+    result = result.replace(/(?:y\s+)?(?:eso\s+ser[ií]a\s+todo|eso\s+es\s+todo|ya\s+est[aá]|nada\s+m[aá]s|y\s+ya\s+est[aá]|y\s+eso\s+ser[ií]a|eso\s+ser[ií]a)\s*$/i, "");
+    result = result.replace(/\b(?:y\s+)?(?:eso|esto)\s+(?:ser[ií]a|es)\s+todo\b/gi, "");
+    result = result.replace(/\b(?:y\s+)?ya\s+est[aá]\b/gi, "");
+    result = result.replace(/\b(?:y\s+)?nada\s+m[aá]s\b/gi, "");
     return result.replace(/\s+/g, " ").trim();
   }
 
@@ -457,6 +499,13 @@ export class PresuVozParser {
    * Normaliza una descripción coloquial a su estándar técnico formal
    */
   static normalizeItemDescription(rawDesc) {
+    if (!rawDesc || typeof rawDesc !== "string") return "Partida técnica de obra / instalación según especificaciones";
+
+    // Si ya es una descripción formal exacta del diccionario, respetarla
+    for (const entry of this.TECHNICAL_DICTIONARY) {
+      if (entry.formal === rawDesc.trim()) return entry.formal;
+    }
+
     const cleaned = this.cleanRawText(rawDesc);
 
     // Buscar en el diccionario técnico de gremios
@@ -496,8 +545,8 @@ export class PresuVozParser {
       warnings.push(addressValidation.warningMessage);
     }
 
-    // Separar por saltos de línea, guiones o conectores verbales de obra ("habría que", "hay que", "con una", etc.)
-    const segRegex = /(?:\n|\.|\;|\s*-\s*|\b(?:habr[ií]a\s+que|hay\s+que|tambi[eé]n\s+(?:habr[ií]a\s+que|hay\s+que|habr[ií]a|vamos\s+a|quiero|poner|cambiar|instalar|hacer)|y\s+tambi[eé]n|y\s+adem[aá]s|adem[aá]s\s+(?:de\s+eso|de\s+esto)?|luego|despu[eé]s|por\s+otro\s+lado|con\s+un[ao]?)\b)/i;
+    // Separar por saltos de línea, guiones, conectores verbales o transiciones de partida
+    const segRegex = /(?:\n|\.|\;|\s*-\s*|\b(?:y\s+)?(?:habr[ií]a\s+que|hay\s+que|tambi[eé]n\s+(?:habr[ií]a\s+que|hay\s+que|habr[ií]a|vamos\s+a|quiero|poner|cambiar|instalar|hacer)|y\s+tambi[eé]n|y\s+adem[aá]s|adem[aá]s\s+(?:de\s+eso|de\s+esto)?|luego|despu[eé]s|por\s+otro\s+lado|con\s+un[ao]?)\b|(?<=(?:euros?|pavos|€))\s+(?=(?:demoler|derribar|quitar|tirar|cambiar|poner|instalar|remoquetar|hacer|alicatar|mampara|plato|bañera|suelo)\b)|(?<=(?:ventanas?|tabiques?|paredes?|cocina|baño|sal[oó]n|habitaci[oó]n))\s+(?=(?:cambiar|poner|instalar|remoquetar|alicatar|demoler|derribar|hacer)\b))/i;
 
     const lines = rawTranscript
       .split(segRegex)
@@ -667,8 +716,96 @@ export class PresuVozParser {
       };
     }
 
-    // 3. Actualización de partidas y precios
-    return this.applyConversationalUpdate(budget.items, trimmed);
+    // 3. Procesamiento multi-partida (soporta audios completos con múltiples partidas y precios, o comandos breves)
+    const segRegex = /(?:(?<=(?:euros?|pavos|€|\d+))\s+(?=(?:cambiar|poner|instalar|remoquetar|hacer|alicatar|pintar|demoler|quitar|adecuar|suministro)\b)|\b(?:y\s+hay\s+que|hay\s+que|habr[ií]a\s+que|tambi[eé]n\s+(?:hay\s+que|habr[ií]a\s+que|poner|cambiar)|y\s+tambi[eé]n|y\s+adem[aá]s|adem[aá]s|luego|despu[eé]s)\b)/i;
+
+    const clauses = trimmed.split(segRegex).map(c => c.trim()).filter(c => c.length > 5);
+
+    // Si es un comando simple de un solo precio ("Ponle 250 al alicatado", "partida 2 son 300"), usar applyConversationalUpdate
+    if (clauses.length <= 1 && /(?:partida\s+[0-9]|ponle\s+[0-9]+|la\s+[0-9]+\s+son)/i.test(trimmed)) {
+      return this.applyConversationalUpdate(budget.items, trimmed);
+    }
+
+    const itemsToProcess = clauses.length > 0 ? clauses : [trimmed];
+    const updatesLog = [];
+
+    const priceRegex = /(?:(?:va\s+a\s+salir\s+por|va\s+a\s+costar|por|de)\s+(?:unos?\s+|uno\s+o\s+)?|[:\s])?((?:\d+(?:[\.,]\d{1,2})?|\b(?:(?:mil|doscient[ao]s|trescient[ao]s|cuatrocient[ao]s|quinient[ao]s|seiscient[ao]s|setecient[ao]s|ochocient[ao]s|novecient[ao]s|cien|ciento|veinte|veinti[a-záéíóúñ]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|diez|once|doce|trece|catorce|quince|un|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)\s*(?:y\s*)?)+))\s*(?:euros?|pavos|€)?\b/i;
+
+    for (const clause of itemsToProcess) {
+      const priceMatch = clause.match(priceRegex);
+      let price = 0;
+      let rawDesc = clause;
+
+      if (priceMatch) {
+        price = this.parsePriceString(priceMatch[1].trim());
+        rawDesc = clause.replace(priceMatch[0], "").trim();
+      }
+
+      const cleanDesc = this.cleanRawText(rawDesc);
+      if (cleanDesc.length < 3) continue;
+
+      // Buscar si coincide con alguna partida existente
+      const candidates = budget.items.filter(it => it.isPricePending).concat(budget.items.filter(it => !it.isPricePending));
+      const stopWords = ["hacer", "cambiar", "poner", "instalar", "unos", "costar", "decir", "salir", "suministros", "partida", "linea", "numero", "zarum", "todo", "seria"];
+      const descWords = cleanDesc.toLowerCase().split(/\s+/).filter(w => w.length > 3 && !stopWords.includes(w));
+
+      let matchedItem = null;
+      for (const item of candidates) {
+        const itemWords = item.description.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+        for (const w of descWords) {
+          if (itemWords.some(iw => iw.includes(w) || w.includes(iw))) {
+            matchedItem = item;
+            break;
+          }
+        }
+        if (matchedItem) break;
+      }
+
+      // Si solo hay 1 partida pendiente en todo el presupuesto y hay precio, emparejarla
+      if (!matchedItem && budget.items.filter(it => it.isPricePending).length === 1 && price > 0 && itemsToProcess.length === 1) {
+        matchedItem = budget.items.find(it => it.isPricePending);
+      }
+
+      if (matchedItem) {
+        if (price > 0) {
+          matchedItem.unitPrice = price;
+          matchedItem.total = Number((price * matchedItem.qty).toFixed(2));
+          matchedItem.isPricePending = false;
+          updatesLog.push(`• Partida ${matchedItem.id} (${matchedItem.description.slice(0, 32)}...): asignado ${matchedItem.total.toFixed(2)} €.`);
+        }
+      } else {
+        // Es una NUEVA partida no presente en el presupuesto
+        if (price > 0 || /(cambiar|instalar|poner|alicatar|demolici|suelo|moqueta|remoquetar|tarima|tuber|grifo|baño|cocina|cuadro|puerta|ventana|split|pint)/i.test(cleanDesc)) {
+          const formalDesc = this.normalizeItemDescription(cleanDesc);
+          const newItem = {
+            id: budget.items.length + 1,
+            description: formalDesc,
+            qty: 1,
+            unitPrice: price,
+            total: price,
+            isPricePending: price === 0
+          };
+          budget.items.push(newItem);
+          if (price > 0) {
+            updatesLog.push(`• Nueva partida añadida: "${formalDesc.slice(0, 35)}..." (${price.toFixed(2)} €).`);
+          } else {
+            updatesLog.push(`• Nueva partida añadida: "${formalDesc.slice(0, 35)}..." [Pendiente de valorar].`);
+            if (budget.warnings) budget.warnings.push(`Partida pendiente de valorar: "${formalDesc}".`);
+          }
+        }
+      }
+    }
+
+    if (updatesLog.length === 0) {
+      return this.applyConversationalUpdate(budget.items, trimmed);
+    }
+
+    return {
+      success: true,
+      type: "ITEMS_UPDATED",
+      budget,
+      message: `✅ He actualizado tu presupuesto con las indicaciones del audio:\n` + updatesLog.join("\n")
+    };
   }
 
   /**
