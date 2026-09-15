@@ -1753,6 +1753,24 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
 
     let cachedGeminiModel = null;
 
+    // Detecta si el error HTTP indica que el modelo NO está disponible (y hay que probar el siguiente)
+    function isModelUnavailableError(errMsg, statusCode) {
+      if (statusCode === 404) return true;
+      const lower = errMsg.toLowerCase();
+      return lower.includes('not found')
+        || lower.includes('not supported')
+        || lower.includes('no longer available')
+        || lower.includes('deprecated')
+        || lower.includes('unavailable')
+        || lower.includes('new users');
+    }
+
+    // Extrae el nombre de modelo recomendado del mensaje de error de Google (si lo incluye)
+    function extractSuggestedModel(errMsg) {
+      const match = errMsg.match(/models\/([\w.-]+)/);
+      return match ? match[1] : null;
+    }
+
     async function getAvailableGeminiModel() {
       if (cachedGeminiModel) return cachedGeminiModel;
       try {
@@ -1763,30 +1781,48 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
             .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
             .map(m => m.name.replace('models/', ''));
 
-          // Priorizar modelos flash modernos (2.5, 2.0, etc.)
-          const preferred = available.find(m => m.includes('flash') && (m.includes('2.5') || m.includes('2.0') || m.includes('3.')))
+          // Priorizar familia 3.x (más reciente), luego 2.x flash, luego cualquier flash, luego pro
+          const preferred = available.find(m => m.includes('3.') && m.includes('flash'))
+            || available.find(m => m.includes('3.') && m.includes('pro'))
+            || available.find(m => m.includes('3.'))
+            || available.find(m => m.includes('flash') && (m.includes('2.5') || m.includes('2.0')))
             || available.find(m => m.includes('flash'))
             || available.find(m => m.includes('pro'))
             || available[0];
 
           if (preferred) {
             cachedGeminiModel = preferred;
-            console.log('PresuVoz — Modelo Gemini auto-detectado con éxito:', cachedGeminiModel);
+            console.log('PresuVoz — Modelo Gemini auto-detectado:', cachedGeminiModel);
             return cachedGeminiModel;
           }
         }
       } catch (e) {
         console.warn('PresuVoz — No se pudo autodetectar modelos:', e);
       }
-      return 'gemini-2.5-flash';
+      return 'gemini-3.1-pro-preview';
     }
 
     async function callGeminiAPI(userPrompt, systemInstruction) {
       let detectedModel = await getAvailableGeminiModel();
-      const modelsToTry = [detectedModel, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-pro'].filter((v, i, a) => a.indexOf(v) === i);
-      let lastError = null;
+      // Lista de modelos a intentar — el sugerido por Google va primero
+      const modelsToTry = [
+        detectedModel,
+        'gemini-3.1-pro-preview',
+        'gemini-3.1-flash-preview',
+        'gemini-2.5-flash-preview-05-20',
+        'gemini-2.5-flash',
+        'gemini-2.0-flash'
+      ].filter((v, i, a) => a.indexOf(v) === i);
 
-      for (const model of modelsToTry) {
+      let lastError = null;
+      let suggestedByGoogle = null;
+
+      for (let model of modelsToTry) {
+        // Si Google ya nos sugirió un modelo en un intento anterior, usarlo
+        if (suggestedByGoogle && model !== suggestedByGoogle) {
+          modelsToTry.unshift(suggestedByGoogle);
+          suggestedByGoogle = null;
+        }
         try {
           const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
           const body = {
@@ -1806,8 +1842,14 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
           if (!response.ok) {
             const errData = await response.json().catch(() => ({}));
             const errMsg = errData.error?.message || `Error HTTP ${response.status}`;
-            if (response.status === 404 || errMsg.includes('not found') || errMsg.includes('not supported')) {
+            if (isModelUnavailableError(errMsg, response.status)) {
+              console.warn(`PresuVoz — Modelo "${model}" no disponible, probando el siguiente...`);
               lastError = new Error(errMsg);
+              const suggested = extractSuggestedModel(errMsg);
+              if (suggested && suggested !== model && !modelsToTry.includes(suggested)) {
+                suggestedByGoogle = suggested;
+                modelsToTry.push(suggested);
+              }
               continue;
             }
             throw new Error(errMsg);
@@ -1816,10 +1858,15 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
           const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
           if (!jsonText) throw new Error('Respuesta vacía de Gemini');
           cachedGeminiModel = model;
+          console.log('PresuVoz — Respuesta de Gemini recibida con modelo:', model);
           return JSON.parse(jsonText);
         } catch (e) {
           lastError = e;
-          if (e.message && (e.message.includes('not found') || e.message.includes('not supported'))) {
+          if (isModelUnavailableError(e.message || '', 0)) {
+            const suggested = extractSuggestedModel(e.message || '');
+            if (suggested && suggested !== model && !modelsToTry.includes(suggested)) {
+              modelsToTry.push(suggested);
+            }
             continue;
           }
           throw e;
