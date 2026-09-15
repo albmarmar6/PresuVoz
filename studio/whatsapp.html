@@ -1753,126 +1753,86 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
 
     let cachedGeminiModel = null;
 
-    // Detecta si el error HTTP indica que el modelo NO está disponible (y hay que probar el siguiente)
-    function isModelUnavailableError(errMsg, statusCode) {
-      if (statusCode === 404) return true;
-      const lower = errMsg.toLowerCase();
-      return lower.includes('not found')
-        || lower.includes('not supported')
-        || lower.includes('no longer available')
-        || lower.includes('deprecated')
-        || lower.includes('unavailable')
-        || lower.includes('new users');
-    }
-
-    // Extrae el nombre de modelo recomendado del mensaje de error de Google (si lo incluye)
-    function extractSuggestedModel(errMsg) {
-      const match = errMsg.match(/models\/([\w.-]+)/);
-      return match ? match[1] : null;
-    }
-
-    async function getAvailableGeminiModel() {
-      if (cachedGeminiModel) return cachedGeminiModel;
-      try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
-        if (res.ok) {
-          const data = await res.json();
-          const available = (data.models || [])
-            .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
-            .map(m => m.name.replace('models/', ''));
-
-          // Priorizar familia 3.x (más reciente), luego 2.x flash, luego cualquier flash, luego pro
-          const preferred = available.find(m => m.includes('3.') && m.includes('flash'))
-            || available.find(m => m.includes('3.') && m.includes('pro'))
-            || available.find(m => m.includes('3.'))
-            || available.find(m => m.includes('flash') && (m.includes('2.5') || m.includes('2.0')))
-            || available.find(m => m.includes('flash'))
-            || available.find(m => m.includes('pro'))
-            || available[0];
-
-          if (preferred) {
-            cachedGeminiModel = preferred;
-            console.log('PresuVoz — Modelo Gemini auto-detectado:', cachedGeminiModel);
-            return cachedGeminiModel;
-          }
-        }
-      } catch (e) {
-        console.warn('PresuVoz — No se pudo autodetectar modelos:', e);
-      }
-      return 'gemini-3.1-pro-preview';
-    }
-
     async function callGeminiAPI(userPrompt, systemInstruction) {
-      let detectedModel = await getAvailableGeminiModel();
-      // Lista de modelos a intentar — el sugerido por Google va primero
-      const modelsToTry = [
-        detectedModel,
+      // Si ya encontramos un modelo que funciona, usarlo directamente
+      const base = [
         'gemini-3.1-pro-preview',
         'gemini-3.1-flash-preview',
         'gemini-2.5-flash-preview-05-20',
         'gemini-2.5-flash',
-        'gemini-2.0-flash'
-      ].filter((v, i, a) => a.indexOf(v) === i);
+        'gemini-2.0-flash',
+        'gemini-2.0-flash-lite'
+      ];
+      const modelsToTry = cachedGeminiModel
+        ? [cachedGeminiModel, ...base.filter(m => m !== cachedGeminiModel)]
+        : base;
 
       let lastError = null;
-      let suggestedByGoogle = null;
 
-      for (let model of modelsToTry) {
-        // Si Google ya nos sugirió un modelo en un intento anterior, usarlo
-        if (suggestedByGoogle && model !== suggestedByGoogle) {
-          modelsToTry.unshift(suggestedByGoogle);
-          suggestedByGoogle = null;
-        }
+      for (let i = 0; i < modelsToTry.length; i++) {
+        const model = modelsToTry[i];
         try {
           const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
-          const body = {
-            contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-            systemInstruction: { parts: [{ text: systemInstruction }] },
-            generationConfig: {
-              responseMimeType: 'application/json',
-              temperature: 0.1,
-              maxOutputTokens: 2048
-            }
-          };
           const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-          });
-          if (!response.ok) {
-            const errData = await response.json().catch(() => ({}));
-            const errMsg = errData.error?.message || `Error HTTP ${response.status}`;
-            if (isModelUnavailableError(errMsg, response.status)) {
-              console.warn(`PresuVoz — Modelo "${model}" no disponible, probando el siguiente...`);
-              lastError = new Error(errMsg);
-              const suggested = extractSuggestedModel(errMsg);
-              if (suggested && suggested !== model && !modelsToTry.includes(suggested)) {
-                suggestedByGoogle = suggested;
-                modelsToTry.push(suggested);
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+              systemInstruction: { parts: [{ text: systemInstruction }] },
+              generationConfig: {
+                responseMimeType: 'application/json',
+                temperature: 0.1,
+                maxOutputTokens: 2048
               }
-              continue;
+            })
+          });
+
+          // Leer siempre el JSON de la respuesta (tanto éxito como error)
+          const data = await response.json().catch(() => ({}));
+
+          if (!response.ok) {
+            const errMsg = data.error?.message || `Error HTTP ${response.status}`;
+            // Si la clave de API no es válida, parar inmediatamente (no hay modelo que lo arregle)
+            if (response.status === 401 || response.status === 403) {
+              throw new Error('API Key inválida o sin permisos: ' + errMsg);
             }
-            throw new Error(errMsg);
+            // Para cualquier otro error (modelo no disponible, deprecated, etc.) → probar el siguiente
+            console.warn(`PresuVoz ⚠ Modelo "${model}" no disponible (${response.status}): ${errMsg.substring(0, 80)}`);
+            // Si el propio error de Google sugiere un modelo, añadirlo al final de la lista
+            const suggestedMatch = errMsg.match(/use\s+models\/([\w.-]+)/);
+            if (suggestedMatch) {
+              const suggested = suggestedMatch[1];
+              if (!modelsToTry.includes(suggested)) {
+                modelsToTry.push(suggested);
+                console.log('PresuVoz — Modelo sugerido por Google añadido a la cola:', suggested);
+              }
+            }
+            lastError = new Error(errMsg);
+            continue; // ← Siempre intentar el siguiente modelo
           }
-          const data = await response.json();
+
           const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (!jsonText) throw new Error('Respuesta vacía de Gemini');
-          cachedGeminiModel = model;
-          console.log('PresuVoz — Respuesta de Gemini recibida con modelo:', model);
-          return JSON.parse(jsonText);
-        } catch (e) {
-          lastError = e;
-          if (isModelUnavailableError(e.message || '', 0)) {
-            const suggested = extractSuggestedModel(e.message || '');
-            if (suggested && suggested !== model && !modelsToTry.includes(suggested)) {
-              modelsToTry.push(suggested);
-            }
+          if (!jsonText) {
+            lastError = new Error('Respuesta vacía de Gemini');
             continue;
           }
-          throw e;
+
+          cachedGeminiModel = model;
+          console.log(`PresuVoz ✓ Respuesta recibida de Gemini con modelo: ${model}`);
+          return JSON.parse(jsonText);
+
+        } catch (e) {
+          // Relanzar errores de clave inválida
+          if (e.message && (e.message.includes('API Key inválida') || e.message.includes('API_KEY_INVALID'))) {
+            throw e;
+          }
+          console.warn(`PresuVoz ⚠ Error con modelo "${model}":`, e.message);
+          lastError = e;
+          // Para cualquier otro error de red o parseo → probar el siguiente modelo
         }
       }
-      throw lastError || new Error('No se pudo conectar con ningún modelo de Gemini disponible');
+
+      throw lastError || new Error('No se pudo conectar con ningún modelo de Gemini. Revisa tu API Key.');
     }
 
     async function processWithGemini(text) {
