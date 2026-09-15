@@ -241,13 +241,19 @@ async function startWhatsAppGateway() {
       const senderNumber = remoteJid.replace(/\D/g, '');
       const isFromMe = msg.key.fromMe;
       const myNumber = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].replace(/\D/g, '');
+      const myLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].replace(/\D/g, '');
 
-      console.log(`📩 Mensaje detectado [jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}]`);
+      console.log(`📩 Mensaje detectado [jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]`);
 
       // Comprobación de seguridad: Modo Seguro
       if (SAFE_MODE) {
         const isAllowedNumber = ALLOWED_NUMBERS.includes(senderNumber);
-        const isSelfChat = isFromMe && (remoteJid.includes(myNumber) || senderNumber === myNumber);
+        const isSelfChat = isFromMe && (
+          remoteJid.includes(myNumber) ||
+          (myLid && remoteJid.includes(myLid)) ||
+          remoteJid.endsWith('@lid') ||
+          senderNumber === myNumber
+        );
 
         if (!isSelfChat && !isAllowedNumber) {
           console.log(`   ⏭️ Ignorado por Modo Seguro (no es chat propio ni número permitido)`);
