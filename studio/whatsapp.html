@@ -88,7 +88,8 @@
       <div class="flex items-start gap-2 max-w-[88%]">
         <div class="bg-[#202c33] text-slate-200 text-xs leading-relaxed p-3.5 rounded-2xl rounded-tl-sm border border-slate-700/50 shadow-md">
           <p class="font-semibold text-emerald-400 mb-1">PresuVoz Bot</p>
-          <p>¡Hola Manolo! Estoy listo. Mándame una nota de voz con el micrófono o escribe una descripción de obra. Yo me encargo de limpiar el texto, calcular los impuestos y preparar el presupuesto formal con firma.</p>
+          <p>¡Hola! Cuéntame la obra con tus propias palabras — por texto o por voz — y yo genero el presupuesto formal.</p>
+          <p class="mt-1.5 text-slate-400">Puedes decir cosas como <span class="text-slate-300 italic">"hay que tirar una pared de 4×3 metros y mover un enchufe"</span> sin necesidad de usar terminología técnica. Si tienes la IA activa (⚙️) lo entenderé todo.</p>
           <span class="block text-[10px] text-slate-500 text-right mt-1.5">14:00</span>
         </div>
       </div>
@@ -1504,7 +1505,11 @@
         activeBudget = res.budget;
         addBotBubble(res.assistantFeedback, activeBudget);
       } else {
-        addBotBubble(res.assistantFeedback, null);
+        // Mensaje de fallo mejorado: guía al usuario en lugar de mostrar error técnico
+        const helpMsg = GEMINI_API_KEY
+          ? '⚠️ No he podido generar el presupuesto. La IA de Gemini no está disponible en este momento y el motor local no reconoció las partidas. Intenta de nuevo en unos segundos.'
+          : '💡 Para generar presupuestos desde texto natural necesitas conectar la IA de Gemini.\n\nPulsa ⚙️ en la cabecera, pega tu clave gratuita de Google AI Studio y ya podrás describir la obra con tus propias palabras.\n\n_O si prefieres sin IA, intenta ser más específico: "cambiar bañera por plato de ducha 450 euros" o "mampara 300 euros"._';
+        addBotBubble(helpMsg, null);
       }
     }
 
@@ -1612,38 +1617,54 @@
 
     const GEMINI_SYSTEM_PROMPT = `Eres un asistente especializado en extracción de presupuestos para gremios españoles de construcción y reformas.
 
-Tu ÚNICA función es analizar transcripciones de audio de profesionales (albañiles, fontaneros, electricistas, carpinteros, pintores, etc.) y extraer datos estructurados en formato JSON para generar presupuestos formales.
+Tu función es analizar CUALQUIER descripción de obra — ya sea una transcripción de audio, un mensaje de texto escrito, una nota informal o una descripción conversacional — y extraer los datos estructurados en formato JSON para generar un presupuesto formal.
 
 REGLAS CRÍTICAS (cumplirlas sin excepción):
 1. Responde ÚNICAMENTE con JSON válido. Sin texto adicional ni markdown fuera del JSON.
 2. IGNORA completamente: saludos, despedidas, muletillas ("eh", "mmm", "bueno", "sinceramente"), anécdotas, explicaciones y la expresión "y ya está".
-3. "y ya está" NO es una partida técnica. No la incluyas.
-4. Rangos de precio ("de 4.500 a 6.000 €", "entre 4.000 y 5.500 €", "4.500 7.500 euros"): usa SIEMPRE el valor MÁXIMO.
-5. Errores fonéticos de Whisper (ej: "4.205.000 €" para una fontanería → imposible, corrígelo al valor razonable, ej: 5.000 €). Detecta precios irracionales para el tipo de obra.
-6. Usa descripciones TÉCNICAS FORMALES en español de presupuesto de obra (no las palabras exactas del audio, sino la descripción de un presupuesto oficial).
+3. "y ya está" NO es una partida técnica. No la incluyas jamás.
+4. Rangos de precio ("de 4.500 a 6.000 €", "entre 4.000 y 5.500 €"): usa SIEMPRE el valor MÁXIMO.
+5. Errores fonéticos de Whisper (ej: "4.205.000 €" para una fontanería → imposible, corrígelo al valor razonable para ese tipo de obra).
+6. Usa descripciones TÉCNICAS FORMALES en español de presupuesto de obra oficial.
 7. Sin precio → unitPrice: 0, isPricePending: true.
 8. IVA: 10 para vivienda habitual / piso / baño / cocina particular. 21 para local comercial / nave / oficina.
-9. Incoherencia geográfica (pueblo que no corresponde a la provincia o que no existe) → añade aviso en warnings.
+9. Incoherencia geográfica → añade aviso en warnings.
 10. El assistantFeedback debe ser un mensaje corto y profesional en español para el instalador.
 
+MUY IMPORTANTE — INTERPRETACIÓN DE TEXTO NATURAL:
+- El usuario puede escribir en lenguaje coloquial SIN nombrar "partidas". Tú debes inferir las partidas técnicas a partir del contexto.
+- Si menciona dimensiones ("4 metros de ancho por 3 de alto"), calcula la superficie real y úsala como qty con unidad "m²".
+- "tirar una pared / tabique" → Demolición de tabique, qty = superficie en m² si se especifica.
+- "emplastecer / emplastecido / repaso de paredes" → Emplastecido y reparación de paramentos verticales.
+- "mover un enchufe / punto de luz" → Desplazamiento de mecanismo eléctrico con nuevas rozas y tapado.
+- "hacer regolas / regolas" → Rozas en paramentos para instalación y posterior tapado con mortero.
+- "alicatar / poner azulejos" → Alicatado cerámico con mortero adhesivo. Si hay m², úsalos.
+- "pintar / pintura" → Pintado de paramentos. Si hay m², úsalos.
+- "fontanería / fontanero" → Partida de fontanería (descríbela con los trabajos mencionados).
+- Cualquier obra descrita de forma natural debe convertirse en partidas técnicas formales, aunque el usuario no use terminología técnica.
+
 UNIDADES:
-- "m²" → superficies (alicatado, pintura, solado, pladur)
+- "m²" → superficies calculadas desde dimensiones dadas o estimadas por el contexto
 - "ml" → longitudes (tuberías, cables, rodapiés)
-- "ud" → unidades discretas (grifo, mampara, radiador, split)
+- "ud" → unidades discretas (grifo, mampara, radiador, split, enchufe)
 - "pa" → partida alzada (trabajos globales sin medición exacta)
 - "h"  → horas de trabajo
+
+EJEMPLOS DE INTERPRETACIÓN DE TEXTO NATURAL:
+- "tirar una pared de 4 metros de ancho por 3 de alto" → {description: "Demolición de tabique interior y desescombro a vertedero", qty: 12, unit: "m²", unitPrice: 0, isPricePending: true}
+- "emplastecer los rotos de alrededor" → {description: "Emplastecido y reparación de paramentos verticales afectados", qty: 1, unit: "pa", unitPrice: 0, isPricePending: true}
+- "mover un enchufe de sitio, hacer regolas y taparlas" → {description: "Desplazamiento de punto de corriente: rozas en paramento, canalización, reubicación de mecanismo y tapado con mortero", qty: 1, unit: "ud", unitPrice: 0, isPricePending: true}
+- "poner un suelo de parqué en salón de 25 m²" → {description: "Suministro e instalación de pavimento de parqué de madera con base de nivelación", qty: 25, unit: "m²", unitPrice: 0, isPricePending: true}
 
 EJEMPLOS DE DESCRIPCIONES TÉCNICAS FORMALES:
 - bañera + plato ducha → "Demolición de bañera existente y suministro e instalación de plato de ducha de resina mineral antideslizante con válvula sifónica de gran caudal"
 - mampara → "Suministro y montaje de mampara de seguridad en vidrio templado (8 mm) con perfilería de aluminio anodizado y tratamiento antical"
-- demoliciones/escombro → "Demolición de revestimientos y tabiquería interior, picado de azulejos, retirada de carpintería, desescombro y transporte a vertedero homologado"
-- albañilería/pladur/maestreado → "Albañilería general: construcción de tabiquería, trasdosados y falso techo de pladur, enmaestrado y regresado de paramentos"
-- fontanería/multicapa → "Instalación integral de fontanería y saneamiento con red completa en tubería multicapa o polietileno reticulado"
-- electricidad/REBT/RBT → "Instalación eléctrica según REBT: cuadro general de mando y protección, circuitos, mecanismos y tomas de corriente"
-- alicatados/gresporcelánico → "Suministro y colocación de alicatados y solados en gres porcelánico de primera calidad con adhesivo C2TE y rejuntado"
-- pintura → "Preparación de paramentos, emplastecido y aplicación de pintura plástica lisa de alta cubrición en techos y paredes"
-- carpintería/puertas → "Revisión, ajuste y sustitución de carpintería interior: puertas de paso, marcos y manivelas"
-- reforma integral → "Reforma integral de vivienda: demolición, distribución, instalaciones, acabados y carpintería"
+- demoliciones → "Demolición de revestimientos y tabiquería interior, desescombro y transporte a vertedero homologado"
+- albañilería/pladur → "Albañilería general: construcción de tabiquería, trasdosados y falso techo de pladur, enmaestrado y regresado de paramentos"
+- fontanería → "Instalación integral de fontanería y saneamiento con red completa en tubería multicapa o polietileno reticulado"
+- electricidad → "Instalación eléctrica según REBT: cuadro de mando y protección, circuitos, mecanismos y tomas de corriente"
+- alicatados → "Suministro y colocación de alicatados y solados en gres porcelánico con adhesivo C2TE y rejuntado"
+- pintura → "Preparación de paramentos, emplastecido y aplicación de pintura plástica lisa de alta cubrición"
 
 FORMATO DE RESPUESTA (JSON estricto, sin texto adicional):
 {
@@ -1655,7 +1676,7 @@ FORMATO DE RESPUESTA (JSON estricto, sin texto adicional):
       "qty": 1,
       "unit": "pa",
       "unitPrice": 0,
-      "isPricePending": false
+      "isPricePending": true
     }
   ],
   "discount": null,
@@ -1663,7 +1684,7 @@ FORMATO DE RESPUESTA (JSON estricto, sin texto adicional):
   "paymentTerms": { "advancePercentage": 30, "validityDays": 15 },
   "warnings": [],
   "isDraftMode": false,
-  "assistantFeedback": "Mensaje breve en español para el instalador"
+  "assistantFeedback": "Mensaje breve en español para el instalador resumiendo las partidas detectadas"
 }`;
 
     const GEMINI_UPDATE_PROMPT = `Eres un asistente de actualización de presupuestos de obra en España. Se te da el estado ACTUAL del presupuesto (JSON) y el nuevo mensaje del profesional.
