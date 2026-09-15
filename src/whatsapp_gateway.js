@@ -16,6 +16,7 @@ import pino from 'pino';
 import dotenv from 'dotenv';
 import { PresuVozEngine } from './engine.js';
 import { GEMINI_SYSTEM_PROMPT } from './ai_service.js';
+import { generateBudgetPDF } from './pdf_service.js';
 
 dotenv.config();
 
@@ -330,7 +331,25 @@ async function startWhatsAppGateway() {
         const replyText = formatBudgetForWhatsApp(engineResult.budget, aiResult.warnings || []);
         const sent = await sock.sendMessage(remoteJid, { text: replyText });
         if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-        console.log('✅ Presupuesto enviado con éxito por WhatsApp.');
+        console.log('✅ Resumen de texto enviado por WhatsApp.');
+
+        // Generar y enviar documento PDF oficial adjunto
+        try {
+          console.log('📄 Generando documento PDF oficial...');
+          const pdfBuffer = await generateBudgetPDF(engineResult.budget);
+          const pdfFileName = `Presupuesto_${engineResult.budget.id || 'Obra'}.pdf`;
+
+          const sentDoc = await sock.sendMessage(remoteJid, {
+            document: pdfBuffer,
+            mimetype: 'application/pdf',
+            fileName: pdfFileName,
+            caption: `📄 *${pdfFileName}*\nPresupuesto formal en PDF listo para enviar a tu cliente o imprimir con firma y validez legal.`
+          });
+          if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
+          console.log(`✅ Archivo PDF (${pdfBuffer.length} bytes) enviado con éxito por WhatsApp.`);
+        } catch (pdfErr) {
+          console.error('⚠️ No se pudo generar o enviar el PDF:', pdfErr.message);
+        }
 
       } catch (err) {
         console.error('❌ Error procesando mensaje de WhatsApp:', err.message);

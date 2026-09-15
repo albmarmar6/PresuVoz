@@ -22,6 +22,7 @@
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc14",
     "dotenv": "^17.4.2",
+    "pdfkit": "^0.20.2",
     "pino": "^10.3.1",
     "qrcode-terminal": "^0.12.0"
   }
