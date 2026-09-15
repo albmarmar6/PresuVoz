@@ -1750,29 +1750,49 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
     }
 
     async function callGeminiAPI(userPrompt, systemInstruction) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`;
-      const body = {
-        contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-        systemInstruction: { parts: [{ text: systemInstruction }] },
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.1,
-          maxOutputTokens: 2048
+      const modelsToTry = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-pro'];
+      let lastError = null;
+
+      for (const model of modelsToTry) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+          const body = {
+            contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+            systemInstruction: { parts: [{ text: systemInstruction }] },
+            generationConfig: {
+              responseMimeType: 'application/json',
+              temperature: 0.1,
+              maxOutputTokens: 2048
+            }
+          };
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          });
+          if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            const errMsg = errData.error?.message || `Error HTTP ${response.status}`;
+            // Si el modelo no existe o no está soportado, probar el siguiente modelo en la lista
+            if (response.status === 404 || errMsg.includes('not found') || errMsg.includes('not supported')) {
+              lastError = new Error(errMsg);
+              continue;
+            }
+            throw new Error(errMsg);
+          }
+          const data = await response.json();
+          const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (!jsonText) throw new Error('Respuesta vacía de Gemini');
+          return JSON.parse(jsonText);
+        } catch (e) {
+          lastError = e;
+          if (e.message && (e.message.includes('not found') || e.message.includes('not supported'))) {
+            continue;
+          }
+          throw e;
         }
-      };
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.error?.message || `Error HTTP ${response.status}`);
       }
-      const data = await response.json();
-      const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!jsonText) throw new Error('Respuesta vacía de Gemini');
-      return JSON.parse(jsonText);
+      throw lastError || new Error('No se pudo conectar con ningún modelo de Gemini disponible');
     }
 
     async function processWithGemini(text) {
