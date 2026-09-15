@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/test_run.js",
     "test": "node src/test_suite.js",
-    "simulador": "node src/interactive_cli.js"
+    "simulador": "node src/interactive_cli.js",
+    "whatsapp": "node src/whatsapp_gateway.js"
   },
   "keywords": [
     "presupuestos",
@@ -17,5 +18,11 @@
     "gremios"
   ],
   "author": "PresuVoz",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "dotenv": "^17.4.2",
+    "pino": "^10.3.1",
+    "qrcode-terminal": "^0.12.0"
+  }
 }
