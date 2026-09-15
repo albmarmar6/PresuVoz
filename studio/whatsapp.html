@@ -1707,6 +1707,7 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
     function saveSettings() {
       const key = document.getElementById('geminiKeyInput').value.trim();
       GEMINI_API_KEY = key;
+      cachedGeminiModel = null;
       if (key) {
         localStorage.setItem('presuvoz_gemini_key', key);
       } else {
@@ -1718,6 +1719,7 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
 
     function clearApiKey() {
       GEMINI_API_KEY = '';
+      cachedGeminiModel = null;
       localStorage.removeItem('presuvoz_gemini_key');
       document.getElementById('geminiKeyInput').value = '';
       updateAIStatusBadge();
@@ -1749,8 +1751,39 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
       if (el) el.remove();
     }
 
+    let cachedGeminiModel = null;
+
+    async function getAvailableGeminiModel() {
+      if (cachedGeminiModel) return cachedGeminiModel;
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
+        if (res.ok) {
+          const data = await res.json();
+          const available = (data.models || [])
+            .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
+            .map(m => m.name.replace('models/', ''));
+
+          // Priorizar modelos flash modernos (2.5, 2.0, etc.)
+          const preferred = available.find(m => m.includes('flash') && (m.includes('2.5') || m.includes('2.0') || m.includes('3.')))
+            || available.find(m => m.includes('flash'))
+            || available.find(m => m.includes('pro'))
+            || available[0];
+
+          if (preferred) {
+            cachedGeminiModel = preferred;
+            console.log('PresuVoz — Modelo Gemini auto-detectado con éxito:', cachedGeminiModel);
+            return cachedGeminiModel;
+          }
+        }
+      } catch (e) {
+        console.warn('PresuVoz — No se pudo autodetectar modelos:', e);
+      }
+      return 'gemini-2.5-flash';
+    }
+
     async function callGeminiAPI(userPrompt, systemInstruction) {
-      const modelsToTry = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-pro'];
+      let detectedModel = await getAvailableGeminiModel();
+      const modelsToTry = [detectedModel, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-pro'].filter((v, i, a) => a.indexOf(v) === i);
       let lastError = null;
 
       for (const model of modelsToTry) {
@@ -1773,7 +1806,6 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
           if (!response.ok) {
             const errData = await response.json().catch(() => ({}));
             const errMsg = errData.error?.message || `Error HTTP ${response.status}`;
-            // Si el modelo no existe o no está soportado, probar el siguiente modelo en la lista
             if (response.status === 404 || errMsg.includes('not found') || errMsg.includes('not supported')) {
               lastError = new Error(errMsg);
               continue;
@@ -1783,6 +1815,7 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
           const data = await response.json();
           const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
           if (!jsonText) throw new Error('Respuesta vacía de Gemini');
+          cachedGeminiModel = model;
           return JSON.parse(jsonText);
         } catch (e) {
           lastError = e;

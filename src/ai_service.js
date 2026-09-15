@@ -8,7 +8,7 @@
  *   const aiResult = await parseTranscriptWithGemini("oye para Don Rodrigo en calle Alcalá...");
  */
 
-const GEMINI_MODEL = 'gemini-1.5-flash';
+const GEMINI_MODEL = 'gemini-2.5-flash';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 // ─────────────────────────────────────────────────────────────────────────────
