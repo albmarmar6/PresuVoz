@@ -1474,17 +1474,18 @@
       addUserBubble(text);
       showTypingIndicator();
 
-      if (GEMINI_API_KEY) {
+      // Usar IA si hay clave personal O si hay backend compartido configurado
+      if (GEMINI_API_KEY || PRESUVOZ_BACKEND_URL) {
         try {
           await processWithGemini(text);
         } catch(err) {
           hideTypingIndicator();
-          console.warn('PresuVoz — Error Gemini API:', err.message);
+          console.warn('PresuVoz — Error IA:', err.message);
           addBotBubble(`⚠️ Error de conexión con IA: "${err.message}".\nUsando motor local de reglas como respaldo...`, null);
           setTimeout(function() { processWithLocalParser(text); }, 400);
         }
       } else {
-        // Sin API Key → motor local con pequeña pausa para UX realista
+        // Sin IA configurada → motor local con pequeña pausa para UX realista
         await new Promise(r => setTimeout(r, 500));
         hideTypingIndicator();
         processWithLocalParser(text);
@@ -1611,9 +1612,14 @@
     }
 
     // -------------------------------------------------------------------------
-    // 5. Integración con IA — Google Gemini (opcional, fallback al motor local)
+    // 5. Integración con IA — Google Gemini (clave personal o backend compartido)
     // -------------------------------------------------------------------------
     let GEMINI_API_KEY = localStorage.getItem('presuvoz_gemini_key') || '';
+
+    // URL del backend Vercel compartido (se rellena tras el primer deploy).
+    // Con esto cualquier usuario genera presupuestos sin configurar nada.
+    // Ejemplo: 'https://presuvoz.vercel.app'
+    const PRESUVOZ_BACKEND_URL = '';
 
     const GEMINI_SYSTEM_PROMPT = `Eres un asistente especializado en extracción de presupuestos para gremios españoles de construcción y reformas.
 
@@ -1707,8 +1713,11 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
       const badge = document.getElementById('aiStatusBadge');
       if (!badge) return;
       if (GEMINI_API_KEY) {
-        badge.textContent = '🟢 IA Activa';
+        badge.textContent = '🟢 IA Personal';
         badge.className = 'text-[9px] font-medium px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-700 cursor-default select-none';
+      } else if (PRESUVOZ_BACKEND_URL) {
+        badge.textContent = '🔵 IA Servidor';
+        badge.className = 'text-[9px] font-medium px-2 py-0.5 rounded-full bg-sky-950 text-sky-300 border border-sky-700 cursor-default select-none';
       } else {
         badge.textContent = '⚪ Modo Local';
         badge.className = 'text-[9px] font-medium px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 cursor-default select-none';
@@ -1775,6 +1784,22 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
     let cachedGeminiModel = null;
 
     async function callGeminiAPI(userPrompt, systemInstruction) {
+      // ── Modo backend compartido (sin clave personal) ──────────────────────
+      // Si no hay clave local pero hay backend Vercel, delegar al servidor
+      if (!GEMINI_API_KEY && PRESUVOZ_BACKEND_URL) {
+        const response = await fetch(`${PRESUVOZ_BACKEND_URL}/api/gemini`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userPrompt, systemInstruction })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error || `Error del servidor ${response.status}`);
+        }
+        return data.result;
+      }
+
+      // ── Modo clave personal (llamada directa a Gemini) ─────────────────────
       // Si ya encontramos un modelo que funciona, usarlo directamente
       const base = [
         'gemini-3.1-pro-preview',
