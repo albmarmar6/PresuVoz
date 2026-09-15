@@ -1616,10 +1616,8 @@
     // -------------------------------------------------------------------------
     let GEMINI_API_KEY = localStorage.getItem('presuvoz_gemini_key') || '';
 
-    // URL del backend Vercel compartido (se rellena tras el primer deploy).
-    // Con esto cualquier usuario genera presupuestos sin configurar nada.
-    // Ejemplo: 'https://presuvoz.vercel.app'
-    const PRESUVOZ_BACKEND_URL = '';
+    // URL del backend Vercel compartido — todos los usuarios usan la IA sin configurar nada.
+    const PRESUVOZ_BACKEND_URL = 'https://presuvoz.vercel.app';
 
     const GEMINI_SYSTEM_PROMPT = `Eres un asistente especializado en extracción de presupuestos para gremios españoles de construcción y reformas.
 
