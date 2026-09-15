@@ -8,15 +8,15 @@
  * Response: { ok: true, result: object, model: string }
  */
 
-export default async function handler(req, res) {
-  // CORS — permite llamadas desde GitHub Pages y cualquier origen (demo pública)
+module.exports = async function handler(req, res) {
+  // CORS — permite llamadas desde GitHub Pages y cualquier origen (demo publica)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') {
-    return res.status(405).json({ ok: false, error: 'Método no permitido. Usa POST.' });
+    return res.status(405).json({ ok: false, error: 'Metodo no permitido. Usa POST.' });
   }
 
   const { userPrompt, systemInstruction } = req.body || {};
@@ -47,7 +47,7 @@ export default async function handler(req, res) {
   for (let i = 0; i < modelsToTry.length; i++) {
     const model = modelsToTry[i];
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+      const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + GEMINI_API_KEY;
       const geminiRes = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -62,34 +62,34 @@ export default async function handler(req, res) {
         })
       });
 
-      const data = await geminiRes.json().catch(() => ({}));
+      const data = await geminiRes.json().catch(function() { return {}; });
 
       if (!geminiRes.ok) {
-        const errMsg = data.error?.message || `Error HTTP ${geminiRes.status}`;
+        const errMsg = (data.error && data.error.message) || ('Error HTTP ' + geminiRes.status);
         if (geminiRes.status === 401 || geminiRes.status === 403) {
-          return res.status(503).json({ ok: false, error: 'Error de autenticación con Gemini. Revisa la variable GEMINI_API_KEY en Vercel.' });
+          return res.status(503).json({ ok: false, error: 'Error de autenticacion con Gemini. Revisa la variable GEMINI_API_KEY en Vercel.' });
         }
-        const suggestedMatch = errMsg.match(/use\s+models\/([\w.-]+)/);
+        var suggestedMatch = errMsg.match(/use\s+models\/([\w.-]+)/);
         if (suggestedMatch && !modelsToTry.includes(suggestedMatch[1])) {
           modelsToTry.push(suggestedMatch[1]);
         }
-        console.warn(`PresuVoz Backend: Modelo "${model}" no disponible: ${errMsg.substring(0, 100)}`);
+        console.warn('PresuVoz Backend: Modelo "' + model + '" no disponible: ' + errMsg.substring(0, 100));
         lastError = errMsg;
         continue;
       }
 
-      const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!jsonText) { lastError = 'Respuesta vacía de Gemini'; continue; }
+      var jsonText = data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text;
+      if (!jsonText) { lastError = 'Respuesta vacia de Gemini'; continue; }
 
-      const result = JSON.parse(jsonText);
-      console.log(`PresuVoz Backend: Respuesta generada con modelo: ${model}`);
-      return res.status(200).json({ ok: true, result, model });
+      var result = JSON.parse(jsonText);
+      console.log('PresuVoz Backend: Respuesta generada con modelo: ' + model);
+      return res.status(200).json({ ok: true, result: result, model: model });
 
     } catch (e) {
-      console.warn(`PresuVoz Backend: Error con modelo "${model}": ${e.message}`);
+      console.warn('PresuVoz Backend: Error con modelo "' + model + '": ' + e.message);
       lastError = e.message;
     }
   }
 
   return res.status(503).json({ ok: false, error: 'No se pudo conectar con Gemini. Intenta de nuevo en unos segundos.' });
-}
+};
