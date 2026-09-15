@@ -1,4 +1,4 @@
-﻿/**
+/**
  * PresuVoz — WhatsApp QR Gateway
  * Conecta un número de WhatsApp real mediante código QR (Baileys).
  * Escucha mensajes de texto y notas de voz (.ogg), los procesa con Gemini AI
@@ -188,7 +188,8 @@ async function startWhatsAppGateway() {
     version,
     auth: state,
     logger,
-    printQRInTerminal: false
+    printQRInTerminal: false,
+    browser: ['PresuVoz Bot', 'Chrome', '1.0.0']
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -218,11 +219,19 @@ async function startWhatsAppGateway() {
     }
   });
 
+  const botSentMessageIds = new Set();
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+    // Aceptar tanto 'notify' (mensajes de terceros) como 'append' (mensajes a ti mismo desde tu móvil)
+    if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of messages) {
       if (!msg.message) continue;
+
+      // Evitar procesar mensajes que el propio bot acaba de enviar
+      if (msg.key?.id && botSentMessageIds.has(msg.key.id)) {
+        continue;
+      }
 
       const remoteJid = msg.key.remoteJid;
       if (!remoteJid || remoteJid.includes('@broadcast') || remoteJid.includes('@newsletter')) {
@@ -233,24 +242,27 @@ async function startWhatsAppGateway() {
       const isFromMe = msg.key.fromMe;
       const myNumber = sock.user?.id ? sock.user.id.split(':')[0].replace(/\D/g, '') : '';
 
+      // Comprobación de seguridad: Modo Seguro
       if (SAFE_MODE) {
         const isAllowedNumber = ALLOWED_NUMBERS.includes(senderNumber);
-        const isSelfChat = isFromMe || (myNumber && senderNumber === myNumber);
+        const isSelfChat = remoteJid.includes(myNumber) || (isFromMe && senderNumber === myNumber);
 
         if (!isSelfChat && !isAllowedNumber) {
+          // Ignorar mensajes de otros contactos para no molestar a amigos o familiares
           continue;
         }
-      }
-
-      // Si es un mensaje saliente enviado por el bot hacia otro contacto, no reprocesarlo
-      if (isFromMe && (!myNumber || senderNumber !== myNumber)) {
-        continue;
       }
 
       const isAudio = Boolean(msg.message.audioMessage);
       const isText = Boolean(msg.message.conversation || msg.message.extendedTextMessage?.text);
 
       if (!isAudio && !isText) continue;
+
+      // Evitar que el bot reaccione a sus propios textos de presupuesto
+      const existingText = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+      if (existingText.includes('PRESUPUESTO') || existingText.includes('PresuVoz AI')) {
+        continue;
+      }
 
       try {
         await sock.sendPresenceUpdate('composing', remoteJid);
@@ -304,14 +316,16 @@ async function startWhatsAppGateway() {
         }
 
         const replyText = formatBudgetForWhatsApp(engineResult.budget, aiResult.warnings || []);
-        await sock.sendMessage(remoteJid, { text: replyText });
+        const sent = await sock.sendMessage(remoteJid, { text: replyText });
+        if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
         console.log('✅ Presupuesto enviado con éxito por WhatsApp.');
 
       } catch (err) {
         console.error('❌ Error procesando mensaje de WhatsApp:', err.message);
-        await sock.sendMessage(remoteJid, {
+        const sentErr = await sock.sendMessage(remoteJid, {
           text: `⚠️ *Error al procesar presupuesto*: ${err.message}`
         });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
       } finally {
         await sock.sendPresenceUpdate('paused', remoteJid);
       }
