@@ -1,4 +1,4 @@
-﻿/**
+/**
  * PresuVoz — Backend Serverless (Vercel)
  * Proxy seguro entre el simulador web y Google Gemini API.
  */
@@ -24,11 +24,11 @@ export default async function handler(req, res) {
   }
 
   const modelsToTry = [
-    'gemini-2.5-flash',
-    'gemini-3.1-pro-preview',
+    'gemini-3.8-flash',
+    'gemini-3.6-flash',
+    'gemini-3.7-flash',
     'gemini-3.1-flash-preview',
-    'gemini-2.0-flash',
-    'gemini-2.5-flash-preview-05-20'
+    'gemini-3.1-pro-preview'
   ];
 
   let lastError = 'Sin respuesta';

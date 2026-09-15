@@ -31,11 +31,11 @@ const ALLOWED_NUMBERS = (process.env.ALLOWED_NUMBERS || '')
   .filter(Boolean);
 
 const GEMINI_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-3.1-pro-preview',
+  'gemini-3.8-flash',
+  'gemini-3.6-flash',
+  'gemini-3.7-flash',
   'gemini-3.1-flash-preview',
-  'gemini-2.0-flash',
-  'gemini-2.5-flash-preview-05-20'
+  'gemini-3.1-pro-preview'
 ];
 
 async function callGemini(payload) {
@@ -240,15 +240,17 @@ async function startWhatsAppGateway() {
 
       const senderNumber = remoteJid.replace(/\D/g, '');
       const isFromMe = msg.key.fromMe;
-      const myNumber = sock.user?.id ? sock.user.id.split(':')[0].replace(/\D/g, '') : '';
+      const myNumber = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].replace(/\D/g, '');
+
+      console.log(`📩 Mensaje detectado [jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}]`);
 
       // Comprobación de seguridad: Modo Seguro
       if (SAFE_MODE) {
         const isAllowedNumber = ALLOWED_NUMBERS.includes(senderNumber);
-        const isSelfChat = remoteJid.includes(myNumber) || (isFromMe && senderNumber === myNumber);
+        const isSelfChat = isFromMe && (remoteJid.includes(myNumber) || senderNumber === myNumber);
 
         if (!isSelfChat && !isAllowedNumber) {
-          // Ignorar mensajes de otros contactos para no molestar a amigos o familiares
+          console.log(`   ⏭️ Ignorado por Modo Seguro (no es chat propio ni número permitido)`);
           continue;
         }
       }
@@ -256,11 +258,15 @@ async function startWhatsAppGateway() {
       const isAudio = Boolean(msg.message.audioMessage);
       const isText = Boolean(msg.message.conversation || msg.message.extendedTextMessage?.text);
 
-      if (!isAudio && !isText) continue;
+      if (!isAudio && !isText) {
+        console.log(`   ⏭️ Ignorado (no es texto ni nota de voz)`);
+        continue;
+      }
 
       // Evitar que el bot reaccione a sus propios textos de presupuesto
       const existingText = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
       if (existingText.includes('PRESUPUESTO') || existingText.includes('PresuVoz AI')) {
+        console.log(`   ⏭️ Ignorado (es un presupuesto enviado por el propio bot)`);
         continue;
       }
 
