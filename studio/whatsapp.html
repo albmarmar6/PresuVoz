@@ -57,6 +57,8 @@
       </div>
 
       <div class="flex items-center gap-2">
+        <span id="aiStatusBadge" class="text-[9px] font-medium px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 cursor-default select-none">⚪ Modo Local</span>
+        <button onclick="openSettings()" class="text-xs text-slate-400 hover:text-white bg-slate-800/80 px-2.5 py-1 rounded-lg border border-slate-700 transition-colors cursor-pointer" title="Configurar IA Gemini">⚙️</button>
         <button onclick="resetChat()" class="text-xs text-slate-400 hover:text-white bg-slate-800/80 px-2.5 py-1 rounded-lg border border-slate-700 transition-colors cursor-pointer">
           Reiniciar
         </button>
@@ -126,6 +128,33 @@
       </button>
     </div>
 
+  </div>
+
+  <!-- Modal de Configuración de IA Gemini -->
+  <div id="settingsModal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4" onclick="if(event.target===this)closeSettings()">
+    <div class="bg-[#1a2530] rounded-2xl p-6 w-full max-w-sm border border-slate-700 shadow-2xl">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-white font-bold text-sm">⚙️ Configuración de IA</h2>
+        <button onclick="closeSettings()" class="text-slate-500 hover:text-white text-lg cursor-pointer leading-none">×</button>
+      </div>
+      <p class="text-slate-400 text-xs mb-1">Conecta <strong class="text-slate-200">Google Gemini</strong> para que el sistema entienda cualquier voz y gremio sin errores. La clave se guarda solo en este navegador.</p>
+      <a href="https://aistudio.google.com/apikey" target="_blank" class="inline-block text-emerald-400 text-xs underline mb-4 hover:text-emerald-300 transition-colors">→ Obtener clave gratis en Google AI Studio</a>
+      <label class="block text-slate-400 text-xs mb-1 font-medium">API Key de Gemini</label>
+      <input type="password" id="geminiKeyInput" placeholder="AIzaSy..." autocomplete="off"
+        class="w-full bg-[#2a3942] text-slate-100 text-xs px-3 py-2.5 rounded-lg outline-none focus:ring-1 focus:ring-emerald-500 mb-3 border border-slate-700 font-mono">
+      <div id="geminiTestResult" class="hidden text-xs mb-3 p-2.5 rounded-lg"></div>
+      <div class="flex gap-2 mb-2">
+        <button onclick="saveSettings()" class="flex-1 bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-2 rounded-lg text-xs cursor-pointer transition-colors">
+          ✓ Guardar y Conectar
+        </button>
+        <button onclick="closeSettings()" class="flex-1 bg-slate-700 hover:bg-slate-600 text-white py-2 rounded-lg text-xs cursor-pointer transition-colors">
+          Cancelar
+        </button>
+      </div>
+      <button onclick="clearApiKey()" class="w-full text-slate-500 hover:text-rose-400 text-xs py-1 cursor-pointer transition-colors">
+        Borrar clave guardada
+      </button>
+    </div>
   </div>
 
   <p class="text-xs text-slate-500 mt-4 text-center">Simulador Web en tiempo real de PresuVoz. Todo el procesamiento se realiza en local sin enviar audios a servidores externos.</p>
@@ -1435,33 +1464,50 @@
       sendMessage();
     }
 
-    function sendMessage() {
+    async function sendMessage() {
       const input = document.getElementById('chatInput');
       const text = input.value.trim();
       if (!text) return;
       input.value = '';
 
       addUserBubble(text);
+      showTypingIndicator();
 
-      setTimeout(function() {
-        if (activeBudget) {
-          const updateRes = engine.updateBudgetPrice(activeBudget, text);
-          if (updateRes.success) {
-            activeBudget = updateRes.budget;
-            addBotBubble(updateRes.assistantMessage, activeBudget);
-            return;
-          }
+      if (GEMINI_API_KEY) {
+        try {
+          await processWithGemini(text);
+        } catch(err) {
+          hideTypingIndicator();
+          console.warn('PresuVoz — Error Gemini API:', err.message);
+          addBotBubble(`⚠️ Error de conexión con IA: "${err.message}".\nUsando motor local de reglas como respaldo...`, null);
+          setTimeout(function() { processWithLocalParser(text); }, 400);
         }
-
-        const res = engine.process(text);
-        if (res.success) {
-          activeBudget = res.budget;
-          addBotBubble(res.assistantFeedback, activeBudget);
-        } else {
-          addBotBubble(res.assistantFeedback, null);
-        }
-      }, 350);
+      } else {
+        // Sin API Key → motor local con pequeña pausa para UX realista
+        await new Promise(r => setTimeout(r, 500));
+        hideTypingIndicator();
+        processWithLocalParser(text);
+      }
     }
+
+    function processWithLocalParser(text) {
+      if (activeBudget) {
+        const updateRes = engine.updateBudgetPrice(activeBudget, text);
+        if (updateRes.success) {
+          activeBudget = updateRes.budget;
+          addBotBubble(updateRes.assistantMessage, activeBudget);
+          return;
+        }
+      }
+      const res = engine.process(text);
+      if (res.success) {
+        activeBudget = res.budget;
+        addBotBubble(res.assistantFeedback, activeBudget);
+      } else {
+        addBotBubble(res.assistantFeedback, null);
+      }
+    }
+
 
     function addUserBubble(text) {
       const feed = document.getElementById('chatFeed');
@@ -1559,10 +1605,246 @@
       `;
     }
 
+    // -------------------------------------------------------------------------
+    // 5. Integración con IA — Google Gemini (opcional, fallback al motor local)
+    // -------------------------------------------------------------------------
+    let GEMINI_API_KEY = localStorage.getItem('presuvoz_gemini_key') || '';
+
+    const GEMINI_SYSTEM_PROMPT = `Eres un asistente especializado en extracción de presupuestos para gremios españoles de construcción y reformas.
+
+Tu ÚNICA función es analizar transcripciones de audio de profesionales (albañiles, fontaneros, electricistas, carpinteros, pintores, etc.) y extraer datos estructurados en formato JSON para generar presupuestos formales.
+
+REGLAS CRÍTICAS (cumplirlas sin excepción):
+1. Responde ÚNICAMENTE con JSON válido. Sin texto adicional ni markdown fuera del JSON.
+2. IGNORA completamente: saludos, despedidas, muletillas ("eh", "mmm", "bueno", "sinceramente"), anécdotas, explicaciones y la expresión "y ya está".
+3. "y ya está" NO es una partida técnica. No la incluyas.
+4. Rangos de precio ("de 4.500 a 6.000 €", "entre 4.000 y 5.500 €", "4.500 7.500 euros"): usa SIEMPRE el valor MÁXIMO.
+5. Errores fonéticos de Whisper (ej: "4.205.000 €" para una fontanería → imposible, corrígelo al valor razonable, ej: 5.000 €). Detecta precios irracionales para el tipo de obra.
+6. Usa descripciones TÉCNICAS FORMALES en español de presupuesto de obra (no las palabras exactas del audio, sino la descripción de un presupuesto oficial).
+7. Sin precio → unitPrice: 0, isPricePending: true.
+8. IVA: 10 para vivienda habitual / piso / baño / cocina particular. 21 para local comercial / nave / oficina.
+9. Incoherencia geográfica (pueblo que no corresponde a la provincia o que no existe) → añade aviso en warnings.
+10. El assistantFeedback debe ser un mensaje corto y profesional en español para el instalador.
+
+UNIDADES:
+- "m²" → superficies (alicatado, pintura, solado, pladur)
+- "ml" → longitudes (tuberías, cables, rodapiés)
+- "ud" → unidades discretas (grifo, mampara, radiador, split)
+- "pa" → partida alzada (trabajos globales sin medición exacta)
+- "h"  → horas de trabajo
+
+EJEMPLOS DE DESCRIPCIONES TÉCNICAS FORMALES:
+- bañera + plato ducha → "Demolición de bañera existente y suministro e instalación de plato de ducha de resina mineral antideslizante con válvula sifónica de gran caudal"
+- mampara → "Suministro y montaje de mampara de seguridad en vidrio templado (8 mm) con perfilería de aluminio anodizado y tratamiento antical"
+- demoliciones/escombro → "Demolición de revestimientos y tabiquería interior, picado de azulejos, retirada de carpintería, desescombro y transporte a vertedero homologado"
+- albañilería/pladur/maestreado → "Albañilería general: construcción de tabiquería, trasdosados y falso techo de pladur, enmaestrado y regresado de paramentos"
+- fontanería/multicapa → "Instalación integral de fontanería y saneamiento con red completa en tubería multicapa o polietileno reticulado"
+- electricidad/REBT/RBT → "Instalación eléctrica según REBT: cuadro general de mando y protección, circuitos, mecanismos y tomas de corriente"
+- alicatados/gresporcelánico → "Suministro y colocación de alicatados y solados en gres porcelánico de primera calidad con adhesivo C2TE y rejuntado"
+- pintura → "Preparación de paramentos, emplastecido y aplicación de pintura plástica lisa de alta cubrición en techos y paredes"
+- carpintería/puertas → "Revisión, ajuste y sustitución de carpintería interior: puertas de paso, marcos y manivelas"
+- reforma integral → "Reforma integral de vivienda: demolición, distribución, instalaciones, acabados y carpintería"
+
+FORMATO DE RESPUESTA (JSON estricto, sin texto adicional):
+{
+  "clientName": "Nombre del cliente o null",
+  "clientAddress": "Dirección completa o null",
+  "items": [
+    {
+      "description": "Descripción técnica formal",
+      "qty": 1,
+      "unit": "pa",
+      "unitPrice": 0,
+      "isPricePending": false
+    }
+  ],
+  "discount": null,
+  "taxRate": 10,
+  "paymentTerms": { "advancePercentage": 30, "validityDays": 15 },
+  "warnings": [],
+  "isDraftMode": false,
+  "assistantFeedback": "Mensaje breve en español para el instalador"
+}`;
+
+    const GEMINI_UPDATE_PROMPT = `Eres un asistente de actualización de presupuestos de obra en España. Se te da el estado ACTUAL del presupuesto (JSON) y el nuevo mensaje del profesional.
+
+Tu tarea: interpretar el mensaje y devolver el presupuesto COMPLETO actualizado en JSON.
+
+ACCIONES POSIBLES:
+- "Ponle X euros a [partida]" / "[Partida] cuesta X euros" → actualiza unitPrice de esa partida, isPricePending: false
+- Nuevas partidas de obra → agrégalas al array items
+- "Quita [partida]" → elimínala del array
+- Corrección de dirección o nombre → actualiza clientAddress / clientName
+- "Descuento del X%" o "rebaja de X euros" → establece discount
+- Las partidas NO mencionadas deben permanecer EXACTAMENTE iguales
+
+Aplica las mismas reglas: descripciones técnicas formales, valor máximo en rangos de precio, ignorar muletillas y "y ya está".
+
+Responde SOLO con JSON válido con el presupuesto completo actualizado en el mismo formato que el sistema principal.`;
+
+    function updateAIStatusBadge() {
+      const badge = document.getElementById('aiStatusBadge');
+      if (!badge) return;
+      if (GEMINI_API_KEY) {
+        badge.textContent = '🟢 IA Activa';
+        badge.className = 'text-[9px] font-medium px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-700 cursor-default select-none';
+      } else {
+        badge.textContent = '⚪ Modo Local';
+        badge.className = 'text-[9px] font-medium px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 cursor-default select-none';
+      }
+    }
+
+    function openSettings() {
+      document.getElementById('settingsModal').classList.remove('hidden');
+      document.getElementById('geminiKeyInput').value = GEMINI_API_KEY;
+      document.getElementById('geminiTestResult').classList.add('hidden');
+    }
+
+    function closeSettings() {
+      document.getElementById('settingsModal').classList.add('hidden');
+    }
+
+    function saveSettings() {
+      const key = document.getElementById('geminiKeyInput').value.trim();
+      GEMINI_API_KEY = key;
+      if (key) {
+        localStorage.setItem('presuvoz_gemini_key', key);
+      } else {
+        localStorage.removeItem('presuvoz_gemini_key');
+      }
+      updateAIStatusBadge();
+      closeSettings();
+    }
+
+    function clearApiKey() {
+      GEMINI_API_KEY = '';
+      localStorage.removeItem('presuvoz_gemini_key');
+      document.getElementById('geminiKeyInput').value = '';
+      updateAIStatusBadge();
+      closeSettings();
+    }
+
+    function showTypingIndicator() {
+      const feed = document.getElementById('chatFeed');
+      if (document.getElementById('typingBubble')) return;
+      const el = document.createElement('div');
+      el.id = 'typingBubble';
+      el.className = 'flex items-start gap-2 max-w-[88%]';
+      el.innerHTML = `
+        <div class="bg-[#202c33] text-slate-200 text-xs p-3.5 rounded-2xl rounded-tl-sm border border-slate-700/50 shadow-md">
+          <p class="font-semibold text-emerald-400 mb-2">PresuVoz Bot</p>
+          <div class="flex gap-1.5 items-center py-0.5">
+            <span class="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style="animation-delay:0ms"></span>
+            <span class="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style="animation-delay:150ms"></span>
+            <span class="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style="animation-delay:300ms"></span>
+          </div>
+        </div>
+      `;
+      feed.appendChild(el);
+      feed.scrollTop = feed.scrollHeight;
+    }
+
+    function hideTypingIndicator() {
+      const el = document.getElementById('typingBubble');
+      if (el) el.remove();
+    }
+
+    async function callGeminiAPI(userPrompt, systemInstruction) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`;
+      const body = {
+        contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+          maxOutputTokens: 2048
+        }
+      };
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error?.message || `Error HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!jsonText) throw new Error('Respuesta vacía de Gemini');
+      return JSON.parse(jsonText);
+    }
+
+    async function processWithGemini(text) {
+      let aiResult;
+
+      if (activeBudget && activeBudget.items && activeBudget.items.length > 0) {
+        // Modo actualización conversacional — pasa el estado actual como contexto
+        const currentState = {
+          clientName: activeBudget.client.name !== 'Cliente Particular' ? activeBudget.client.name : null,
+          clientAddress: activeBudget.client.address !== 'Ubicación obra según visita' ? activeBudget.client.address : null,
+          items: activeBudget.items.map(i => ({
+            id: i.id,
+            description: i.description,
+            qty: i.qty,
+            unit: i.unit,
+            unitPrice: i.unitPrice,
+            isPricePending: i.isPricePending
+          })),
+          taxRate: activeBudget.financials.taxRatePercentage,
+          discount: activeBudget.financials.discountPercentage > 0
+            ? { type: 'percentage', value: activeBudget.financials.discountPercentage }
+            : null
+        };
+        const prompt = `PRESUPUESTO ACTUAL:\n${JSON.stringify(currentState, null, 2)}\n\nNUEVO MENSAJE DEL PROFESIONAL:\n${text}`;
+        aiResult = await callGeminiAPI(prompt, GEMINI_UPDATE_PROMPT);
+        // Preservar datos del cliente si Gemini no los modifica
+        if (!aiResult.clientName) aiResult.clientName = currentState.clientName;
+        if (!aiResult.clientAddress) aiResult.clientAddress = currentState.clientAddress;
+      } else {
+        // Modo nuevo presupuesto
+        aiResult = await callGeminiAPI(text, GEMINI_SYSTEM_PROMPT);
+      }
+
+      hideTypingIndicator();
+
+      if (!aiResult.items || aiResult.items.length === 0) {
+        addBotBubble('🤖 ' + (aiResult.assistantFeedback || 'No he podido extraer partidas del audio. ¿Puedes añadir más detalle sobre la obra?'), null);
+        return;
+      }
+
+      // Alimentar el resultado de IA al motor de cálculo fiscal
+      const res = engine.process({
+        rawTranscript: text,
+        clientName: aiResult.clientName,
+        clientAddress: aiResult.clientAddress,
+        items: aiResult.items,
+        taxRate: (aiResult.taxRate || 10) / 100,
+        discount: aiResult.discount || null,
+        customConditions: aiResult.paymentTerms
+          ? `${aiResult.paymentTerms.advancePercentage}% al aceptar el presupuesto para reserva de fechas y acopio de materiales. ${100 - aiResult.paymentTerms.advancePercentage}% a la finalización de los trabajos.`
+          : null
+      });
+
+      if (res.success) {
+        activeBudget = res.budget;
+        const warningsText = aiResult.warnings && aiResult.warnings.length > 0
+          ? '\n\n⚠️ ' + aiResult.warnings.join('\n⚠️ ')
+          : '';
+        addBotBubble('🤖 ' + (aiResult.assistantFeedback || res.assistantFeedback) + warningsText, activeBudget);
+      } else {
+        addBotBubble('🤖 ' + (aiResult.assistantFeedback || res.assistantFeedback || 'Error al procesar el presupuesto'), null);
+      }
+    }
+
+    // Inicializar badge al cargar la página
+    updateAIStatusBadge();
+
     // Reconocimiento de voz por micrófono en navegador
     let recognition = null;
     let isRecording = false;
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
 
     if (SR) {
       recognition = new SR();
@@ -1623,6 +1905,10 @@
     window.toggleVoiceRecord = toggleVoiceRecord;
     window.stopVoiceRecord = stopVoiceRecord;
     window.openBudgetModal = openBudgetModal;
+    window.openSettings = openSettings;
+    window.closeSettings = closeSettings;
+    window.saveSettings = saveSettings;
+    window.clearApiKey = clearApiKey;
   </script>
 
 </body>
