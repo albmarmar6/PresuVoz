@@ -37,6 +37,8 @@ const GEMINI_MODELS = [
   'gemini-3.7-flash'
 ];
 
+let cachedWorkingModel = null;
+
 async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
   if (!GEMINI_API_KEY && typeof payload === 'string' && PRESUVOZ_BACKEND_URL) {
     const res = await fetch(`${PRESUVOZ_BACKEND_URL}/api/gemini`, {
@@ -72,8 +74,12 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
     parts.push({ text: instructionText });
   }
 
+  const modelsToTry = cachedWorkingModel
+    ? [cachedWorkingModel, ...GEMINI_MODELS.filter(m => m !== cachedWorkingModel)]
+    : GEMINI_MODELS;
+
   let lastError = null;
-  for (const model of GEMINI_MODELS) {
+  for (const model of modelsToTry) {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
       const response = await fetch(url, {
@@ -103,6 +109,8 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
 
       const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!jsonText) throw new Error('Respuesta vacía de Gemini');
+      
+      cachedWorkingModel = model;
       return JSON.parse(jsonText);
     } catch (e) {
       console.warn(`PresuVoz ⚠ Error con modelo "${model}":`, e.message);
