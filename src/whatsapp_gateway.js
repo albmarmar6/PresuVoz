@@ -268,6 +268,8 @@ async function startWhatsAppGateway() {
       const myNumber = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].replace(/\D/g, '');
       const myLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].replace(/\D/g, '');
 
+      const logMsg = `[${new Date().toLocaleTimeString()}] 📩 Mensaje detectado [jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]\n`;
+      try { (await import('fs')).appendFileSync('gateway.log', logMsg); } catch(e) {}
       console.log(`📩 Mensaje detectado [jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]`);
 
       // Comprobación de seguridad: Modo Seguro
@@ -279,6 +281,8 @@ async function startWhatsAppGateway() {
         );
 
         if (!isSelfChat && !isAllowedNumber) {
+          const ignoreMsg = `   ⏭️ Ignorado por Modo Seguro (${isFromMe ? 'mensaje saliente a contacto ajeno' : 'mensaje de contacto ajeno'})\n`;
+          try { (await import('fs')).appendFileSync('gateway.log', ignoreMsg); } catch(e) {}
           console.log(`   ⏭️ Ignorado por Modo Seguro (${isFromMe ? 'mensaje saliente a contacto ajeno' : 'mensaje de contacto ajeno'})`);
           continue;
         }
