@@ -513,6 +513,22 @@ async function startWhatsAppGateway() {
           });
           if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
           console.log(`✅ Archivo PDF (${pdfBuffer.length} bytes) enviado con éxito por WhatsApp.`);
+
+          // Generar enlace de firma digital táctil
+          try {
+            const budgetJson   = JSON.stringify(engineResult.budget);
+            const budgetBase64 = Buffer.from(budgetJson).toString('base64')
+              .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            const signingUrl = `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?data=${budgetBase64}`;
+            const sentSig = await sock.sendMessage(remoteJid, {
+              text: `✍️ *Firma del presupuesto*\n\nCuando el cliente esté presente, abre este enlace para firmar digitalmente y que reciba el contrato por email:\n${signingUrl}`
+            });
+            if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
+            console.log('✅ Enlace de firma enviado por WhatsApp.');
+          } catch (sigErr) {
+            console.warn('⚠️ No se pudo generar el enlace de firma:', sigErr.message);
+          }
+
         } catch (pdfErr) {
           console.error('⚠️ No se pudo generar o enviar el PDF:', pdfErr.message);
         }
