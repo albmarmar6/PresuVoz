@@ -6,8 +6,6 @@
 import PDFDocument from 'pdfkit';
 import { Resend }  from 'resend';
 
-const resend = new Resend(process.env.RESEND_API_KEY);
-
 // ─── Generar PDF con firmas estampadas ──────────────────────────────────────
 function generateSignedPDF(budget, signaturePro, signatureClient, signedAt) {
   return new Promise((resolve, reject) => {
@@ -162,9 +160,12 @@ export default async function handler(req, res) {
     return res.status(400).json({ ok: false, error: 'Faltan campos obligatorios: budget, clientEmail, signaturePro, signatureClient.' });
   }
 
-  if (!process.env.RESEND_API_KEY) {
-    return res.status(503).json({ ok: false, error: 'Servicio de email no configurado en el servidor.' });
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ ok: false, error: 'Servicio de email no configurado en el servidor (falta RESEND_API_KEY).' });
   }
+
+  const resend = new Resend(apiKey);
 
   try {
     const signedAt  = new Date().toISOString();
