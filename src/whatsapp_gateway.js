@@ -318,26 +318,21 @@ async function startWhatsAppGateway() {
 
       // Evitar que el bot reaccione a sus propios textos de presupuesto
       const rawUserText = (messageContent?.conversation || messageContent?.extendedTextMessage?.text || '').trim();
-      if (rawUserText.includes('PRESUPUESTO') || rawUserText.includes('PresuVoz AI') || rawUserText.includes('¿Qué deseas hacer ahora?')) {
+      if (
+        rawUserText.includes('PRESUPUESTO') ||
+        rawUserText.includes('PresuVoz AI') ||
+        rawUserText.includes('Opciones disponibles') ||
+        rawUserText.includes('presupuestos guardados responde') ||
+        rawUserText.includes('¿Qué deseas hacer ahora?')
+      ) {
         console.log(`   ⏭️ Ignorado (es un mensaje de interfaz enviado por el bot)`);
         continue;
       }
 
       const session = getUserSession(remoteJid);
 
-      // Opción 2: Empezar un presupuesto nuevo para otro cliente
-      if (/^(2|#nuevo|nuevo presupuesto|nuevo|otro cliente|empezar de nuevo)$/i.test(rawUserText)) {
-        session.activeBudgetId = null;
-        const sentReset = await sock.sendMessage(remoteJid, {
-          text: '🔄 *Listo para un nuevo presupuesto.*\n\nEnvíame un audio o mensaje con los trabajos y el cliente de la nueva obra.'
-        });
-        if (sentReset?.key?.id) botSentMessageIds.add(sentReset.key.id);
-        console.log(`🔄 Sesión puesta en modo NUEVO presupuesto para ${remoteJid}`);
-        continue;
-      }
-
-      // Opción 3: Ver lista de presupuestos guardados
-      if (/^(3|presupuestos|mis presupuestos|ver presupuestos|lista)$/i.test(rawUserText)) {
+      // Opción 1: Ver lista de presupuestos guardados
+      if (/^(1|presupuestos|mis presupuestos|ver presupuestos|lista)$/i.test(rawUserText)) {
         if (session.budgets.size === 0) {
           const sentEmpty = await sock.sendMessage(remoteJid, {
             text: '📂 *No tienes presupuestos guardados todavía.*\n\nEnvíame un audio describiendo una obra para generar el primero.'
@@ -357,10 +352,21 @@ async function startWhatsAppGateway() {
           listText += `\n${idx}️⃣ *${id}*${isActive}\n   👤 ${clientName} (${address})\n   💰 Total: *${total}* (${status})\n`;
           idx++;
         }
-        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para modificar alguno, solo di en un audio: "En el de José Luis cambia..." o "En el presupuesto PRE-... ponle..."_';
+        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para modificar alguno, solo di en un audio o texto: "En el de José Luis cambia..." o "En el presupuesto PRE-... ponle..."_\n💡 _Para crear uno nuevo, envía un audio o texto diciendo: "Presupuesto nuevo..."_';
 
         const sentList = await sock.sendMessage(remoteJid, { text: listText });
         if (sentList?.key?.id) botSentMessageIds.add(sentList.key.id);
+        continue;
+      }
+
+      // Iniciar presupuesto nuevo
+      if (/^(presupuesto nuevo|nuevo presupuesto|nuevo|otro cliente|empezar de nuevo|#nuevo)$/i.test(rawUserText)) {
+        session.activeBudgetId = null;
+        const sentReset = await sock.sendMessage(remoteJid, {
+          text: '🔄 *Listo para un nuevo presupuesto.*\n\nEnvíame un audio o mensaje con los trabajos y el cliente de la nueva obra.'
+        });
+        if (sentReset?.key?.id) botSentMessageIds.add(sentReset.key.id);
+        console.log(`🔄 Sesión puesta en modo NUEVO presupuesto para ${remoteJid}`);
         continue;
       }
 
@@ -513,10 +519,10 @@ async function startWhatsAppGateway() {
 
         // Enviar mensaje interactivo de opciones
         const optionsText = [
-          '👉 *¿Qué deseas hacer ahora?*',
-          '• Mándame otro audio para seguir retocando este presupuesto.',
-          '• Responde *2* para empezar un presupuesto nuevo con otro cliente.',
-          '• Responde *3* para ver todos tus presupuestos guardados.'
+          '👉 *Opciones disponibles:*',
+          '• Si quieres ver todos tus presupuestos guardados responde *1*.',
+          '• Si quieres modificar alguno di el número del presupuesto o el nombre del cliente.',
+          '• Si quieres uno nuevo manda un audio o texto comentando *presupuesto nuevo*.'
         ].join('\n');
 
         const sentOptions = await sock.sendMessage(remoteJid, { text: optionsText });
