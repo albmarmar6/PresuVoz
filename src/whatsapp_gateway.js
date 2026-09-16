@@ -15,7 +15,7 @@ import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import dotenv from 'dotenv';
 import { PresuVozEngine } from './engine.js';
-import { GEMINI_SYSTEM_PROMPT } from './ai_service.js';
+import { GEMINI_SYSTEM_PROMPT, GEMINI_UPDATE_PROMPT } from './ai_service.js';
 import { generateBudgetPDF } from './pdf_service.js';
 
 dotenv.config();
@@ -38,14 +38,14 @@ const GEMINI_MODELS = [
   'gemini-3.1-flash-preview'
 ];
 
-async function callGemini(payload) {
+async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
   if (!GEMINI_API_KEY && typeof payload === 'string' && PRESUVOZ_BACKEND_URL) {
     const res = await fetch(`${PRESUVOZ_BACKEND_URL}/api/gemini`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         userPrompt: payload,
-        systemInstruction: GEMINI_SYSTEM_PROMPT
+        systemInstruction: systemInstruction
       })
     });
     const data = await res.json().catch(() => ({}));
@@ -69,9 +69,8 @@ async function callGemini(payload) {
         data: payload.audioBuffer.toString('base64')
       }
     });
-    parts.push({
-      text: 'Analiza este audio de obra de un profesional de la construcción. Extrae todas las partidas, mediciones, precios e instrucciones, y genera el presupuesto formal en JSON cumpliendo las reglas del sistema.'
-    });
+    const instructionText = payload.promptText || 'Analiza este audio de obra de un profesional de la construcción. Extrae todas las partidas, mediciones, precios e instrucciones, y genera el presupuesto formal en JSON cumpliendo las reglas del sistema.';
+    parts.push({ text: instructionText });
   }
 
   let lastError = null;
@@ -164,7 +163,7 @@ function formatBudgetForWhatsApp(budget, warnings = []) {
 
   lines.push('');
   lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
-  lines.push('🤖 _Generado automáticamente por PresuVoz AI. Reenvía este mensaje a tu cliente o escribe correcciones para actualizar precios._');
+  lines.push('🤖 _Generado por PresuVoz AI. Envía otro audio o texto para modificar este presupuesto. Escribe *#nuevo* para empezar uno nuevo._');
 
   return lines.join('\n');
 }
@@ -220,6 +219,8 @@ async function startWhatsAppGateway() {
   });
 
   const botSentMessageIds = new Set();
+  // Memoria de presupuestos activos por chat para actualizaciones conversacionales
+  const activeBudgetsByChat = new Map();
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     // Aceptar tanto 'notify' (mensajes de terceros) como 'append' (mensajes a ti mismo desde tu móvil)
@@ -270,16 +271,53 @@ async function startWhatsAppGateway() {
       }
 
       // Evitar que el bot reaccione a sus propios textos de presupuesto
-      const existingText = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
-      if (existingText.includes('PRESUPUESTO') || existingText.includes('PresuVoz AI')) {
+      const rawUserText = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
+      if (rawUserText.includes('PRESUPUESTO') || rawUserText.includes('PresuVoz AI')) {
         console.log(`   ⏭️ Ignorado (es un presupuesto enviado por el propio bot)`);
         continue;
       }
+
+      // Comando para empezar de cero un nuevo presupuesto
+      if (/^(#nuevo|nuevo presupuesto|empezar de nuevo|borrar presupuesto|nuevo)$/i.test(rawUserText)) {
+        activeBudgetsByChat.delete(remoteJid);
+        const sentReset = await sock.sendMessage(remoteJid, {
+          text: '🔄 *Presupuesto reiniciado.*\n\nListo para un nuevo cliente. Envíame un audio o mensaje describiendo los trabajos.'
+        });
+        if (sentReset?.key?.id) botSentMessageIds.add(sentReset.key.id);
+        console.log(`🔄 Sesión reiniciada para ${remoteJid}`);
+        continue;
+      }
+
+      const activeBudget = activeBudgetsByChat.get(remoteJid);
+      const isUpdating = Boolean(activeBudget && activeBudget.items && activeBudget.items.length > 0);
 
       try {
         await sock.sendPresenceUpdate('composing', remoteJid);
 
         let aiResult;
+
+        // Contexto del presupuesto existente si estamos en una actualización
+        let currentStateJson = null;
+        if (isUpdating) {
+          const currentState = {
+            clientName: activeBudget.client?.name !== 'Cliente Particular' ? activeBudget.client?.name : null,
+            clientAddress: activeBudget.client?.address !== 'Ubicación obra según visita' ? activeBudget.client?.address : null,
+            items: activeBudget.items.map((item, idx) => ({
+              id: item.id || `item_${idx + 1}`,
+              description: item.description,
+              qty: item.qty,
+              unit: item.unit,
+              unitPrice: item.unitPrice,
+              isPricePending: item.isPricePending
+            })),
+            taxRate: activeBudget.financials?.taxRatePercentage || 10,
+            discount: activeBudget.financials?.discountPercentage > 0
+              ? { type: 'percentage', value: activeBudget.financials.discountPercentage }
+              : null
+          };
+          currentStateJson = JSON.stringify(currentState, null, 2);
+          console.log(`🔄 Actualizando presupuesto existente (${activeBudget.id}) para ${remoteJid}...`);
+        }
 
         if (isAudio) {
           console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
@@ -290,15 +328,30 @@ async function startWhatsAppGateway() {
             { logger, reuploadRequest: sock.updateMediaMessage }
           );
 
-          console.log(`🎙️ Audio descargado (${buffer.length} bytes). Enviando a Gemini para escucha y análisis...`);
-          aiResult = await callGemini({
-            audioBuffer: buffer,
-            mimeType: msg.message.audioMessage.mimetype || 'audio/ogg'
-          });
+          console.log(`🎙️ Audio descargado (${buffer.length} bytes). Enviando a Gemini...`);
+
+          if (isUpdating) {
+            aiResult = await callGemini({
+              audioBuffer: buffer,
+              mimeType: msg.message.audioMessage.mimetype || 'audio/ogg',
+              promptText: `ESTADO ACTUAL DEL PRESUPUESTO:\n${currentStateJson}\n\nEl profesional está dictando una nota de voz para actualizar o valorar las partidas de este presupuesto existente. Asigna los precios a las partidas existentes en el orden indicado, actualiza la dirección si lo pide, añade nuevos trabajos si los menciona, y CONSERVA INTACTAS las descripciones técnicas originales de las partidas.`
+            }, GEMINI_UPDATE_PROMPT);
+          } else {
+            aiResult = await callGemini({
+              audioBuffer: buffer,
+              mimeType: msg.message.audioMessage.mimetype || 'audio/ogg'
+            }, GEMINI_SYSTEM_PROMPT);
+          }
         } else {
-          const textContent = msg.message.conversation || msg.message.extendedTextMessage.text;
-          console.log(`\n💬 Texto recibido: "${textContent}"`);
-          aiResult = await callGemini(textContent);
+          console.log(`\n💬 Texto recibido: "${rawUserText}"`);
+          if (isUpdating) {
+            aiResult = await callGemini(
+              `ESTADO ACTUAL DEL PRESUPUESTO:\n${currentStateJson}\n\nNUEVAS INSTRUCCIONES DEL PROFESIONAL:\n${rawUserText}`,
+              GEMINI_UPDATE_PROMPT
+            );
+          } else {
+            aiResult = await callGemini(rawUserText, GEMINI_SYSTEM_PROMPT);
+          }
         }
 
         if (!aiResult || !aiResult.items || aiResult.items.length === 0) {
@@ -306,6 +359,16 @@ async function startWhatsAppGateway() {
             text: `🤖 *PresuVoz Bot*\n\nNo he detectado partidas técnicas en el mensaje. Puedes dictarme los trabajos de obra (ej: _"tirar tabique de 4x3 metros y mover 2 enchufes por 600 euros"_).`
           });
           continue;
+        }
+
+        // Preservar datos de cliente de la versión previa si no se cambiaron
+        if (isUpdating) {
+          if (!aiResult.clientName && activeBudget.client?.name && activeBudget.client.name !== 'Cliente Particular') {
+            aiResult.clientName = activeBudget.client.name;
+          }
+          if (!aiResult.clientAddress && activeBudget.client?.address && activeBudget.client.address !== 'Ubicación obra según visita') {
+            aiResult.clientAddress = activeBudget.client.address;
+          }
         }
 
         const engineResult = engine.process({
@@ -326,6 +389,14 @@ async function startWhatsAppGateway() {
           });
           continue;
         }
+
+        // Mantener el mismo identificador de presupuesto (ej: PRE-2026-8629) al actualizar
+        if (isUpdating && activeBudget.id) {
+          engineResult.budget.id = activeBudget.id;
+        }
+
+        // Guardar el presupuesto activo en memoria para próximos mensajes o audios
+        activeBudgetsByChat.set(remoteJid, engineResult.budget);
 
         const replyText = formatBudgetForWhatsApp(engineResult.budget, aiResult.warnings || []);
         const sent = await sock.sendMessage(remoteJid, { text: replyText });

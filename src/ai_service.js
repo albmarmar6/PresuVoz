@@ -71,21 +71,21 @@ FORMATO DE RESPUESTA (JSON estricto, sin texto adicional):
   "assistantFeedback": "Mensaje breve en español para el instalador confirmando el presupuesto o pidiendo información"
 }`;
 
-export const GEMINI_UPDATE_PROMPT = `Eres un asistente de actualización de presupuestos de obra en España. Se te da el estado ACTUAL del presupuesto (JSON) y el nuevo mensaje del profesional.
+export const GEMINI_UPDATE_PROMPT = `Eres un asistente de actualización de presupuestos de obra en España. Se te da el estado ACTUAL del presupuesto (JSON) y las nuevas instrucciones o audio del profesional.
 
-Tu tarea: interpretar el mensaje y devolver el presupuesto COMPLETO actualizado en JSON.
+Tu tarea: interpretar el mensaje y devolver el presupuesto COMPLETO actualizado en formato JSON.
 
-ACCIONES POSIBLES:
-- "Ponle X euros a [partida]" / "[Partida] cuesta X euros" → actualiza unitPrice de esa partida, isPricePending: false
-- Nuevas partidas de obra → agrégalas al array items
-- "Quita [partida]" → elimínala del array
-- Corrección de dirección / nombre → actualiza clientAddress / clientName
-- "Descuento del X%" o "rebaja de X euros" → establece discount
-- Las partidas NO mencionadas en el mensaje deben permanecer EXACTAMENTE iguales
+REGLAS CRÍTICAS DE ACTUALIZACIÓN:
+1. VALORACIÓN DE PARTIDAS PENDIENTES: Si el mensaje indica precios para partidas existentes (ej: "la primera son 500€, la segunda 600€" o "ponle 500 a la demolición"):
+   - Actualiza 'unitPrice' y 'isPricePending: false'.
+   - IMPORTANTE: CONSERVA LA DESCRIPCIÓN TÉCNICA ORIGINAL COMPLETA de cada partida. Está TOTALMENTE PROHIBIDO sustituir la descripción por textos genéricos como "Partida 1 según valoración previa" o similares.
+2. CORRECCIÓN DE DATOS: Si corrige la dirección, nombre del cliente o forma de pago, actualiza esos campos y conserva todo lo demás.
+3. NUEVAS PARTIDAS: Si dicta trabajos adicionales, agrégalos al array 'items' con redacción técnica formal.
+4. ELIMINACIÓN: Si pide quitar una partida ("quita la mampara"), elimínala del array.
+5. PRESERVACIÓN: Todo lo que no se mencione explícitamente en el nuevo mensaje debe permanecer EXACTAMENTE igual que en el presupuesto actual.
+6. Si todas las partidas tienen precio mayor que 0, pon 'isDraftMode: false'.
 
-Aplica las mismas reglas: descripciones técnicas formales, precios máximos en rangos, ignorar muletillas.
-
-Responde SOLO con JSON válido con el presupuesto completo actualizado en el mismo formato.`;
+Responde SOLO con JSON válido con la estructura completa del presupuesto.`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Core API call
