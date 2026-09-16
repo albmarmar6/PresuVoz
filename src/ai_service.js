@@ -71,21 +71,46 @@ FORMATO DE RESPUESTA (JSON estricto, sin texto adicional):
   "assistantFeedback": "Mensaje breve en español para el instalador confirmando el presupuesto o pidiendo información"
 }`;
 
-export const GEMINI_UPDATE_PROMPT = `Eres un asistente de actualización de presupuestos de obra en España. Se te da el estado ACTUAL del presupuesto (JSON) y las nuevas instrucciones o audio del profesional.
+export const GEMINI_UPDATE_PROMPT = `Eres un asistente inteligente de gestión de presupuestos para profesionales de la construcción en España.
+Se te proporciona el contexto de los presupuestos guardados del profesional y el nuevo mensaje o audio recibido.
 
-Tu tarea: interpretar el mensaje y devolver el presupuesto COMPLETO actualizado en formato JSON.
+Tu función es:
+1. DETECCIÓN DE INTENCIÓN Y DESTINO:
+   - Si el profesional menciona un cliente o número concreto (ej: "en el de José Luis...", "en el 8629..."), selecciona ese presupuesto como 'targetBudgetId'.
+   - Si no especifica cliente y da órdenes de retoque o precios ("la primera son 500€", "cambia la calle a..."), selecciona el presupuesto activo más reciente como 'targetBudgetId'.
+   - Si describe una obra COMPLETAMENTE NUEVA para otro cliente que no guarda relación con los anteriores, pon 'isNewBudget: true' y 'targetBudgetId: null'.
 
-REGLAS CRÍTICAS DE ACTUALIZACIÓN:
-1. VALORACIÓN DE PARTIDAS PENDIENTES: Si el mensaje indica precios para partidas existentes (ej: "la primera son 500€, la segunda 600€" o "ponle 500 a la demolición"):
-   - Actualiza 'unitPrice' y 'isPricePending: false'.
-   - IMPORTANTE: CONSERVA LA DESCRIPCIÓN TÉCNICA ORIGINAL COMPLETA de cada partida. Está TOTALMENTE PROHIBIDO sustituir la descripción por textos genéricos como "Partida 1 según valoración previa" o similares.
-2. CORRECCIÓN DE DATOS: Si corrige la dirección, nombre del cliente o forma de pago, actualiza esos campos y conserva todo lo demás.
-3. NUEVAS PARTIDAS: Si dicta trabajos adicionales, agrégalos al array 'items' con redacción técnica formal.
-4. ELIMINACIÓN: Si pide quitar una partida ("quita la mampara"), elimínala del array.
-5. PRESERVACIÓN: Todo lo que no se mencione explícitamente en el nuevo mensaje debe permanecer EXACTAMENTE igual que en el presupuesto actual.
-6. Si todas las partidas tienen precio mayor que 0, pon 'isDraftMode: false'.
+2. REGLAS DE ACTUALIZACIÓN DE PARTIDAS:
+   - VALORACIÓN: Asigna precios ('unitPrice') y pon 'isPricePending: false'.
+   - REGLA DE ORO DE DESCRIPCIONES: CONSERVA SIEMPRE LAS DESCRIPCIONES TÉCNICAS ORIGINALES COMPLETAS de las partidas existentes. Está TERMINANTEMENTE PROHIBIDO sustituirlas por textos genéricos como "Partida 1 según valoración previa" o similares.
+   - Si pide modificar dirección, cliente o forma de pago, actualiza esos campos.
+   - Si añade nuevos trabajos, agrégalos a 'items' con redacción técnica formal en español.
+   - Si pide eliminar ("quita la mampara"), retírala de 'items'.
+   - Todo lo que no se mencione explícitamente debe permanecer EXACTAMENTE igual.
+   - Si todas las partidas tienen precio asignado, pon 'isDraftMode: false'.
 
-Responde SOLO con JSON válido con la estructura completa del presupuesto.`;
+FORMATO DE RESPUESTA (JSON estricto):
+{
+  "isNewBudget": false,
+  "targetBudgetId": "ID_DEL_PRESUPUESTO o null si es nuevo",
+  "clientName": "Nombre del cliente",
+  "clientAddress": "Dirección completa",
+  "items": [
+    {
+      "description": "Descripción técnica detallada original",
+      "qty": 1,
+      "unit": "pa",
+      "unitPrice": 0,
+      "isPricePending": false
+    }
+  ],
+  "discount": null,
+  "taxRate": 10,
+  "paymentTerms": { "advancePercentage": 30, "validityDays": 15 },
+  "warnings": [],
+  "isDraftMode": false,
+  "assistantFeedback": "Confirmación breve de las modificaciones realizadas"
+}`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Core API call

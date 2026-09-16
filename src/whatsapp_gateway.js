@@ -34,8 +34,7 @@ const ALLOWED_NUMBERS = (process.env.ALLOWED_NUMBERS || '')
 const GEMINI_MODELS = [
   'gemini-3.8-flash',
   'gemini-3.6-flash',
-  'gemini-3.7-flash',
-  'gemini-3.1-flash-preview'
+  'gemini-3.7-flash'
 ];
 
 async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
@@ -82,7 +81,7 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ role: 'user', parts }],
-          systemInstruction: { parts: [{ text: GEMINI_SYSTEM_PROMPT }] },
+          systemInstruction: { parts: [{ text: systemInstruction }] },
           generationConfig: {
             responseMimeType: 'application/json',
             temperature: 0.1,
@@ -94,7 +93,11 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         const errMsg = data.error?.message || `Error HTTP ${response.status}`;
+        console.warn(`PresuVoz ⚠ Modelo "${model}" no disponible (${response.status}): ${errMsg.substring(0, 100)}`);
         lastError = new Error(errMsg);
+        if (response.status === 429 || response.status === 503) {
+          await new Promise(r => setTimeout(r, 1200));
+        }
         continue;
       }
 
@@ -102,6 +105,7 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
       if (!jsonText) throw new Error('Respuesta vacía de Gemini');
       return JSON.parse(jsonText);
     } catch (e) {
+      console.warn(`PresuVoz ⚠ Error con modelo "${model}":`, e.message);
       lastError = e;
     }
   }
@@ -219,8 +223,20 @@ async function startWhatsAppGateway() {
   });
 
   const botSentMessageIds = new Set();
-  // Memoria de presupuestos activos por chat para actualizaciones conversacionales
-  const activeBudgetsByChat = new Map();
+  
+  // Memoria multi-presupuesto por chat:
+  // Map<remoteJid, { activeBudgetId: string|null, budgets: Map<string, object> }>
+  const userSessions = new Map();
+
+  function getUserSession(remoteJid) {
+    if (!userSessions.has(remoteJid)) {
+      userSessions.set(remoteJid, {
+        activeBudgetId: null,
+        budgets: new Map()
+      });
+    }
+    return userSessions.get(remoteJid);
+  }
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     // Aceptar tanto 'notify' (mensajes de terceros) como 'append' (mensajes a ti mismo desde tu móvil)
@@ -249,8 +265,6 @@ async function startWhatsAppGateway() {
       // Comprobación de seguridad: Modo Seguro
       if (SAFE_MODE) {
         const isAllowedNumber = ALLOWED_NUMBERS.includes(senderNumber);
-        // IMPORTANTE: Solo son "chat propio" los mensajes cuyo JID contiene
-        // el número o LID EXACTO del usuario, nunca un @lid genérico ajeno.
         const isSelfChat = isFromMe && (
           (myNumber && remoteJid.includes(myNumber)) ||
           (myLid && remoteJid.includes(myLid))
@@ -272,102 +286,142 @@ async function startWhatsAppGateway() {
 
       // Evitar que el bot reaccione a sus propios textos de presupuesto
       const rawUserText = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
-      if (rawUserText.includes('PRESUPUESTO') || rawUserText.includes('PresuVoz AI')) {
-        console.log(`   ⏭️ Ignorado (es un presupuesto enviado por el propio bot)`);
+      if (rawUserText.includes('PRESUPUESTO') || rawUserText.includes('PresuVoz AI') || rawUserText.includes('¿Qué deseas hacer ahora?')) {
+        console.log(`   ⏭️ Ignorado (es un mensaje de interfaz enviado por el bot)`);
         continue;
       }
 
-      // Comando para empezar de cero un nuevo presupuesto
-      if (/^(#nuevo|nuevo presupuesto|empezar de nuevo|borrar presupuesto|nuevo)$/i.test(rawUserText)) {
-        activeBudgetsByChat.delete(remoteJid);
+      const session = getUserSession(remoteJid);
+
+      // Opción 2: Empezar un presupuesto nuevo para otro cliente
+      if (/^(2|#nuevo|nuevo presupuesto|nuevo|otro cliente|empezar de nuevo)$/i.test(rawUserText)) {
+        session.activeBudgetId = null;
         const sentReset = await sock.sendMessage(remoteJid, {
-          text: '🔄 *Presupuesto reiniciado.*\n\nListo para un nuevo cliente. Envíame un audio o mensaje describiendo los trabajos.'
+          text: '🔄 *Listo para un nuevo presupuesto.*\n\nEnvíame un audio o mensaje con los trabajos y el cliente de la nueva obra.'
         });
         if (sentReset?.key?.id) botSentMessageIds.add(sentReset.key.id);
-        console.log(`🔄 Sesión reiniciada para ${remoteJid}`);
+        console.log(`🔄 Sesión puesta en modo NUEVO presupuesto para ${remoteJid}`);
         continue;
       }
 
-      const activeBudget = activeBudgetsByChat.get(remoteJid);
-      const isUpdating = Boolean(activeBudget && activeBudget.items && activeBudget.items.length > 0);
+      // Opción 3: Ver lista de presupuestos guardados
+      if (/^(3|presupuestos|mis presupuestos|ver presupuestos|lista)$/i.test(rawUserText)) {
+        if (session.budgets.size === 0) {
+          const sentEmpty = await sock.sendMessage(remoteJid, {
+            text: '📂 *No tienes presupuestos guardados todavía.*\n\nEnvíame un audio describiendo una obra para generar el primero.'
+          });
+          if (sentEmpty?.key?.id) botSentMessageIds.add(sentEmpty.key.id);
+          continue;
+        }
+
+        let listText = '📂 *TUS PRESUPUESTOS GUARDADOS:*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        let idx = 1;
+        for (const [id, b] of session.budgets.entries()) {
+          const isActive = id === session.activeBudgetId ? ' 🟢 *(ACTIVO)*' : '';
+          const clientName = b.client?.name || 'Cliente Particular';
+          const address = b.client?.address || 'Ubicación según visita';
+          const total = b.financials?.totalAmount ? `${b.financials.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : 'A valorar';
+          const status = b.isDraft ? 'Borrador' : 'Formal';
+          listText += `\n${idx}️⃣ *${id}*${isActive}\n   👤 ${clientName} (${address})\n   💰 Total: *${total}* (${status})\n`;
+          idx++;
+        }
+        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para modificar alguno, solo di en un audio: "En el de José Luis cambia..." o "En el presupuesto PRE-... ponle..."_';
+
+        const sentList = await sock.sendMessage(remoteJid, { text: listText });
+        if (sentList?.key?.id) botSentMessageIds.add(sentList.key.id);
+        continue;
+      }
 
       try {
         await sock.sendPresenceUpdate('composing', remoteJid);
 
         let aiResult;
+        const hasHistory = session.budgets.size > 0;
 
-        // Contexto del presupuesto existente si estamos en una actualización
-        let currentStateJson = null;
-        if (isUpdating) {
-          const currentState = {
-            clientName: activeBudget.client?.name !== 'Cliente Particular' ? activeBudget.client?.name : null,
-            clientAddress: activeBudget.client?.address !== 'Ubicación obra según visita' ? activeBudget.client?.address : null,
-            items: activeBudget.items.map((item, idx) => ({
-              id: item.id || `item_${idx + 1}`,
-              description: item.description,
-              qty: item.qty,
-              unit: item.unit,
-              unitPrice: item.unitPrice,
-              isPricePending: item.isPricePending
+        if (hasHistory) {
+          // Construir resumen de los presupuestos guardados para dar contexto a Gemini
+          const budgetsList = Array.from(session.budgets.values()).slice(-5).map(b => ({
+            id: b.id,
+            clientName: b.client?.name !== 'Cliente Particular' ? b.client?.name : null,
+            clientAddress: b.client?.address !== 'Ubicación obra según visita' ? b.client?.address : null,
+            isDraft: b.isDraft,
+            items: b.items.map(i => ({
+              id: i.id,
+              description: i.description,
+              qty: i.qty,
+              unit: i.unit,
+              unitPrice: i.unitPrice,
+              isPricePending: i.isPricePending
             })),
-            taxRate: activeBudget.financials?.taxRatePercentage || 10,
-            discount: activeBudget.financials?.discountPercentage > 0
-              ? { type: 'percentage', value: activeBudget.financials.discountPercentage }
-              : null
-          };
-          currentStateJson = JSON.stringify(currentState, null, 2);
-          console.log(`🔄 Actualizando presupuesto existente (${activeBudget.id}) para ${remoteJid}...`);
-        }
+            taxRate: b.financials?.taxRatePercentage || 10,
+            discount: b.financials?.discountPercentage > 0 ? { type: 'percentage', value: b.financials.discountPercentage } : null
+          }));
 
-        if (isAudio) {
-          console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
-          const buffer = await downloadMediaMessage(
-            msg,
-            'buffer',
-            {},
-            { logger, reuploadRequest: sock.updateMediaMessage }
-          );
+          const contextPrompt = `PRESUPUESTOS GUARDADOS EN MEMORIA DEL PROFESIONAL:\n${JSON.stringify(budgetsList, null, 2)}\n\nPRESUPUESTO ACTIVO ACTUALMENTE: ${session.activeBudgetId || 'Ninguno (modo nuevo cliente)'}`;
 
-          console.log(`🎙️ Audio descargado (${buffer.length} bytes). Enviando a Gemini...`);
+          if (isAudio) {
+            console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
+            const buffer = await downloadMediaMessage(
+              msg,
+              'buffer',
+              {},
+              { logger, reuploadRequest: sock.updateMediaMessage }
+            );
 
-          if (isUpdating) {
+            console.log(`🎙️ Audio descargado (${buffer.length} bytes). Enviando a Gemini con contexto multi-presupuesto...`);
             aiResult = await callGemini({
               audioBuffer: buffer,
               mimeType: msg.message.audioMessage.mimetype || 'audio/ogg',
-              promptText: `ESTADO ACTUAL DEL PRESUPUESTO:\n${currentStateJson}\n\nEl profesional está dictando una nota de voz para actualizar o valorar las partidas de este presupuesto existente. Asigna los precios a las partidas existentes en el orden indicado, actualiza la dirección si lo pide, añade nuevos trabajos si los menciona, y CONSERVA INTACTAS las descripciones técnicas originales de las partidas.`
+              promptText: `${contextPrompt}\n\nEl profesional está dictando una nota de voz. Identifica si menciona un cliente o presupuesto específico, o si continúa valorando el activo actual, y actualízalo manteniendo intactas las descripciones técnicas originales. Si describe una obra para un cliente totalmente nuevo, pon isNewBudget: true y extrae los datos para un nuevo presupuesto.`
             }, GEMINI_UPDATE_PROMPT);
           } else {
+            console.log(`\n💬 Texto recibido: "${rawUserText}"`);
+            aiResult = await callGemini(
+              `${contextPrompt}\n\nINSTRUCCIONES DEL PROFESIONAL:\n${rawUserText}`,
+              GEMINI_UPDATE_PROMPT
+            );
+          }
+        } else {
+          // No hay historial previo: modo nuevo presupuesto estándar
+          if (isAudio) {
+            console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
+            const buffer = await downloadMediaMessage(
+              msg,
+              'buffer',
+              {},
+              { logger, reuploadRequest: sock.updateMediaMessage }
+            );
+            console.log(`🎙️ Audio descargado (${buffer.length} bytes). Enviando a Gemini...`);
             aiResult = await callGemini({
               audioBuffer: buffer,
               mimeType: msg.message.audioMessage.mimetype || 'audio/ogg'
             }, GEMINI_SYSTEM_PROMPT);
-          }
-        } else {
-          console.log(`\n💬 Texto recibido: "${rawUserText}"`);
-          if (isUpdating) {
-            aiResult = await callGemini(
-              `ESTADO ACTUAL DEL PRESUPUESTO:\n${currentStateJson}\n\nNUEVAS INSTRUCCIONES DEL PROFESIONAL:\n${rawUserText}`,
-              GEMINI_UPDATE_PROMPT
-            );
           } else {
+            console.log(`\n💬 Texto recibido: "${rawUserText}"`);
             aiResult = await callGemini(rawUserText, GEMINI_SYSTEM_PROMPT);
           }
         }
 
         if (!aiResult || !aiResult.items || aiResult.items.length === 0) {
-          await sock.sendMessage(remoteJid, {
+          const sentHelp = await sock.sendMessage(remoteJid, {
             text: `🤖 *PresuVoz Bot*\n\nNo he detectado partidas técnicas en el mensaje. Puedes dictarme los trabajos de obra (ej: _"tirar tabique de 4x3 metros y mover 2 enchufes por 600 euros"_).`
           });
+          if (sentHelp?.key?.id) botSentMessageIds.add(sentHelp.key.id);
           continue;
         }
 
-        // Preservar datos de cliente de la versión previa si no se cambiaron
-        if (isUpdating) {
-          if (!aiResult.clientName && activeBudget.client?.name && activeBudget.client.name !== 'Cliente Particular') {
-            aiResult.clientName = activeBudget.client.name;
+        // Determinar si actualiza un presupuesto existente o crea uno nuevo
+        let targetId = aiResult.targetBudgetId || session.activeBudgetId;
+        const isUpdate = !aiResult.isNewBudget && targetId && session.budgets.has(targetId);
+        const prevBudget = isUpdate ? session.budgets.get(targetId) : null;
+
+        // Preservar datos de cliente si es actualización y no los modificó
+        if (prevBudget) {
+          if (!aiResult.clientName && prevBudget.client?.name && prevBudget.client.name !== 'Cliente Particular') {
+            aiResult.clientName = prevBudget.client.name;
           }
-          if (!aiResult.clientAddress && activeBudget.client?.address && activeBudget.client.address !== 'Ubicación obra según visita') {
-            aiResult.clientAddress = activeBudget.client.address;
+          if (!aiResult.clientAddress && prevBudget.client?.address && prevBudget.client.address !== 'Ubicación obra según visita') {
+            aiResult.clientAddress = prevBudget.client.address;
           }
         }
 
@@ -384,20 +438,24 @@ async function startWhatsAppGateway() {
         });
 
         if (!engineResult.success) {
-          await sock.sendMessage(remoteJid, {
+          const sentErrEngine = await sock.sendMessage(remoteJid, {
             text: `⚠️ *PresuVoz*: ${engineResult.assistantFeedback || 'No se pudo calcular el presupuesto.'}`
           });
+          if (sentErrEngine?.key?.id) botSentMessageIds.add(sentErrEngine.key.id);
           continue;
         }
 
-        // Mantener el mismo identificador de presupuesto (ej: PRE-2026-8629) al actualizar
-        if (isUpdating && activeBudget.id) {
-          engineResult.budget.id = activeBudget.id;
+        // Mantener el mismo número de presupuesto si es actualización
+        if (prevBudget && prevBudget.id) {
+          engineResult.budget.id = prevBudget.id;
         }
 
-        // Guardar el presupuesto activo en memoria para próximos mensajes o audios
-        activeBudgetsByChat.set(remoteJid, engineResult.budget);
+        // Guardar en el historial de la sesión y marcarlo como activo
+        session.budgets.set(engineResult.budget.id, engineResult.budget);
+        session.activeBudgetId = engineResult.budget.id;
+        console.log(`💾 Presupuesto guardado en sesión: ${engineResult.budget.id} (Total guardados: ${session.budgets.size})`);
 
+        // Enviar resumen por WhatsApp
         const replyText = formatBudgetForWhatsApp(engineResult.budget, aiResult.warnings || []);
         const sent = await sock.sendMessage(remoteJid, { text: replyText });
         if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
@@ -421,10 +479,21 @@ async function startWhatsAppGateway() {
           console.error('⚠️ No se pudo generar o enviar el PDF:', pdfErr.message);
         }
 
+        // Enviar mensaje interactivo de opciones
+        const optionsText = [
+          '👉 *¿Qué deseas hacer ahora?*',
+          '• Mándame otro audio para seguir retocando este presupuesto.',
+          '• Responde *2* para empezar un presupuesto nuevo con otro cliente.',
+          '• Responde *3* para ver todos tus presupuestos guardados.'
+        ].join('\n');
+
+        const sentOptions = await sock.sendMessage(remoteJid, { text: optionsText });
+        if (sentOptions?.key?.id) botSentMessageIds.add(sentOptions.key.id);
+
       } catch (err) {
         console.error('❌ Error procesando mensaje de WhatsApp:', err.message);
         const sentErr = await sock.sendMessage(remoteJid, {
-          text: `⚠️ *Error al procesar presupuesto*: ${err.message}`
+          text: `⚠️ *No se ha podido procesar el presupuesto*\n\nHa habido una saturación momentánea en el servicio de IA. Por favor, reenvía tu audio o mensaje en unos segundos.`
         });
         if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
       } finally {
