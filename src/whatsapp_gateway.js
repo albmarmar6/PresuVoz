@@ -514,9 +514,27 @@ async function startWhatsAppGateway() {
           if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
           console.log(`✅ Archivo PDF (${pdfBuffer.length} bytes) enviado con éxito por WhatsApp.`);
 
-          // Generar enlace de firma digital táctil
+          // Generar enlace de firma digital táctil con datos limpios
           try {
-            const budgetJson   = JSON.stringify(engineResult.budget);
+            const cleanBudget = {
+              id: engineResult.budget.id,
+              company: engineResult.budget.company,
+              client: engineResult.budget.client,
+              items: (engineResult.budget.items || []).map(i => ({
+                id: i.id,
+                description: i.description,
+                qty: i.qty,
+                unit: i.unit,
+                unitPrice: i.unitPrice,
+                total: i.total,
+                isPricePending: i.isPricePending
+              })),
+              financials: engineResult.budget.financials,
+              terms: engineResult.budget.terms,
+              isDraft: engineResult.budget.isDraft
+            };
+
+            const budgetJson   = JSON.stringify(cleanBudget);
             const budgetBase64 = Buffer.from(budgetJson).toString('base64')
               .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
             const signingUrl = `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?data=${budgetBase64}`;

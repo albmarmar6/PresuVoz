@@ -215,8 +215,9 @@ export class PresuVozEngine {
       assistantFeedback
     };
 
-    // Objeto compatible con desestructuración directa y chequeo de éxito
-    return Object.assign(budget, {
+    // Objeto compatible con desestructuración directa y chequeo de éxito (sin referencia circular)
+    return {
+      ...budget,
       success: true,
       isDraft,
       hasWarnings: warnings.length > 0 || isDraft,
@@ -224,7 +225,7 @@ export class PresuVozEngine {
       assistantFeedback,
       errors: [],
       budget
-    });
+    };
   }
 
   /**
