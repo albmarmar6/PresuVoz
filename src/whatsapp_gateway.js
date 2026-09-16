@@ -35,8 +35,7 @@ const GEMINI_MODELS = [
   'gemini-3.8-flash',
   'gemini-3.6-flash',
   'gemini-3.7-flash',
-  'gemini-3.1-flash-preview',
-  'gemini-3.1-pro-preview'
+  'gemini-3.1-flash-preview'
 ];
 
 async function callGemini(payload) {
@@ -249,15 +248,15 @@ async function startWhatsAppGateway() {
       // Comprobación de seguridad: Modo Seguro
       if (SAFE_MODE) {
         const isAllowedNumber = ALLOWED_NUMBERS.includes(senderNumber);
+        // IMPORTANTE: Solo son "chat propio" los mensajes cuyo JID contiene
+        // el número o LID EXACTO del usuario, nunca un @lid genérico ajeno.
         const isSelfChat = isFromMe && (
-          remoteJid.includes(myNumber) ||
-          (myLid && remoteJid.includes(myLid)) ||
-          remoteJid.endsWith('@lid') ||
-          senderNumber === myNumber
+          (myNumber && remoteJid.includes(myNumber)) ||
+          (myLid && remoteJid.includes(myLid))
         );
 
         if (!isSelfChat && !isAllowedNumber) {
-          console.log(`   ⏭️ Ignorado por Modo Seguro (no es chat propio ni número permitido)`);
+          console.log(`   ⏭️ Ignorado por Modo Seguro (${isFromMe ? 'mensaje saliente a contacto ajeno' : 'mensaje de contacto ajeno'})`);
           continue;
         }
       }
