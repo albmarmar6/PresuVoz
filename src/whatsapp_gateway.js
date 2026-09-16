@@ -288,16 +288,36 @@ async function startWhatsAppGateway() {
         }
       }
 
-      const isAudio = Boolean(msg.message.audioMessage);
-      const isText = Boolean(msg.message.conversation || msg.message.extendedTextMessage?.text);
+      // Desempaquetar contenedores de WhatsApp (efímeros, vista única, etc.)
+      let messageContent = msg.message;
+      while (
+        messageContent?.ephemeralMessage ||
+        messageContent?.viewOnceMessage ||
+        messageContent?.viewOnceMessageV2 ||
+        messageContent?.documentWithCaptionMessage
+      ) {
+        messageContent = (
+          messageContent.ephemeralMessage?.message ||
+          messageContent.viewOnceMessage?.message ||
+          messageContent.viewOnceMessageV2?.message ||
+          messageContent.documentWithCaptionMessage?.message
+        );
+      }
+
+      const audioMsg = messageContent?.audioMessage;
+      const isAudio = Boolean(audioMsg);
+      const isText = Boolean(messageContent?.conversation || messageContent?.extendedTextMessage?.text);
 
       if (!isAudio && !isText) {
-        console.log(`   ⏭️ Ignorado (no es texto ni nota de voz)`);
+        const keys = Object.keys(msg.message || {}).join(', ');
+        const ignoreMsg = `   ⏭️ Ignorado (no es texto ni nota de voz [claves: ${keys}])\n`;
+        try { (await import('fs')).appendFileSync('gateway.log', ignoreMsg); } catch(e) {}
+        console.log(`   ⏭️ Ignorado (no es texto ni nota de voz [claves: ${keys}])`);
         continue;
       }
 
       // Evitar que el bot reaccione a sus propios textos de presupuesto
-      const rawUserText = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
+      const rawUserText = (messageContent?.conversation || messageContent?.extendedTextMessage?.text || '').trim();
       if (rawUserText.includes('PRESUPUESTO') || rawUserText.includes('PresuVoz AI') || rawUserText.includes('¿Qué deseas hacer ahora?')) {
         console.log(`   ⏭️ Ignorado (es un mensaje de interfaz enviado por el bot)`);
         continue;
@@ -374,7 +394,7 @@ async function startWhatsAppGateway() {
           if (isAudio) {
             console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
             const buffer = await downloadMediaMessage(
-              msg,
+              { key: msg.key, message: messageContent },
               'buffer',
               {},
               { logger, reuploadRequest: sock.updateMediaMessage }
@@ -383,7 +403,7 @@ async function startWhatsAppGateway() {
             console.log(`🎙️ Audio descargado (${buffer.length} bytes). Enviando a Gemini con contexto multi-presupuesto...`);
             aiResult = await callGemini({
               audioBuffer: buffer,
-              mimeType: msg.message.audioMessage.mimetype || 'audio/ogg',
+              mimeType: audioMsg?.mimetype || 'audio/ogg',
               promptText: `${contextPrompt}\n\nEl profesional está dictando una nota de voz. Identifica si menciona un cliente o presupuesto específico, o si continúa valorando el activo actual, y actualízalo manteniendo intactas las descripciones técnicas originales. Si describe una obra para un cliente totalmente nuevo, pon isNewBudget: true y extrae los datos para un nuevo presupuesto.`
             }, GEMINI_UPDATE_PROMPT);
           } else {
@@ -398,7 +418,7 @@ async function startWhatsAppGateway() {
           if (isAudio) {
             console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
             const buffer = await downloadMediaMessage(
-              msg,
+              { key: msg.key, message: messageContent },
               'buffer',
               {},
               { logger, reuploadRequest: sock.updateMediaMessage }
@@ -406,7 +426,7 @@ async function startWhatsAppGateway() {
             console.log(`🎙️ Audio descargado (${buffer.length} bytes). Enviando a Gemini...`);
             aiResult = await callGemini({
               audioBuffer: buffer,
-              mimeType: msg.message.audioMessage.mimetype || 'audio/ogg'
+              mimeType: audioMsg?.mimetype || 'audio/ogg'
             }, GEMINI_SYSTEM_PROMPT);
           } else {
             console.log(`\n💬 Texto recibido: "${rawUserText}"`);
