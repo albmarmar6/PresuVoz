@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
@@ -90,12 +90,25 @@ const SIGN_ENDPOINT = 'https://presuvoz.vercel.app/api/sign';
 let budget = null;
 const sigStates = { canvasPro: false, canvasClient: false };
 
+function decodeBase64Utf8(base64Str) {
+  const normalized = base64Str.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized.padEnd(normalized.length + (4 - normalized.length % 4) % 4, '=');
+  const binaryString = atob(padded);
+  const bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0));
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
 window.addEventListener('DOMContentLoaded', () => {
   const params = new URLSearchParams(window.location.search);
   const data = params.get('data');
   if (!data) { showState('error'); return; }
-  try { budget = JSON.parse(atob(data.replace(/-/g,'+').replace(/_/g,'/'))); }
-  catch(e) { showState('error'); return; }
+  try {
+    budget = JSON.parse(decodeBase64Utf8(data));
+  } catch(e) {
+    console.error('Error decodificando presupuesto:', e);
+    showState('error');
+    return;
+  }
   renderSummary();
   initCanvas('canvasPro');
   initCanvas('canvasClient');

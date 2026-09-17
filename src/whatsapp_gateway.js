@@ -180,6 +180,26 @@ function formatBudgetForWhatsApp(budget, warnings = []) {
   return lines.join('\n');
 }
 
+async function shortenUrl(longUrl) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
+    const res = await fetch(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`, {
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    if (res.ok) {
+      const short = (await res.text()).trim();
+      if (short.startsWith('https://tinyurl.com/')) {
+        return short;
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ No se pudo acortar URL, usando enlace directo:', e.message);
+  }
+  return longUrl;
+}
+
 async function startWhatsAppGateway() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
   const { version } = await fetchLatestBaileysVersion();
@@ -518,8 +538,11 @@ async function startWhatsAppGateway() {
           try {
             const cleanBudget = {
               id: engineResult.budget.id,
-              company: engineResult.budget.company,
-              client: engineResult.budget.client,
+              company: { name: engineResult.budget.company?.name || 'Carpintería y Reformas Manolo S.L.' },
+              client: {
+                name: engineResult.budget.client?.name || 'Cliente Particular',
+                address: engineResult.budget.client?.address || 'Ubicación según visita'
+              },
               items: (engineResult.budget.items || []).map(i => ({
                 id: i.id,
                 description: i.description,
@@ -529,20 +552,34 @@ async function startWhatsAppGateway() {
                 total: i.total,
                 isPricePending: i.isPricePending
               })),
-              financials: engineResult.budget.financials,
+              financials: {
+                subtotal: engineResult.budget.financials?.subtotal || 0,
+                discountPercentage: engineResult.budget.financials?.discountPercentage || 0,
+                discountAmount: engineResult.budget.financials?.discountAmount || 0,
+                taxableBase: engineResult.budget.financials?.taxableBase || 0,
+                taxRatePercentage: engineResult.budget.financials?.taxRatePercentage || 10,
+                taxAmount: engineResult.budget.financials?.taxAmount || 0,
+                totalAmount: engineResult.budget.financials?.totalAmount || 0,
+                advancePercentage: engineResult.budget.financials?.advancePercentage || 30,
+                advanceAmount: engineResult.budget.financials?.advanceAmount || 0
+              },
               terms: engineResult.budget.terms,
               isDraft: engineResult.budget.isDraft
             };
 
             const budgetJson   = JSON.stringify(cleanBudget);
-            const budgetBase64 = Buffer.from(budgetJson).toString('base64')
+            const budgetBase64 = Buffer.from(budgetJson, 'utf8').toString('base64')
               .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-            const signingUrl = `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?data=${budgetBase64}`;
+            const longSigningUrl = `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?data=${budgetBase64}`;
+
+            // Acortar el enlace para que sea súper limpio y corto en WhatsApp
+            const signingUrl = await shortenUrl(longSigningUrl);
+
             const sentSig = await sock.sendMessage(remoteJid, {
               text: `✍️ *Firma del presupuesto*\n\nCuando el cliente esté presente, abre este enlace para firmar digitalmente y que reciba el contrato por email:\n${signingUrl}`
             });
             if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
-            console.log('✅ Enlace de firma enviado por WhatsApp.');
+            console.log(`✅ Enlace de firma enviado por WhatsApp (${signingUrl}).`);
           } catch (sigErr) {
             console.warn('⚠️ No se pudo generar el enlace de firma:', sigErr.message);
           }
