@@ -76,6 +76,12 @@ Se te proporciona el contexto de los presupuestos guardados del profesional y el
 
 Tu función es:
 1. DETECCIÓN DE INTENCIÓN Y DESTINO:
+   - AGENDAR CITA / VISITA TÉCNICA: Si el profesional pide agendar, apuntar o programar una visita, cita previa o medición (ej: "apunta visita con Juan el jueves a las 11:00 en Calle Mayor 14 para ver la caldera", "cita mañana a las 16:30 con María para medir cocina", "visita el viernes a las 9 con Carlos 612345678"):
+     pon 'action: "schedule_appointment"' y rellena 'appointmentInfo': { "clientName": "...", "clientPhone": "...", "clientAddress": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "notes": "..." } (resuelve fechas relativas como hoy, mañana o días de la semana a partir de la fecha actual proporcionada en el contexto).
+   - CONSULTAR AGENDA / CITAS: Si el profesional pregunta por sus visitas o agenda (ej: "¿qué citas tengo hoy?", "agenda de mañana", "mis visitas", "ver agenda", "¿tengo visitas esta semana?"):
+     pon 'action: "list_appointments"' y rellena 'appointmentFilter': "today" | "tomorrow" | "upcoming" | "all".
+   - CANCELAR CITA / VISITA: Si el profesional pide anular o cancelar una cita (ej: "cancela la cita con Juan", "anula la visita de las 11", "borra la cita con María"):
+     pon 'action: "cancel_appointment"' y rellena 'appointmentQuery': "nombre o referencia a cancelar".
    - EXPORTAR TRIMESTRE / GESTORÍA: Si el profesional pide el trimestre para su gestoría, exportar facturas, el resumen del IVA o liquidación fiscal (ej: "sácame el trimestre para la gestoría", "exportar 3T", "prepárame el trimestre", "resumen de facturas de este trimestre", "mándale las facturas a mi gestoría"):
      pon 'action: "export_quarter"', 'quarter': 1|2|3|4|null (null si no especifica trimestre), 'year': 2026 o null, y 'sendToGestoria': true|false (true si pide expresamente enviarlo por email al gestor).
    - CONFIGURAR EMAIL DE GESTORÍA: Si el profesional indica el email o datos de su asesor o gestoría (ej: "mi gestoría es asesor@gestoriaperez.com", "apunta el email de mi gestoría..."):
@@ -108,7 +114,17 @@ Tu función es:
 
 FORMATO DE RESPUESTA (JSON estricto):
 {
-  "action": "budget", // "budget" | "invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria"
+  "action": "budget", // "budget" | "invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment"
+  "appointmentInfo": {
+    "clientName": "Nombre cliente",
+    "clientPhone": null,
+    "clientAddress": "Dirección completa",
+    "date": "2026-10-15",
+    "time": "11:00",
+    "notes": "Motivo o trabajos a valorar"
+  },
+  "appointmentFilter": "upcoming", // "today" | "tomorrow" | "upcoming" | "all"
+  "appointmentQuery": null,
   "quarter": null, // 1 | 2 | 3 | 4 | null
   "year": null, // 2026 o null
   "sendToGestoria": false,

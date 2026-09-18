@@ -78,6 +78,20 @@ db.exec(`
     data_json TEXT,
     created_at TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS appointments (
+    id TEXT PRIMARY KEY,
+    company_phone TEXT,
+    client_name TEXT,
+    client_phone TEXT,
+    client_address TEXT,
+    date TEXT,
+    time TEXT,
+    notes TEXT,
+    status TEXT,
+    created_at TEXT,
+    updated_at TEXT
+  );
 `);
 
 export const DEFAULT_COMPANY = {
@@ -555,3 +569,143 @@ export function generateQuarterCSV(company, quarterData) {
 
   return BOM + lines.join('\r\n');
 }
+
+// ─── Métodos de Agenda de Citas y Visitas ─────────────────────────────────────
+
+export function saveAppointment(phone, appointment = {}) {
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const now = new Date().toISOString();
+  const currentYear = new Date().getFullYear();
+
+  let id = appointment.id;
+  if (!id) {
+    const countRow = db.prepare("SELECT COUNT(*) as c FROM appointments WHERE id LIKE ?").get(`CIT-${currentYear}-%`);
+    const nextSeq = String((countRow?.c || 0) + 1).padStart(4, '0');
+    id = `CIT-${currentYear}-${nextSeq}`;
+  }
+
+  const clientName = (appointment.clientName || appointment.client_name || 'Cliente Particular').trim();
+  const clientPhone = (appointment.clientPhone || appointment.client_phone || '').trim();
+  const clientAddress = (appointment.clientAddress || appointment.client_address || '').trim();
+  const date = (appointment.date || now.split('T')[0]).trim();
+  const time = (appointment.time || '10:00').trim();
+  const notes = (appointment.notes || 'Visita técnica y toma de medidas').trim();
+  const status = appointment.status || 'CONFIRMADA';
+
+  const stmt = db.prepare(`
+    INSERT INTO appointments (id, company_phone, client_name, client_phone, client_address, date, time, notes, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      client_name = excluded.client_name,
+      client_phone = excluded.client_phone,
+      client_address = excluded.client_address,
+      date = excluded.date,
+      time = excluded.time,
+      notes = excluded.notes,
+      status = excluded.status,
+      updated_at = excluded.updated_at
+  `);
+
+  stmt.run(id, cleanPhone, clientName, clientPhone, clientAddress, date, time, notes, status, now, now);
+
+  return getAppointment(id);
+}
+
+export function getAppointment(id) {
+  if (!id) return null;
+  const stmt = db.prepare('SELECT * FROM appointments WHERE id = ?');
+  const row = stmt.get(id);
+  if (!row) return null;
+  return {
+    id: row.id,
+    companyPhone: row.company_phone,
+    clientName: row.client_name,
+    clientPhone: row.client_phone,
+    clientAddress: row.client_address,
+    date: row.date,
+    time: row.time,
+    notes: row.notes,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+export function listAppointments(phone, filter = 'upcoming') {
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const now = new Date();
+  const todayStr = now.toISOString().split('T')[0];
+
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowStr = tomorrow.toISOString().split('T')[0];
+
+  let rows = [];
+  if (filter === 'today') {
+    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date = ? AND status != 'CANCELADA' ORDER BY time ASC");
+    rows = stmt.all(cleanPhone, todayStr);
+  } else if (filter === 'tomorrow') {
+    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date = ? AND status != 'CANCELADA' ORDER BY time ASC");
+    rows = stmt.all(cleanPhone, tomorrowStr);
+  } else if (filter === 'all') {
+    const stmt = db.prepare('SELECT * FROM appointments WHERE company_phone = ? ORDER BY date DESC, time DESC');
+    rows = stmt.all(cleanPhone);
+  } else {
+    // 'upcoming': desde hoy en adelante no canceladas
+    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date >= ? AND status != 'CANCELADA' ORDER BY date ASC, time ASC");
+    rows = stmt.all(cleanPhone, todayStr);
+  }
+
+  return rows.map(r => ({
+    id: r.id,
+    companyPhone: r.company_phone,
+    clientName: r.client_name,
+    clientPhone: r.client_phone,
+    clientAddress: r.client_address,
+    date: r.date,
+    time: r.time,
+    notes: r.notes,
+    status: r.status,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at
+  }));
+}
+
+export function updateAppointmentStatus(id, status) {
+  if (!id) return;
+  const now = new Date().toISOString();
+  const stmt = db.prepare('UPDATE appointments SET status = ?, updated_at = ? WHERE id = ?');
+  stmt.run(status, now, id);
+}
+
+export function cancelAppointment(phone, query) {
+  if (!query) return null;
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const q = `%${query.trim().toLowerCase()}%`;
+
+  const stmt = db.prepare(`
+    SELECT * FROM appointments
+    WHERE company_phone = ?
+      AND status != 'CANCELADA'
+      AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ?)
+    ORDER BY date ASC, time ASC
+    LIMIT 1
+  `);
+
+  const row = stmt.get(cleanPhone, q, q, q);
+  if (!row) return null;
+
+  updateAppointmentStatus(row.id, 'CANCELADA');
+  return {
+    id: row.id,
+    companyPhone: row.company_phone,
+    clientName: row.client_name,
+    clientPhone: row.client_phone,
+    clientAddress: row.client_address,
+    date: row.date,
+    time: row.time,
+    notes: row.notes,
+    status: 'CANCELADA'
+  };
+}
+

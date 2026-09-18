@@ -37,7 +37,12 @@ import {
   savePayment,
   getPayments,
   getQuarterInvoices,
-  generateQuarterCSV
+  generateQuarterCSV,
+  saveAppointment,
+  getAppointment,
+  listAppointments,
+  updateAppointmentStatus,
+  cancelAppointment
 } from './db_service.js';
 
 dotenv.config();
@@ -725,6 +730,125 @@ async function startWhatsAppGateway() {
     }
   }
 
+  function formatAppointmentForWhatsApp(app, company) {
+    const query = app.clientAddress ? `${app.clientAddress}` : (app.clientName || 'Ubicación');
+    const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+
+    const dateParts = (app.date || '').split('-');
+    const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : app.date;
+
+    const lines = [
+      '📅 *VISITA TÉCNICA AGENDADA*',
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `🆔 *Ref:* ${app.id}`,
+      `👤 *Cliente:* ${app.clientName}`,
+      app.clientPhone ? `📞 *Teléfono:* ${app.clientPhone}` : null,
+      `📍 *Dirección:* ${app.clientAddress || 'Por concretar'}`,
+      `🗓️ *Fecha:* ${formattedDate}`,
+      `⏰ *Hora:* ${app.time} h`,
+      `📝 *Motivo:* ${app.notes}`,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      '🗺️ *Abrir ruta en Google Maps:*',
+      mapsUrl,
+      '',
+      '💬 *Mensaje listo para reenviar a tu cliente:*',
+      `_"Hola ${app.clientName.split(' ')[0]}, te confirmamos la visita técnica para valorar los trabajos el ${formattedDate} a las ${app.time} h${app.clientAddress ? ` en ${app.clientAddress}` : ''}. ¡Nos vemos entonces! (${company?.name || 'El técnico'})"_`
+    ].filter(Boolean);
+
+    return lines.join('\n');
+  }
+
+  function formatAppointmentsListForWhatsApp(appointments, title = '📅 *TUS PRÓXIMAS VISITAS TÉCNICAS:*') {
+    if (!appointments || appointments.length === 0) {
+      return '📅 *AGENDA VACÍA*\n\nNo tienes visitas técnicas programadas para este periodo.\n\n💡 _Para apuntar una cita di por ejemplo: "Apunta visita con Juan el jueves a las 11:00 en Calle Mayor 14 para ver la caldera"_.';
+    }
+
+    let text = `${title}\n━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    appointments.forEach((app, idx) => {
+      const dateParts = (app.date || '').split('-');
+      const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}` : app.date;
+      const query = app.clientAddress ? `${app.clientAddress}` : app.clientName;
+      const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+
+      text += `\n${idx + 1}️⃣ *${formattedDate} a las ${app.time} h* · ${app.clientName}\n`;
+      if (app.clientPhone) text += `   📞 ${app.clientPhone}\n`;
+      if (app.clientAddress) text += `   📍 ${app.clientAddress}\n`;
+      text += `   📝 ${app.notes}\n`;
+      if (app.clientAddress) text += `   🗺️ ${mapsUrl}\n`;
+    });
+
+    text += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para anular una cita di: "Cancela la cita con [Nombre]"_\n💡 _Para agendar otra di: "Apunta visita con [Nombre] el [Día] a las [Hora]"_';
+    return text;
+  }
+
+  async function handleScheduleAppointment(sock, remoteJid, session, appointmentInfo = {}) {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const saved = saveAppointment(cleanPhone, appointmentInfo);
+      console.log(`📅 Cita técnica agendada para ${cleanPhone}: ${saved.id} - ${saved.clientName} (${saved.date} ${saved.time})`);
+      const text = formatAppointmentForWhatsApp(saved, session.company);
+      const sent = await sock.sendMessage(remoteJid, { text });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    } catch (err) {
+      console.error('❌ Error agendando cita:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error guardando la cita:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
+  async function handleListAppointments(sock, remoteJid, session, filter = 'upcoming') {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const appointments = listAppointments(cleanPhone, filter);
+
+      let title = '📅 *TUS PRÓXIMAS VISITAS TÉCNICAS:*';
+      if (filter === 'today') title = '📅 *TUS VISITAS TÉCNICAS DE HOY:*';
+      else if (filter === 'tomorrow') title = '📅 *TUS VISITAS TÉCNICAS DE MAÑANA:*';
+      else if (filter === 'all') title = '📅 *TODAS LAS VISITAS REGISTRADAS:*';
+
+      const text = formatAppointmentsListForWhatsApp(appointments, title);
+      const sent = await sock.sendMessage(remoteJid, { text });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    } catch (err) {
+      console.error('❌ Error listando citas:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error consultando la agenda:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
+  async function handleCancelAppointment(sock, remoteJid, session, query) {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const cancelled = cancelAppointment(cleanPhone, query);
+      if (!cancelled) {
+        const sentNotFound = await sock.sendMessage(remoteJid, {
+          text: `⚠️ *No se encontró ninguna cita activa* que coincida con "${query}".\n\nEscribe *"agenda"* para ver tus citas programadas.`
+        });
+        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+        return;
+      }
+
+      const dateParts = (cancelled.date || '').split('-');
+      const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : cancelled.date;
+
+      const sentOk = await sock.sendMessage(remoteJid, {
+        text: `❌ *Cita cancelada con éxito*\n\nSe ha anulado la visita técnica con *${cancelled.clientName}* prevista para el ${formattedDate} a las ${cancelled.time} h (${cancelled.id}).\n\nEl hueco ha quedado liberado en tu agenda.`
+      });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+      console.log(`❌ Cita ${cancelled.id} cancelada para ${cleanPhone}`);
+    } catch (err) {
+      console.error('❌ Error cancelando cita:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error cancelando la cita:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     // Aceptar tanto 'notify' (mensajes de terceros) como 'append' (mensajes a ti mismo desde tu móvil)
     if (type !== 'notify' && type !== 'append') return;
@@ -978,7 +1102,7 @@ async function startWhatsAppGateway() {
           }
         }
 
-        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para registrar un cobro di: "Apunta 1.500€ de José Luis por Bizum"_\n💡 _Para consultar deuda di: "¿Cuánto me debe José Luis?"_\n💡 _Para facturar di: "Facturar el de José Luis"_\n💡 _Para exportar el trimestre a tu gestor di: "Gestoría" o "3T"_\n💡 _Para ver o modificar tus datos de empresa y logo di: "Mi empresa"_\n💡 _Para crear uno nuevo di: "Presupuesto nuevo..."_';
+        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para agendar visita di: "Apunta visita con Juan el jueves a las 11:00 en Calle Mayor 14 para ver la caldera"_\n💡 _Para consultar tus visitas escribe: "agenda" o "visitas"_\n💡 _Para registrar un cobro di: "Apunta 1.500€ de José Luis por Bizum"_\n💡 _Para consultar deuda di: "¿Cuánto me debe José Luis?"_\n💡 _Para facturar di: "Facturar el de José Luis"_\n💡 _Para exportar el trimestre a tu gestor di: "Gestoría" o "3T"_\n💡 _Para ver o modificar tus datos de empresa y logo di: "Mi empresa"_\n💡 _Para crear uno nuevo di: "Presupuesto nuevo..."_';
 
         const sentList = await sock.sendMessage(remoteJid, { text: listText });
         if (sentList?.key?.id) botSentMessageIds.add(sentList.key.id);
@@ -1053,6 +1177,36 @@ async function startWhatsAppGateway() {
         continue;
       }
 
+      // Comando directo para consultar agenda: ej. "agenda", "mis citas", "visitas", "citas hoy", "citas mañana"
+      const isAgendaCmd = /^(?:agenda|mis citas|visitas|citas|mis visitas)(?:\s+(hoy|ma[ñn]ana|todas|pr[oó]ximas))?$/i.test(rawUserText)
+        || /^(?:citas hoy|visitas hoy|agenda hoy)$/i.test(rawUserText)
+        || /^(?:citas ma[ñn]ana|visitas ma[ñn]ana|agenda ma[ñn]ana)$/i.test(rawUserText);
+
+      if (isAgendaCmd) {
+        let filter = 'upcoming';
+        if (/hoy/i.test(rawUserText)) filter = 'today';
+        else if (/ma[ñn]ana/i.test(rawUserText)) filter = 'tomorrow';
+        else if (/toda/i.test(rawUserText)) filter = 'all';
+
+        await handleListAppointments(sock, remoteJid, session, filter);
+        continue;
+      }
+
+      // Comando directo para cancelar cita: ej. "cancelar cita Juan", "anular visita Pedro"
+      const cancelCmdMatch = rawUserText.match(/^(?:cancelar|anular|borrar)\s+(?:la\s+)?(?:cita|visita)(?:\s+(?:con|de)?\s*(.+))?$/i);
+      if (cancelCmdMatch) {
+        const query = (cancelCmdMatch[1] || '').trim();
+        if (!query) {
+          const sentNeedQuery = await sock.sendMessage(remoteJid, {
+            text: '⚠️ *Indica el nombre del cliente o referencia de la cita* que deseas anular (ej: *"cancelar cita Juan"*).'
+          });
+          if (sentNeedQuery?.key?.id) botSentMessageIds.add(sentNeedQuery.key.id);
+        } else {
+          await handleCancelAppointment(sock, remoteJid, session, query);
+        }
+        continue;
+      }
+
       try {
         await sock.sendPresenceUpdate('composing', remoteJid);
 
@@ -1086,7 +1240,14 @@ async function startWhatsAppGateway() {
           bizum: session.company?.bizum
         };
 
-        const contextPrompt = `PRESUPUESTOS GUARDADOS EN MEMORIA DEL PROFESIONAL:\n${budgetsList.length > 0 ? JSON.stringify(budgetsList, null, 2) : 'Ninguno todavía'}\n\nPRESUPUESTO ACTIVO ACTUALMENTE: ${session.activeBudgetId || 'Ninguno (modo nuevo cliente)'}\n\nDATOS DE LA EMPRESA DEL PROFESIONAL:\n${JSON.stringify(companyContext, null, 2)}`;
+        const nowObj = new Date();
+        const daysOfWeek = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+        const dayName = daysOfWeek[nowObj.getDay()];
+        const currentDateStr = nowObj.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid' });
+        const currentIsoDate = nowObj.toISOString().split('T')[0];
+        const currentTimeStr = nowObj.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' });
+
+        const contextPrompt = `FECHA Y HORA ACTUAL (utilízala como referencia para resolver días relativos como "hoy", "mañana", "el jueves", etc.):\n${dayName}, ${currentDateStr} (${currentIsoDate}), ${currentTimeStr}\n\nPRESUPUESTOS GUARDADOS EN MEMORIA DEL PROFESIONAL:\n${budgetsList.length > 0 ? JSON.stringify(budgetsList, null, 2) : 'Ninguno todavía'}\n\nPRESUPUESTO ACTIVO ACTUALMENTE: ${session.activeBudgetId || 'Ninguno (modo nuevo cliente)'}\n\nDATOS DE LA EMPRESA DEL PROFESIONAL:\n${JSON.stringify(companyContext, null, 2)}`;
 
         if (isAudio) {
           console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
@@ -1101,7 +1262,7 @@ async function startWhatsAppGateway() {
           aiResult = await callGemini({
             audioBuffer: buffer,
             mimeType: audioMsg?.mimetype || 'audio/ogg',
-            promptText: `${contextPrompt}\n\nEl profesional está dictando una nota de voz. Identifica su intención: si es configurar datos de su empresa, consultar empresa, registrar cobro, consultar saldo, facturar, o crear/modificar presupuesto.`
+            promptText: `${contextPrompt}\n\nEl profesional está dictando una nota de voz. Identifica su intención: si es agendar cita/visita, consultar agenda, cancelar cita, configurar datos de su empresa, consultar empresa, registrar cobro, consultar saldo, facturar, exportar trimestre, o crear/modificar presupuesto.`
           }, GEMINI_UPDATE_PROMPT);
         } else {
           console.log(`\n💬 Texto recibido: "${rawUserText}"`);
@@ -1201,6 +1362,24 @@ async function startWhatsAppGateway() {
         // Si la IA detectó solicitud de exportación del trimestre para la gestoría
         if (aiResult?.action === 'export_quarter') {
           await handleQuarterExport(sock, remoteJid, session, aiResult.quarter, aiResult.year, Boolean(aiResult.sendToGestoria));
+          continue;
+        }
+
+        // Si la IA detectó solicitud de agendar cita o visita técnica
+        if (aiResult?.action === 'schedule_appointment') {
+          await handleScheduleAppointment(sock, remoteJid, session, aiResult.appointmentInfo || {});
+          continue;
+        }
+
+        // Si la IA detectó consulta de agenda
+        if (aiResult?.action === 'list_appointments') {
+          await handleListAppointments(sock, remoteJid, session, aiResult.appointmentFilter || 'upcoming');
+          continue;
+        }
+
+        // Si la IA detectó cancelación de cita
+        if (aiResult?.action === 'cancel_appointment') {
+          await handleCancelAppointment(sock, remoteJid, session, aiResult.appointmentQuery || aiResult.clientName || '');
           continue;
         }
 
