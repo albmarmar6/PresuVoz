@@ -13,10 +13,24 @@ import makeWASocketPkg, {
 } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
+import fs from 'node:fs';
+import path from 'node:path';
 import dotenv from 'dotenv';
 import { PresuVozEngine } from './engine.js';
 import { GEMINI_SYSTEM_PROMPT, GEMINI_UPDATE_PROMPT } from './ai_service.js';
 import { generateBudgetPDF, generateInvoicePDF, generateReceiptPDF } from './pdf_service.js';
+import {
+  getCompany,
+  saveCompany,
+  saveBudget,
+  getBudget,
+  listBudgets,
+  saveInvoice,
+  getInvoice,
+  listInvoices,
+  savePayment,
+  getPayments
+} from './db_service.js';
 
 dotenv.config();
 
@@ -252,19 +266,55 @@ async function startWhatsAppGateway() {
 
   const botSentMessageIds = new Set();
   
-  // Memoria multi-presupuesto y facturas por chat:
-  // Map<remoteJid, { activeBudgetId: string|null, budgets: Map<string, object>, invoices: Map<string, object> }>
+  // Memoria multi-presupuesto y facturas por chat conectada a SQLite
   const userSessions = new Map();
 
-  function getUserSession(remoteJid) {
+  function getUserSession(remoteJid, senderNumber) {
+    const cleanPhone = senderNumber || String(remoteJid).replace(/\D/g, '');
     if (!userSessions.has(remoteJid)) {
+      const company = getCompany(cleanPhone);
+      const budgetsMap = new Map();
+      const dbBudgets = listBudgets(cleanPhone, 50);
+      for (const b of dbBudgets) {
+        if (b && b.id) budgetsMap.set(b.id, b);
+      }
+      const invoicesMap = new Map();
+      const dbInvoices = listInvoices(cleanPhone, 50);
+      for (const inv of dbInvoices) {
+        if (inv && inv.id) invoicesMap.set(inv.id, inv);
+      }
+      const activeId = budgetsMap.size > 0 ? Array.from(budgetsMap.keys())[0] : null;
+
       userSessions.set(remoteJid, {
-        activeBudgetId: null,
-        budgets: new Map(),
-        invoices: new Map()
+        phone: cleanPhone,
+        company,
+        activeBudgetId: activeId,
+        budgets: budgetsMap,
+        invoices: invoicesMap
       });
+      console.log(`📦 Sesión cargada desde SQLite para ${cleanPhone}: ${budgetsMap.size} presupuestos, ${invoicesMap.size} facturas.`);
     }
-    return userSessions.get(remoteJid);
+    const session = userSessions.get(remoteJid);
+    session.company = getCompany(cleanPhone);
+    return session;
+  }
+
+  function formatCompanyForWhatsApp(company) {
+    const hasLogo = Boolean(company.logoPath && fs.existsSync(company.logoPath));
+    return [
+      '🏢 *PERFIL DE TU EMPRESA / NEGOCIO:*',
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `📛 *Nombre / Razón Social:* ${company.name}`,
+      `🆔 *CIF / NIF:* ${company.cif}`,
+      `📍 *Dirección Fiscal:* ${company.address}`,
+      `📞 *Teléfono de contacto:* ${company.phone}`,
+      `✉️ *Email:* ${company.email}`,
+      `🏦 *IBAN para cobros:* ${company.iban}`,
+      `📱 *Bizum profesional:* ${company.bizum}`,
+      `🖼️ *Logotipo:* ${hasLogo ? '✅ Configurado (se incluye en tus PDFs)' : '❌ Sin logotipo (envía una foto con el texto "logo")'}`,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      '💡 _Para modificar tus datos fiscales o bancarios di:_\n*"Configurar empresa Nombre Reformas Pepe, CIF B-12345678, IBAN ES91..."* o *"Mi Bizum es 612345678"*.\n💡 _Para poner tu logo, envía una foto con el texto "logo"._'
+    ].join('\n');
   }
 
   function findBudgetInSession(session, query) {
@@ -299,10 +349,14 @@ async function startWhatsAppGateway() {
 
     try {
       console.log(`🧾 Emitiendo factura legal para el presupuesto ${targetBudget.id}...`);
-      const invoice = engine.convertToInvoice(targetBudget, { clientNif });
+      const invoice = engine.convertToInvoice(targetBudget, { clientNif, company: session.company });
 
       if (!session.invoices) session.invoices = new Map();
       session.invoices.set(invoice.id, invoice);
+
+      // Persistir factura en SQLite
+      const cleanPhone = session.phone || remoteJid.replace(/\D/g, '');
+      saveInvoice(cleanPhone, invoice);
 
       // Generar PDF formal de Factura
       const invoicePdfBuffer = await generateInvoicePDF(invoice);
@@ -334,8 +388,12 @@ async function startWhatsAppGateway() {
       invoiceMsgLines.push('');
       invoiceMsgLines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
       invoiceMsgLines.push('🏦 *Datos bancarios para cobro:*');
-      invoiceMsgLines.push('• Banco Santander: *ES91 2100 0418 4502 0005 1332*');
-      invoiceMsgLines.push('• Bizum profesional: *601 02 23 67*');
+      if (session.company?.iban) {
+        invoiceMsgLines.push(`• IBAN: *${session.company.iban}*`);
+      }
+      if (session.company?.bizum) {
+        invoiceMsgLines.push(`• Bizum profesional: *${session.company.bizum}*`);
+      }
 
       const sentSummary = await sock.sendMessage(remoteJid, { text: invoiceMsgLines.join('\n') });
       if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
@@ -391,6 +449,11 @@ async function startWhatsAppGateway() {
     try {
       console.log(`💰 Registrando cobro de ${amount} € para el presupuesto ${targetBudget.id}...`);
       const { receipt } = engine.registerPayment(targetBudget, paymentInfo);
+
+      // Persistir cobro y presupuesto actualizado en SQLite
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      savePayment(cleanPhone, receipt);
+      saveBudget(cleanPhone, targetBudget);
 
       // Generar PDF formal del recibo
       const receiptPdfBuffer = await generateReceiptPDF(receipt);
@@ -550,15 +613,17 @@ async function startWhatsAppGateway() {
         );
       }
 
+      const imageMsg = messageContent?.imageMessage;
+      const isImage = Boolean(imageMsg);
       const audioMsg = messageContent?.audioMessage;
       const isAudio = Boolean(audioMsg);
       const isText = Boolean(messageContent?.conversation || messageContent?.extendedTextMessage?.text);
 
-      if (!isAudio && !isText) {
+      if (!isAudio && !isText && !isImage) {
         const keys = Object.keys(msg.message || {}).join(', ');
-        const ignoreMsg = `   ⏭️ Ignorado (no es texto ni nota de voz [claves: ${keys}])\n`;
+        const ignoreMsg = `   ⏭️ Ignorado (no es texto, nota de voz ni imagen [claves: ${keys}])\n`;
         try { (await import('fs')).appendFileSync('gateway.log', ignoreMsg); } catch(e) {}
-        console.log(`   ⏭️ Ignorado (no es texto ni nota de voz [claves: ${keys}])`);
+        console.log(`   ⏭️ Ignorado (no es texto, nota de voz ni imagen [claves: ${keys}])`);
         continue;
       }
 
@@ -575,7 +640,100 @@ async function startWhatsAppGateway() {
         continue;
       }
 
-      const session = getUserSession(remoteJid);
+      const session = getUserSession(remoteJid, senderNumber);
+
+      // Si recibimos una imagen para el logotipo de la empresa
+      if (isImage) {
+        const caption = (imageMsg.caption || '').trim().toLowerCase();
+        if (caption.includes('logo') || caption === 'foto' || caption === 'logotipo' || caption === 'mi logo' || caption === '') {
+          try {
+            console.log(`🖼️ Imagen de logotipo recibida de ${senderNumber}...`);
+            const buffer = await downloadMediaMessage(
+              { key: msg.key, message: messageContent },
+              'buffer',
+              {},
+              { logger, reuploadRequest: sock.updateMediaMessage }
+            );
+            const logosDir = path.resolve('data', 'logos');
+            if (!fs.existsSync(logosDir)) fs.mkdirSync(logosDir, { recursive: true });
+            const logoPath = path.join(logosDir, `${senderNumber}.png`);
+            fs.writeFileSync(logoPath, buffer);
+
+            saveCompany(senderNumber, { logoPath });
+            session.company = getCompany(senderNumber);
+
+            const sentLogo = await sock.sendMessage(remoteJid, {
+              text: `✅ *¡Logotipo de empresa guardado con éxito!*\n\n🖼️ A partir de ahora aparecerá en la cabecera de todos tus nuevos presupuestos, facturas y recibos oficiales en PDF.`
+            });
+            if (sentLogo?.key?.id) botSentMessageIds.add(sentLogo.key.id);
+          } catch (logoErr) {
+            console.error('❌ Error guardando logotipo:', logoErr.message);
+            const sentErr = await sock.sendMessage(remoteJid, {
+              text: `⚠️ *No se pudo guardar el logotipo:* ${logoErr.message}`
+            });
+            if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+          }
+          continue;
+        }
+      }
+
+      // Comando directo para consultar ficha y datos fiscales de la empresa
+      if (/^(?:mi empresa|mis datos|datos empresa|perfil|datos fiscales)$/i.test(rawUserText)) {
+        const companyText = formatCompanyForWhatsApp(session.company);
+        const sentComp = await sock.sendMessage(remoteJid, { text: companyText });
+        if (sentComp?.key?.id) botSentMessageIds.add(sentComp.key.id);
+        continue;
+      }
+
+      // Comando directo para configurar datos de la empresa: ej. "configurar empresa CIF B-12345678, Nombre Reformas Pepe..."
+      const configCompanyMatch = rawUserText.match(/^(?:configurar empresa|cambiar empresa|datos empresa|modificar empresa)\s+(.+)$/i);
+      if (configCompanyMatch) {
+        const configText = configCompanyMatch[1];
+        const newCompanyData = {};
+
+        const cifMatch = configText.match(/\b([ABCDEFGHJKLMNPQRSUVW][0-9]{7}[0-9A-J]|[0-9]{8}[TRWAGMYFPDXBNJZSQVHLCKE])\b/i);
+        if (cifMatch) newCompanyData.cif = cifMatch[1].toUpperCase();
+
+        const ibanMatch = configText.match(/\b(ES\d{2}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4})\b/i);
+        if (ibanMatch) newCompanyData.iban = ibanMatch[1].replace(/[\s-]/g, '').replace(/(.{4})/g, '$1 ').trim();
+
+        const bizumMatch = configText.match(/(?:bizum|m[oó]vil)[:\s]+([67]\d{8})\b/i);
+        if (bizumMatch) newCompanyData.bizum = bizumMatch[1];
+
+        const emailMatch = configText.match(/\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/);
+        if (emailMatch) newCompanyData.email = emailMatch[1];
+
+        const nameMatch = configText.match(/(?:nombre|empresa|raz[oó]n social)[:\s]+([^,;\n]+)/i);
+        if (nameMatch) newCompanyData.name = nameMatch[1].trim();
+
+        const dirMatch = configText.match(/(?:direcci[oó]n|calle|ubicaci[oó]n)[:\s]+([^,;\n]+)/i);
+        if (dirMatch) newCompanyData.address = dirMatch[1].trim();
+
+        if (!newCompanyData.name && !cifMatch && !ibanMatch) {
+          newCompanyData.name = configText.trim();
+        }
+
+        const updated = saveCompany(senderNumber, newCompanyData);
+        session.company = updated;
+
+        const confText = [
+          '✅ *¡Datos de tu empresa actualizados con éxito!*',
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          `📛 *Empresa:* ${updated.name}`,
+          `🆔 *CIF:* ${updated.cif}`,
+          `📍 *Dirección:* ${updated.address}`,
+          `🏦 *IBAN:* ${updated.iban}`,
+          `📱 *Bizum:* ${updated.bizum}`,
+          `📞 *Teléfono:* ${updated.phone}`,
+          `✉️ *Email:* ${updated.email}`,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          '📄 _Todos tus próximos presupuestos, facturas y recibos oficiales se emitirán con estos datos._'
+        ].join('\n');
+
+        const sentConf = await sock.sendMessage(remoteJid, { text: confText });
+        if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
+        continue;
+      }
 
       // Opción 1: Ver lista de presupuestos guardados
       if (/^(1|presupuestos|mis presupuestos|ver presupuestos|lista)$/i.test(rawUserText)) {
@@ -618,7 +776,7 @@ async function startWhatsAppGateway() {
           }
         }
 
-        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para registrar un cobro di: "Apunta 1.500€ de José Luis por Bizum"_\n💡 _Para consultar deuda di: "¿Cuánto me debe José Luis?"_\n💡 _Para facturar di: "Facturar el de José Luis"_\n💡 _Para crear uno nuevo di: "Presupuesto nuevo..."_';
+        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para registrar un cobro di: "Apunta 1.500€ de José Luis por Bizum"_\n💡 _Para consultar deuda di: "¿Cuánto me debe José Luis?"_\n💡 _Para facturar di: "Facturar el de José Luis"_\n💡 _Para ver o modificar tus datos de empresa y logo di: "Mi empresa"_\n💡 _Para crear uno nuevo di: "Presupuesto nuevo..."_';
 
         const sentList = await sock.sendMessage(remoteJid, { text: listText });
         if (sentList?.key?.id) botSentMessageIds.add(sentList.key.id);
@@ -697,70 +855,58 @@ async function startWhatsAppGateway() {
         await sock.sendPresenceUpdate('composing', remoteJid);
 
         let aiResult;
-        const hasHistory = session.budgets.size > 0;
 
-        if (hasHistory) {
-          // Construir resumen de los presupuestos guardados para dar contexto a Gemini
-          const budgetsList = Array.from(session.budgets.values()).slice(-5).map(b => ({
-            id: b.id,
-            clientName: b.client?.name !== 'Cliente Particular' ? b.client?.name : null,
-            clientAddress: b.client?.address !== 'Ubicación obra según visita' ? b.client?.address : null,
-            isDraft: b.isDraft,
-            items: b.items.map(i => ({
-              id: i.id,
-              description: i.description,
-              qty: i.qty,
-              unit: i.unit,
-              unitPrice: i.unitPrice,
-              isPricePending: i.isPricePending
-            })),
-            taxRate: b.financials?.taxRatePercentage || 10,
-            discount: b.financials?.discountPercentage > 0 ? { type: 'percentage', value: b.financials.discountPercentage } : null
-          }));
+        // Construir resumen de los presupuestos guardados para dar contexto a Gemini
+        const budgetsList = Array.from(session.budgets.values()).slice(-5).map(b => ({
+          id: b.id,
+          clientName: b.client?.name !== 'Cliente Particular' ? b.client?.name : null,
+          clientAddress: b.client?.address !== 'Ubicación obra según visita' ? b.client?.address : null,
+          isDraft: b.isDraft,
+          items: (b.items || []).map(i => ({
+            id: i.id,
+            description: i.description,
+            qty: i.qty,
+            unit: i.unit,
+            unitPrice: i.unitPrice,
+            isPricePending: i.isPricePending
+          })),
+          taxRate: b.financials?.taxRatePercentage || 10,
+          discount: b.financials?.discountPercentage > 0 ? { type: 'percentage', value: b.financials.discountPercentage } : null
+        }));
 
-          const contextPrompt = `PRESUPUESTOS GUARDADOS EN MEMORIA DEL PROFESIONAL:\n${JSON.stringify(budgetsList, null, 2)}\n\nPRESUPUESTO ACTIVO ACTUALMENTE: ${session.activeBudgetId || 'Ninguno (modo nuevo cliente)'}`;
+        const companyContext = {
+          name: session.company?.name,
+          cif: session.company?.cif,
+          address: session.company?.address,
+          phone: session.company?.phone,
+          email: session.company?.email,
+          iban: session.company?.iban,
+          bizum: session.company?.bizum
+        };
 
-          if (isAudio) {
-            console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
-            const buffer = await downloadMediaMessage(
-              { key: msg.key, message: messageContent },
-              'buffer',
-              {},
-              { logger, reuploadRequest: sock.updateMediaMessage }
-            );
+        const contextPrompt = `PRESUPUESTOS GUARDADOS EN MEMORIA DEL PROFESIONAL:\n${budgetsList.length > 0 ? JSON.stringify(budgetsList, null, 2) : 'Ninguno todavía'}\n\nPRESUPUESTO ACTIVO ACTUALMENTE: ${session.activeBudgetId || 'Ninguno (modo nuevo cliente)'}\n\nDATOS DE LA EMPRESA DEL PROFESIONAL:\n${JSON.stringify(companyContext, null, 2)}`;
 
-            console.log(`🎙️ Audio descargado (${buffer.length} bytes). Enviando a Gemini con contexto multi-presupuesto...`);
-            aiResult = await callGemini({
-              audioBuffer: buffer,
-              mimeType: audioMsg?.mimetype || 'audio/ogg',
-              promptText: `${contextPrompt}\n\nEl profesional está dictando una nota de voz. Identifica si menciona un cliente o presupuesto específico, o si continúa valorando el activo actual, y actualízalo manteniendo intactas las descripciones técnicas originales. Si describe una obra para un cliente totalmente nuevo, pon isNewBudget: true y extrae los datos para un nuevo presupuesto.`
-            }, GEMINI_UPDATE_PROMPT);
-          } else {
-            console.log(`\n💬 Texto recibido: "${rawUserText}"`);
-            aiResult = await callGemini(
-              `${contextPrompt}\n\nINSTRUCCIONES DEL PROFESIONAL:\n${rawUserText}`,
-              GEMINI_UPDATE_PROMPT
-            );
-          }
+        if (isAudio) {
+          console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
+          const buffer = await downloadMediaMessage(
+            { key: msg.key, message: messageContent },
+            'buffer',
+            {},
+            { logger, reuploadRequest: sock.updateMediaMessage }
+          );
+
+          console.log(`🎙️ Audio descargado (${buffer.length} bytes). Enviando a Gemini con contexto inteligente...`);
+          aiResult = await callGemini({
+            audioBuffer: buffer,
+            mimeType: audioMsg?.mimetype || 'audio/ogg',
+            promptText: `${contextPrompt}\n\nEl profesional está dictando una nota de voz. Identifica su intención: si es configurar datos de su empresa, consultar empresa, registrar cobro, consultar saldo, facturar, o crear/modificar presupuesto.`
+          }, GEMINI_UPDATE_PROMPT);
         } else {
-          // No hay historial previo: modo nuevo presupuesto estándar
-          if (isAudio) {
-            console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
-            const buffer = await downloadMediaMessage(
-              { key: msg.key, message: messageContent },
-              'buffer',
-              {},
-              { logger, reuploadRequest: sock.updateMediaMessage }
-            );
-            console.log(`🎙️ Audio descargado (${buffer.length} bytes). Enviando a Gemini...`);
-            aiResult = await callGemini({
-              audioBuffer: buffer,
-              mimeType: audioMsg?.mimetype || 'audio/ogg'
-            }, GEMINI_SYSTEM_PROMPT);
-          } else {
-            console.log(`\n💬 Texto recibido: "${rawUserText}"`);
-            aiResult = await callGemini(rawUserText, GEMINI_SYSTEM_PROMPT);
-          }
+          console.log(`\n💬 Texto recibido: "${rawUserText}"`);
+          aiResult = await callGemini(
+            `${contextPrompt}\n\nINSTRUCCIONES DEL PROFESIONAL:\n${rawUserText}`,
+            GEMINI_UPDATE_PROMPT
+          );
         }
 
         // Si la IA detectó solicitud de facturación
@@ -796,6 +942,46 @@ async function startWhatsAppGateway() {
           continue;
         }
 
+        // Si la IA detectó consulta de datos de la empresa
+        if (aiResult?.action === 'show_company') {
+          const companyText = formatCompanyForWhatsApp(session.company);
+          const sentComp = await sock.sendMessage(remoteJid, { text: companyText });
+          if (sentComp?.key?.id) botSentMessageIds.add(sentComp.key.id);
+          continue;
+        }
+
+        // Si la IA detectó configuración o actualización de empresa
+        if (aiResult?.action === 'configure_company') {
+          const cleanInfo = {};
+          if (aiResult.companyInfo) {
+            for (const [k, v] of Object.entries(aiResult.companyInfo)) {
+              if (v && typeof v === 'string' && v.trim() !== '') {
+                cleanInfo[k] = v.trim();
+              }
+            }
+          }
+          const updated = saveCompany(senderNumber, cleanInfo);
+          session.company = updated;
+
+          const confText = [
+            '✅ *¡Datos de tu empresa actualizados con éxito!*',
+            '━━━━━━━━━━━━━━━━━━━━━━━━━',
+            `📛 *Empresa:* ${updated.name}`,
+            `🆔 *CIF:* ${updated.cif}`,
+            `📍 *Dirección:* ${updated.address}`,
+            `🏦 *IBAN:* ${updated.iban}`,
+            `📱 *Bizum:* ${updated.bizum}`,
+            `📞 *Teléfono:* ${updated.phone}`,
+            `✉️ *Email:* ${updated.email}`,
+            '━━━━━━━━━━━━━━━━━━━━━━━━━',
+            '📄 _Tus nuevos presupuestos, facturas y recibos oficiales se emitirán con estos datos fiscales._'
+          ].join('\n');
+
+          const sentConf = await sock.sendMessage(remoteJid, { text: confText });
+          if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
+          continue;
+        }
+
         if (!aiResult || !aiResult.items || aiResult.items.length === 0) {
           const sentHelp = await sock.sendMessage(remoteJid, {
             text: `🤖 *PresuVoz Bot*\n\nNo he detectado partidas técnicas en el mensaje. Puedes dictarme los trabajos de obra (ej: _"tirar tabique de 4x3 metros y mover 2 enchufes por 600 euros"_).`
@@ -821,10 +1007,11 @@ async function startWhatsAppGateway() {
 
         const engineResult = engine.process({
           rawTranscript: '',
+          company: session.company,
           clientName: aiResult.clientName,
           clientAddress: aiResult.clientAddress,
           items: aiResult.items,
-          taxRate: (aiResult.taxRate || 10) / 100,
+          taxRate: (aiResult.taxRate || session.company?.defaultTaxRate || 10) / 100,
           discount: aiResult.discount || null,
           customConditions: aiResult.paymentTerms
             ? `${aiResult.paymentTerms.advancePercentage}% al aceptar. ${100 - aiResult.paymentTerms.advancePercentage}% a la entrega.`
@@ -839,15 +1026,24 @@ async function startWhatsAppGateway() {
           continue;
         }
 
-        // Mantener el mismo número de presupuesto si es actualización
+        // Mantener el mismo número de presupuesto y pagos si es actualización
         if (prevBudget && prevBudget.id) {
           engineResult.budget.id = prevBudget.id;
+          engineResult.budget.payments = prevBudget.payments || [];
+          engineResult.budget.paymentSummary = prevBudget.paymentSummary || engineResult.budget.paymentSummary;
         }
+
+        // Asegurar que el presupuesto tiene los datos de la empresa actualizados
+        engineResult.budget.company = session.company;
 
         // Guardar en el historial de la sesión y marcarlo como activo
         session.budgets.set(engineResult.budget.id, engineResult.budget);
         session.activeBudgetId = engineResult.budget.id;
-        console.log(`💾 Presupuesto guardado en sesión: ${engineResult.budget.id} (Total guardados: ${session.budgets.size})`);
+
+        // Persistir en SQLite
+        const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+        saveBudget(cleanPhone, engineResult.budget);
+        console.log(`💾 Presupuesto guardado en SQLite y sesión: ${engineResult.budget.id} (Total guardados: ${session.budgets.size})`);
 
         // Enviar resumen por WhatsApp
         const replyText = formatBudgetForWhatsApp(engineResult.budget, aiResult.warnings || []);
@@ -874,7 +1070,12 @@ async function startWhatsAppGateway() {
           try {
             const cleanBudget = {
               id: engineResult.budget.id,
-              company: { name: engineResult.budget.company?.name || 'Carpintería y Reformas Manolo S.L.' },
+              company: {
+                name: session.company?.name || engineResult.budget.company?.name || 'Carpintería y Reformas Manolo S.L.',
+                cif: session.company?.cif || '',
+                address: session.company?.address || '',
+                phone: session.company?.phone || ''
+              },
               client: {
                 name: engineResult.budget.client?.name || 'Cliente Particular',
                 address: engineResult.budget.client?.address || 'Ubicación según visita'

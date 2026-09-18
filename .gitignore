@@ -32,3 +32,10 @@ desktop.ini
 tmp/
 scratch/
 auth_info_baileys/
+payload.json
+
+# SQLite Database & User Logos
+data/*.db
+data/*.db-journal
+data/logos/*
+!data/logos/.gitkeep

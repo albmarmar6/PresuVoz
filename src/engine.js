@@ -183,7 +183,7 @@ export class PresuVozEngine {
     const budget = {
       id: budgetId,
       issueDate,
-      company: this.company,
+      company: rawInput.company || this.company,
       client: {
         name: clientName || "Cliente Particular",
         address: clientAddress || "Ubicación obra según visita",
@@ -360,6 +360,7 @@ export class PresuVozEngine {
       operationDate,
       company: {
         ...this.company,
+        ...(budget.company || {}),
         ...(options.company || {})
       },
       client: {

@@ -1,4 +1,5 @@
 import PDFDocument from 'pdfkit';
+import fs from 'node:fs';
 
 /**
  * Genera un Buffer con el PDF formal del presupuesto
@@ -32,13 +33,22 @@ export function generateBudgetPDF(budget) {
       doc.rect(0, 0, 595.28, 8).fill(primaryColor);
 
       // 2. Cabecera (Empresa vs Datos del documento)
-      doc.fontSize(16).fillColor(darkColor).font('Helvetica-Bold')
-        .text(budget.company?.name || 'PresuVoz Reformas S.L.', 40, 30);
+      let textStartX = 40;
+      const logoPath = budget.company?.logoPath;
+      if (logoPath && fs.existsSync(logoPath)) {
+        try {
+          doc.image(logoPath, 40, 24, { fit: [50, 50] });
+          textStartX = 100;
+        } catch (e) {}
+      }
 
-      doc.fontSize(8).fillColor(grayColor).font('Helvetica')
-        .text(`CIF: ${budget.company?.cif || 'B-41987654'}`, 40, 50)
-        .text(budget.company?.address || 'Pol. Ind. El Pino, Nave 4 - Sevilla', 40, 62)
-        .text('Tel: 601 02 23 67 | presupuestos@presuvoz.app', 40, 74);
+      doc.fontSize(14).fillColor(darkColor).font('Helvetica-Bold')
+        .text(budget.company?.name || 'PresuVoz Reformas S.L.', textStartX, 30, { width: 270 });
+
+      doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
+        .text(`CIF/NIF: ${budget.company?.cif || 'B-41987654'}`, textStartX, 48)
+        .text(budget.company?.address || 'Pol. Ind. El Pino, Nave 4 - Sevilla', textStartX, 59, { width: 270 })
+        .text(`Tel: ${budget.company?.phone || '601 02 23 67'} | ${budget.company?.email || 'presupuestos@presuvoz.app'}`, textStartX, 70);
 
       // Caja resumen de presupuesto (derecha)
       const docType = budget.isDraft ? 'BORRADOR TÉCNICO' : 'PRESUPUESTO';
@@ -205,13 +215,22 @@ export function generateInvoicePDF(invoice) {
       doc.rect(0, 0, 595.28, 8).fill(primaryColor);
 
       // 2. Cabecera (Datos fiscales del emisor)
-      doc.fontSize(16).fillColor(darkColor).font('Helvetica-Bold')
-        .text(invoice.company?.name || 'PresuVoz Reformas S.L.', 40, 30);
+      let textStartX = 40;
+      const logoPath = invoice.company?.logoPath;
+      if (logoPath && fs.existsSync(logoPath)) {
+        try {
+          doc.image(logoPath, 40, 24, { fit: [50, 50] });
+          textStartX = 100;
+        } catch (e) {}
+      }
 
-      doc.fontSize(8).fillColor(grayColor).font('Helvetica')
-        .text(`NIF/CIF: ${invoice.company?.cif || 'B-41987654'}`, 40, 50)
-        .text(invoice.company?.address || 'Pol. Ind. El Pino, Nave 4 - Sevilla', 40, 62)
-        .text('Tel: 601 02 23 67 | facturas@presuvoz.app', 40, 74);
+      doc.fontSize(14).fillColor(darkColor).font('Helvetica-Bold')
+        .text(invoice.company?.name || 'PresuVoz Reformas S.L.', textStartX, 30, { width: 250 });
+
+      doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
+        .text(`NIF/CIF: ${invoice.company?.cif || 'B-41987654'}`, textStartX, 48)
+        .text(invoice.company?.address || 'Pol. Ind. El Pino, Nave 4 - Sevilla', textStartX, 59, { width: 250 })
+        .text(`Tel: ${invoice.company?.phone || '601 02 23 67'} | ${invoice.company?.email || 'facturas@presuvoz.app'}`, textStartX, 70);
 
       // Caja resumen de factura (derecha)
       doc.roundedRect(360, 25, 195, 75, 4).strokeColor(borderColor).stroke();
@@ -334,10 +353,10 @@ export function generateInvoicePDF(invoice) {
 
       doc.fontSize(7.5).fillColor(darkColor).font('Helvetica')
         .text(`• Titular: ${invoice.company?.name || 'PresuVoz Reformas S.L.'}`, 50, bankY + 22)
-        .text(`• Entidad: Banco Santander | Tipo: Transferencia`, 50, bankY + 33)
-        .text(`• IBAN: ES91 2100 0418 4502 0005 1332`, 50, bankY + 44)
+        .text(`• Forma: Transferencia bancaria`, 50, bankY + 33)
+        .text(`• IBAN: ${invoice.company?.iban || 'ES91 2100 0418 4502 0005 1332'}`, 50, bankY + 44)
         .text(`• Concepto: Pago ${invoice.id || 'Factura'}`, 50, bankY + 55)
-        .text(`• O pago inmediato por Bizum al 601 02 23 67`, 50, bankY + 66);
+        .text(`• O pago por Bizum al ${invoice.company?.bizum || invoice.company?.phone || '601 02 23 67'}`, 50, bankY + 66);
 
       // 7. Pie de página legal según RD 1619/2012
       doc.fontSize(6.5).fillColor('#94a3b8').font('Helvetica')
@@ -383,13 +402,22 @@ export function generateReceiptPDF(receipt) {
       doc.rect(0, 0, 595.28, 8).fill(primaryColor);
 
       // 2. Cabecera (Datos fiscales del emisor / perceptor)
-      doc.fontSize(16).fillColor(darkColor).font('Helvetica-Bold')
-        .text(receipt.company?.name || 'PresuVoz Reformas S.L.', 40, 30);
+      let textStartX = 40;
+      const logoPath = receipt.company?.logoPath;
+      if (logoPath && fs.existsSync(logoPath)) {
+        try {
+          doc.image(logoPath, 40, 24, { fit: [50, 50] });
+          textStartX = 100;
+        } catch (e) {}
+      }
 
-      doc.fontSize(8).fillColor(grayColor).font('Helvetica')
-        .text(`NIF/CIF: ${receipt.company?.cif || 'B-41987654'}`, 40, 50)
-        .text(receipt.company?.address || 'Pol. Ind. El Pino, Nave 4 - Sevilla', 40, 62)
-        .text('Tel: 601 02 23 67 | administracion@presuvoz.app', 40, 74);
+      doc.fontSize(14).fillColor(darkColor).font('Helvetica-Bold')
+        .text(receipt.company?.name || 'PresuVoz Reformas S.L.', textStartX, 30, { width: 250 });
+
+      doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
+        .text(`NIF/CIF: ${receipt.company?.cif || 'B-41987654'}`, textStartX, 48)
+        .text(receipt.company?.address || 'Pol. Ind. El Pino, Nave 4 - Sevilla', textStartX, 59, { width: 250 })
+        .text(`Tel: ${receipt.company?.phone || '601 02 23 67'} | ${receipt.company?.email || 'administracion@presuvoz.app'}`, textStartX, 70);
 
       // Caja resumen del recibo (derecha)
       doc.roundedRect(360, 25, 195, 75, 4).strokeColor(borderColor).stroke();
