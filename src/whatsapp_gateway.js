@@ -16,7 +16,7 @@ import pino from 'pino';
 import dotenv from 'dotenv';
 import { PresuVozEngine } from './engine.js';
 import { GEMINI_SYSTEM_PROMPT, GEMINI_UPDATE_PROMPT } from './ai_service.js';
-import { generateBudgetPDF } from './pdf_service.js';
+import { generateBudgetPDF, generateInvoicePDF } from './pdf_service.js';
 
 dotenv.config();
 
@@ -252,18 +252,122 @@ async function startWhatsAppGateway() {
 
   const botSentMessageIds = new Set();
   
-  // Memoria multi-presupuesto por chat:
-  // Map<remoteJid, { activeBudgetId: string|null, budgets: Map<string, object> }>
+  // Memoria multi-presupuesto y facturas por chat:
+  // Map<remoteJid, { activeBudgetId: string|null, budgets: Map<string, object>, invoices: Map<string, object> }>
   const userSessions = new Map();
 
   function getUserSession(remoteJid) {
     if (!userSessions.has(remoteJid)) {
       userSessions.set(remoteJid, {
         activeBudgetId: null,
-        budgets: new Map()
+        budgets: new Map(),
+        invoices: new Map()
       });
     }
     return userSessions.get(remoteJid);
+  }
+
+  function findBudgetInSession(session, query) {
+    if (!query || query.trim() === '') {
+      if (session.activeBudgetId && session.budgets.has(session.activeBudgetId)) {
+        return session.budgets.get(session.activeBudgetId);
+      }
+      if (session.budgets.size === 1) {
+        return Array.from(session.budgets.values())[0];
+      }
+      return null;
+    }
+    const q = query.toLowerCase().trim();
+    for (const [id, b] of session.budgets.entries()) {
+      if (id.toLowerCase().includes(q)) return b;
+      if (b.client?.name && b.client.name.toLowerCase().includes(q)) return b;
+    }
+    if (session.activeBudgetId && session.budgets.has(session.activeBudgetId)) {
+      return session.budgets.get(session.activeBudgetId);
+    }
+    return null;
+  }
+
+  async function emitInvoiceForBudget(sock, remoteJid, session, targetBudget, clientNif = null) {
+    if (!targetBudget) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: '⚠️ *No se encontró el presupuesto para facturar.*\n\nPor favor, indica el nombre del cliente o el número de presupuesto (ej: *"facturar presupuesto PRE-2026-5129"* o *"factura de José Luis"*).'
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      return;
+    }
+
+    try {
+      console.log(`🧾 Emitiendo factura legal para el presupuesto ${targetBudget.id}...`);
+      const invoice = engine.convertToInvoice(targetBudget, { clientNif });
+
+      if (!session.invoices) session.invoices = new Map();
+      session.invoices.set(invoice.id, invoice);
+
+      // Generar PDF formal de Factura
+      const invoicePdfBuffer = await generateInvoicePDF(invoice);
+      const invoiceFileName = `Factura_${invoice.id}.pdf`;
+
+      // Texto de resumen de factura para WhatsApp
+      const fin = invoice.financials || {};
+      const advance = fin.advanceAmount || 0;
+      const remaining = fin.remainingAmount !== undefined ? fin.remainingAmount : (fin.totalAmount || 0);
+
+      const invoiceMsgLines = [
+        `🧾 *FACTURA OFICIAL EMITIDA: ${invoice.id}*`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `👤 *Cliente:* ${invoice.client.name}`,
+        `📍 *Dirección:* ${invoice.client.address}`,
+        `📄 *Presupuesto de origen:* ${invoice.budgetId}`,
+        `📅 *Fecha emisión:* ${invoice.issueDate}`,
+        '',
+        `💰 *Base Imponible:* ${fin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
+        `📊 *IVA (${fin.taxRatePercentage}%):* ${fin.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
+        `🏷️ *TOTAL FACTURA:* *${fin.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`
+      ];
+
+      if (advance > 0) {
+        invoiceMsgLines.push(`💵 *Anticipo abonado:* -${advance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+        invoiceMsgLines.push(`💳 *TOTAL PENDIENTE DE COBRO:* *${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
+      }
+
+      invoiceMsgLines.push('');
+      invoiceMsgLines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+      invoiceMsgLines.push('🏦 *Datos bancarios para cobro:*');
+      invoiceMsgLines.push('• Banco Santander: *ES91 2100 0418 4502 0005 1332*');
+      invoiceMsgLines.push('• Bizum profesional: *601 02 23 67*');
+
+      const sentSummary = await sock.sendMessage(remoteJid, { text: invoiceMsgLines.join('\n') });
+      if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
+
+      // Enviar documento PDF de factura adjunto
+      const sentDoc = await sock.sendMessage(remoteJid, {
+        document: invoicePdfBuffer,
+        mimetype: 'application/pdf',
+        fileName: invoiceFileName,
+        caption: `🧾 *${invoiceFileName}*\nFactura legal formal conforme al RD 1619/2012 con validez fiscal ante Hacienda.`
+      });
+      if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
+
+      console.log(`✅ Factura ${invoice.id} (${invoicePdfBuffer.length} bytes) enviada por WhatsApp.`);
+
+      // Opciones posteriores
+      const followUpText = [
+        '👉 *Opciones disponibles:*',
+        '• Si quieres ver todos tus presupuestos y facturas responde *1*.',
+        '• Si quieres un presupuesto nuevo manda un audio o texto diciendo *presupuesto nuevo*.'
+      ].join('\n');
+
+      const sentOpts = await sock.sendMessage(remoteJid, { text: followUpText });
+      if (sentOpts?.key?.id) botSentMessageIds.add(sentOpts.key.id);
+
+    } catch (invErr) {
+      console.error('❌ Error generando factura:', invErr.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *No se pudo generar la factura:* ${invErr.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
   }
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -361,7 +465,7 @@ async function startWhatsAppGateway() {
           continue;
         }
 
-        let listText = '📂 *TUS PRESUPUESTOS GUARDADOS:*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        let listText = '📂 *TUS DOCUMENTOS GUARDADOS:*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         let idx = 1;
         for (const [id, b] of session.budgets.entries()) {
           const isActive = id === session.activeBudgetId ? ' 🟢 *(ACTIVO)*' : '';
@@ -369,10 +473,23 @@ async function startWhatsAppGateway() {
           const address = b.client?.address || 'Ubicación según visita';
           const total = b.financials?.totalAmount ? `${b.financials.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : 'A valorar';
           const status = b.isDraft ? 'Borrador' : 'Formal';
-          listText += `\n${idx}️⃣ *${id}*${isActive}\n   👤 ${clientName} (${address})\n   💰 Total: *${total}* (${status})\n`;
+          listText += `\n${idx}️⃣ *Presupuesto ${id}*${isActive}\n   👤 ${clientName} (${address})\n   💰 Total: *${total}* (${status})\n`;
           idx++;
         }
-        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para modificar alguno, solo di en un audio o texto: "En el de José Luis cambia..." o "En el presupuesto PRE-... ponle..."_\n💡 _Para crear uno nuevo, envía un audio o texto diciendo: "Presupuesto nuevo..."_';
+
+        if (session.invoices && session.invoices.size > 0) {
+          listText += '\n🧾 *FACTURAS OFICIALES EMITIDAS:*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+          let invIdx = 1;
+          for (const [invId, inv] of session.invoices.entries()) {
+            const clientName = inv.client?.name || 'Cliente';
+            const total = inv.financials?.totalAmount ? `${inv.financials.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '';
+            const status = inv.status === 'PAGADA' ? '✅ Pagada' : '⏳ Pendiente de cobro';
+            listText += `\n${invIdx}️⃣ *${invId}* (Ref: ${inv.budgetId})\n   👤 ${clientName}\n   💰 Total: *${total}* (${status})\n`;
+            invIdx++;
+          }
+        }
+
+        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para modificar un presupuesto di: "En el de José Luis cambia..."_\n💡 _Para emitir factura di: "Facturar el de José Luis" o "Factura PRE-..."_\n💡 _Para crear uno nuevo di: "Presupuesto nuevo..."_';
 
         const sentList = await sock.sendMessage(remoteJid, { text: listText });
         if (sentList?.key?.id) botSentMessageIds.add(sentList.key.id);
@@ -387,6 +504,23 @@ async function startWhatsAppGateway() {
         });
         if (sentReset?.key?.id) botSentMessageIds.add(sentReset.key.id);
         console.log(`🔄 Sesión puesta en modo NUEVO presupuesto para ${remoteJid}`);
+        continue;
+      }
+
+      // Comando directo para facturar: "factura", "facturar", "factura de José Luis", "facturar 5129"
+      const invoiceCmdMatch = rawUserText.match(/^(?:factura|facturar|emitir factura)(?:\s+(?:de\s+|del\s+presupuesto\s+|de\s+la\s+obra\s+de\s+|el\s+presupuesto\s+)?(.+))?$/i);
+      if (invoiceCmdMatch) {
+        if (session.budgets.size === 0) {
+          const sentNoBudget = await sock.sendMessage(remoteJid, {
+            text: '📂 *No tienes ningún presupuesto para facturar todavía.*\n\nPrimero genera un presupuesto con una obra y luego podrás emitir su factura oficial.'
+          });
+          if (sentNoBudget?.key?.id) botSentMessageIds.add(sentNoBudget.key.id);
+          continue;
+        }
+
+        const query = invoiceCmdMatch[1] ? invoiceCmdMatch[1].trim() : '';
+        const target = findBudgetInSession(session, query);
+        await emitInvoiceForBudget(sock, remoteJid, session, target);
         continue;
       }
 
@@ -458,6 +592,17 @@ async function startWhatsAppGateway() {
             console.log(`\n💬 Texto recibido: "${rawUserText}"`);
             aiResult = await callGemini(rawUserText, GEMINI_SYSTEM_PROMPT);
           }
+        }
+
+        // Si la IA detectó solicitud de facturación
+        if (aiResult?.action === 'invoice' || aiResult?.isInvoice) {
+          const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
+            || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
+            || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
+            || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
+
+          await emitInvoiceForBudget(sock, remoteJid, session, target, aiResult.clientNif);
+          continue;
         }
 
         if (!aiResult || !aiResult.items || aiResult.items.length === 0) {
@@ -591,8 +736,9 @@ async function startWhatsAppGateway() {
         // Enviar mensaje interactivo de opciones
         const optionsText = [
           '👉 *Opciones disponibles:*',
-          '• Si quieres ver todos tus presupuestos guardados responde *1*.',
+          '• Si quieres ver todos tus presupuestos y facturas responde *1*.',
           '• Si quieres modificar alguno di el número del presupuesto o el nombre del cliente.',
+          '• Para *emitir la factura oficial* de esta obra di *"facturar"* o *"factura de José Luis"*.',
           '• Si quieres uno nuevo manda un audio o texto comentando *presupuesto nuevo*.'
         ].join('\n');
 

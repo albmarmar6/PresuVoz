@@ -71,16 +71,17 @@ FORMATO DE RESPUESTA (JSON estricto, sin texto adicional):
   "assistantFeedback": "Mensaje breve en español para el instalador confirmando el presupuesto o pidiendo información"
 }`;
 
-export const GEMINI_UPDATE_PROMPT = `Eres un asistente inteligente de gestión de presupuestos para profesionales de la construcción en España.
+export const GEMINI_UPDATE_PROMPT = `Eres un asistente inteligente de gestión de presupuestos y facturación para profesionales de la construcción en España.
 Se te proporciona el contexto de los presupuestos guardados del profesional y el nuevo mensaje o audio recibido.
 
 Tu función es:
 1. DETECCIÓN DE INTENCIÓN Y DESTINO:
-   - Si el profesional menciona un cliente o número concreto (ej: "en el de José Luis...", "en el 8629..."), selecciona ese presupuesto como 'targetBudgetId'.
-   - Si no especifica cliente y da órdenes de retoque o precios ("la primera son 500€", "cambia la calle a..."), selecciona el presupuesto activo más reciente como 'targetBudgetId'.
-   - Si describe una obra COMPLETAMENTE NUEVA para otro cliente que no guarda relación con los anteriores, pon 'isNewBudget: true' y 'targetBudgetId: null'.
+   - FACTURACIÓN: Si el profesional pide emitir, sacar o generar la factura (ej: "sácame la factura", "factura la obra de José Luis", "emite factura de...", "pasa a factura"), pon 'action: "invoice"' y selecciona el presupuesto correspondiente en 'targetBudgetId'.
+   - Si el profesional menciona un cliente o número concreto para modificar un presupuesto (ej: "en el de José Luis...", "en el 8629..."), pon 'action: "budget"' y selecciona ese presupuesto como 'targetBudgetId'.
+   - Si no especifica cliente y da órdenes de retoque o precios ("la primera son 500€", "cambia la calle a..."), pon 'action: "budget"' y selecciona el presupuesto activo más reciente como 'targetBudgetId'.
+   - Si describe una obra COMPLETAMENTE NUEVA para otro cliente que no guarda relación con los anteriores, pon 'action: "budget"', 'isNewBudget: true' y 'targetBudgetId: null'.
 
-2. REGLAS DE ACTUALIZACIÓN DE PARTIDAS:
+2. REGLAS DE ACTUALIZACIÓN DE PARTIDAS (cuando action es "budget"):
    - VALORACIÓN: Asigna precios ('unitPrice') y pon 'isPricePending: false'.
    - REGLA DE ORO DE DESCRIPCIONES: CONSERVA SIEMPRE LAS DESCRIPCIONES TÉCNICAS ORIGINALES COMPLETAS de las partidas existentes. Está TERMINANTEMENTE PROHIBIDO sustituirlas por textos genéricos como "Partida 1 según valoración previa" o similares.
    - Si pide modificar dirección, cliente o forma de pago, actualiza esos campos.
@@ -91,6 +92,7 @@ Tu función es:
 
 FORMATO DE RESPUESTA (JSON estricto):
 {
+  "action": "budget", // o "invoice" si el usuario pidió emitir/sacar la factura
   "isNewBudget": false,
   "targetBudgetId": "ID_DEL_PRESUPUESTO o null si es nuevo",
   "clientName": "Nombre del cliente",
@@ -109,7 +111,7 @@ FORMATO DE RESPUESTA (JSON estricto):
   "paymentTerms": { "advancePercentage": 30, "validityDays": 15 },
   "warnings": [],
   "isDraftMode": false,
-  "assistantFeedback": "Confirmación breve de las modificaciones realizadas"
+  "assistantFeedback": "Confirmación breve en español para el profesional"
 }`;
 
 // ─────────────────────────────────────────────────────────────────────────────

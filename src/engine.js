@@ -323,4 +323,69 @@ export class PresuVozEngine {
   updateBudgetPrice(budget, updateText) {
     return this.updateBudget(budget, updateText);
   }
+
+  /**
+   * Convierte un presupuesto en una Factura legal formal
+   * @param {object} budget - Objeto presupuesto original
+   * @param {object} [options] - Opciones adicionales (clientNif, operationDate, etc.)
+   * @returns {object} Objeto factura formal
+   */
+  convertToInvoice(budget, options = {}) {
+    if (!budget || !budget.items) {
+      throw new Error('No se puede generar factura sin un presupuesto base válido.');
+    }
+
+    const year = new Date().getFullYear();
+    const invoiceCounter = options.invoiceNumber || (Math.floor(100 + Math.random() * 900));
+    const invoiceId = `FAC-${year}-${String(invoiceCounter).padStart(4, '0')}`;
+
+    const today = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const operationDate = options.operationDate || today;
+
+    const fin = budget.financials || {};
+    const totalAmount = fin.totalAmount || 0;
+    const advanceAmount = options.advanceAmount !== undefined ? options.advanceAmount : (fin.advanceAmount || 0);
+    const remainingAmount = Number(Math.max(0, totalAmount - advanceAmount).toFixed(2));
+
+    const invoice = {
+      id: invoiceId,
+      budgetId: budget.id || 'PRE-2026',
+      issueDate: today,
+      operationDate,
+      company: {
+        ...this.company,
+        ...(options.company || {})
+      },
+      client: {
+        name: options.clientName || budget.client?.name || 'Cliente Particular',
+        address: options.clientAddress || budget.client?.address || 'Ubicación según visita',
+        nif: options.clientNif || budget.client?.nif || 'Consignado en contrato',
+        phone: options.clientPhone || budget.client?.phone || null,
+        email: options.clientEmail || budget.client?.email || null
+      },
+      items: budget.items.map(item => ({
+        id: item.id,
+        description: item.description,
+        qty: item.qty || 1,
+        unit: item.unit || 'pa',
+        unitPrice: item.unitPrice || 0,
+        total: item.total || 0
+      })),
+      financials: {
+        subtotal: fin.subtotal || 0,
+        discountPercentage: fin.discountPercentage || 0,
+        discountAmount: fin.discountAmount || 0,
+        taxableBase: fin.taxableBase || 0,
+        taxRatePercentage: fin.taxRatePercentage || 10,
+        taxAmount: fin.taxAmount || 0,
+        totalAmount,
+        advanceAmount,
+        remainingAmount
+      },
+      status: remainingAmount === 0 ? 'PAGADA' : 'PENDIENTE_PAGO',
+      paymentMethod: options.paymentMethod || 'Transferencia bancaria / Bizum'
+    };
+
+    return invoice;
+  }
 }
