@@ -349,3 +349,149 @@ export function generateInvoicePDF(invoice) {
     }
   });
 }
+
+/**
+ * Genera un Buffer con el PDF formal de un Recibo Oficial de Pago / Justificante de Cobro
+ * @param {object} receipt - Datos del recibo y conciliación de saldos
+ * @returns {Promise<Buffer>}
+ */
+export function generateReceiptPDF(receipt) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({
+        size: 'A4',
+        margin: 40,
+        info: {
+          Title: `Recibo ${receipt.id || 'REC-2026'}`,
+          Author: receipt.company?.name || 'PresuVoz',
+          Subject: 'Justificante de cobro y entrega a cuenta'
+        }
+      });
+
+      const buffers = [];
+      doc.on('data', (chunk) => buffers.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(buffers)));
+      doc.on('error', (err) => reject(err));
+
+      const primaryColor = '#0d9488'; // Teal 600 (confirmación formal de pago)
+      const darkColor    = '#0f172a'; // Slate 900
+      const grayColor    = '#64748b'; // Slate 500
+      const borderColor  = '#cbd5e1'; // Slate 300
+      const isSettled    = (receipt.remainingBalance || 0) <= 0;
+
+      // 1. Barra superior decorativa verde azulada
+      doc.rect(0, 0, 595.28, 8).fill(primaryColor);
+
+      // 2. Cabecera (Datos fiscales del emisor / perceptor)
+      doc.fontSize(16).fillColor(darkColor).font('Helvetica-Bold')
+        .text(receipt.company?.name || 'PresuVoz Reformas S.L.', 40, 30);
+
+      doc.fontSize(8).fillColor(grayColor).font('Helvetica')
+        .text(`NIF/CIF: ${receipt.company?.cif || 'B-41987654'}`, 40, 50)
+        .text(receipt.company?.address || 'Pol. Ind. El Pino, Nave 4 - Sevilla', 40, 62)
+        .text('Tel: 601 02 23 67 | administracion@presuvoz.app', 40, 74);
+
+      // Caja resumen del recibo (derecha)
+      doc.roundedRect(360, 25, 195, 75, 4).strokeColor(borderColor).stroke();
+      doc.fontSize(8).fillColor(primaryColor).font('Helvetica-Bold')
+        .text('JUSTIFICANTE DE PAGO', 370, 33);
+      doc.fontSize(13).fillColor(darkColor).font('Helvetica-Bold')
+        .text(receipt.id || 'REC-2026-0001', 370, 46);
+      doc.fontSize(8).fillColor(grayColor).font('Helvetica')
+        .text(`Fecha cobro: ${receipt.date || new Date().toLocaleDateString('es-ES')}`, 370, 63)
+        .text(`Método: ${receipt.method || 'Transferencia'}`, 370, 74)
+        .text(`Ref: ${receipt.budgetId || 'Obra particular'}`, 370, 85);
+
+      // 3. Bloque Cliente / Pagador
+      const clientY = 112;
+      doc.roundedRect(40, clientY, 515, 58, 4).fillColor('#f8fafc').fillAndStroke('#f8fafc', borderColor);
+
+      doc.fontSize(8).fillColor(primaryColor).font('Helvetica-Bold')
+        .text('DATOS DEL PAGADOR / CLIENTE', 50, clientY + 8);
+
+      doc.fontSize(9).fillColor(darkColor).font('Helvetica-Bold')
+        .text(`Recibí de: ${receipt.client?.name || 'Cliente Particular'}`, 50, clientY + 22);
+
+      doc.fontSize(8).fillColor(grayColor).font('Helvetica')
+        .text(`Ubicación de los trabajos: ${receipt.client?.address || 'Ubicación según visita'}`, 50, clientY + 36);
+
+      // 4. Banner Destacado del Pago Realizado
+      const bannerY = 185;
+      doc.roundedRect(40, bannerY, 515, 80, 6).fillColor('#f0fdfa').fillAndStroke('#f0fdfa', primaryColor);
+
+      doc.fontSize(9).fillColor(primaryColor).font('Helvetica-Bold')
+        .text('IMPORTE RECIBIDO Y JUSTIFICADO:', 60, bannerY + 14);
+
+      doc.fontSize(22).fillColor(darkColor).font('Helvetica-Bold')
+        .text(`+${(receipt.amount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 60, bannerY + 28);
+
+      doc.fontSize(8.5).fillColor(grayColor).font('Helvetica')
+        .text(`Concepto: ${receipt.concept || 'Entrega a cuenta para trabajos de reforma'}`, 60, bannerY + 56);
+
+      // 5. Tabla de Conciliación de Saldos
+      let tableY = 285;
+      doc.fontSize(9).fillColor(darkColor).font('Helvetica-Bold')
+        .text('ESTADO Y CONCILIACIÓN DE LA CUENTA', 40, tableY);
+
+      tableY += 16;
+      doc.rect(40, tableY, 515, 22).fill(darkColor);
+      doc.fontSize(8).fillColor('#ffffff').font('Helvetica-Bold')
+        .text('CONCEPTO ECONÓMICO', 50, tableY + 7, { width: 320 })
+        .text('IMPORTE', 430, tableY + 7, { width: 115, align: 'right' });
+
+      tableY += 22;
+
+      const rows = [
+        { label: 'Importe Total Presupuestado de la Obra (IVA incl.):', value: `${(receipt.totalAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, bold: false, color: darkColor },
+        { label: 'Total Abonado Anteriormente por el Cliente:', value: `${(receipt.previouslyPaid || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, bold: false, color: grayColor },
+        { label: 'Importe Abonado en este Acto (este recibo):', value: `+${(receipt.amount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, bold: true, color: primaryColor },
+        { label: 'Total Acumulado Satisfecho hasta la fecha:', value: `${(receipt.totalPaid || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, bold: true, color: darkColor }
+      ];
+
+      rows.forEach((r, idx) => {
+        if (idx % 2 === 1) doc.rect(40, tableY, 515, 24).fill('#f8fafc');
+        doc.fontSize(8.5).fillColor(r.color).font(r.bold ? 'Helvetica-Bold' : 'Helvetica')
+          .text(r.label, 50, tableY + 7, { width: 360 })
+          .text(r.value, 430, tableY + 7, { width: 115, align: 'right' });
+        doc.moveTo(40, tableY + 24).lineTo(555, tableY + 24).strokeColor('#e2e8f0').stroke();
+        tableY += 24;
+      });
+
+      // Cuadro de Saldo Pendiente o Liquidación
+      tableY += 15;
+      const statusBoxColor = isSettled ? '#059669' : '#e0f2fe';
+      const statusTextColor = isSettled ? '#ffffff' : '#0369a1';
+      const statusBorderColor = isSettled ? '#047857' : '#bae6fd';
+
+      doc.roundedRect(40, tableY, 515, 36, 4).fillColor(statusBoxColor).fillAndStroke(statusBoxColor, statusBorderColor);
+      doc.fontSize(9.5).fillColor(statusTextColor).font('Helvetica-Bold')
+        .text(isSettled ? '✅ OBRA TOTALMENTE LIQUIDADA Y PAGADA' : '⏳ PENDIENTE DE PAGO RESTANTE:', 55, tableY + 12);
+      
+      const remainingStr = `${(receipt.remainingBalance || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`;
+      doc.fontSize(11).fillColor(statusTextColor).font('Helvetica-Bold')
+        .text(isSettled ? '0,00 €' : remainingStr, 400, tableY + 11, { width: 145, align: 'right' });
+
+      // 6. Sección de Firmas y Justificación
+      const signY = 560;
+      doc.roundedRect(40, signY, 240, 100, 4).strokeColor(borderColor).stroke();
+      doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
+        .text('POR LA EMPRESA PERCEPTORA', 50, signY + 10)
+        .text('Firma y Sello (Recibí):', 50, signY + 25)
+        .text(receipt.company?.name || 'PresuVoz Reformas S.L.', 50, signY + 80);
+
+      doc.roundedRect(315, signY, 240, 100, 4).strokeColor(borderColor).stroke();
+      doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
+        .text('CONFORME DEL CLIENTE / PAGADOR', 325, signY + 10)
+        .text('Firma:', 325, signY + 25)
+        .text(receipt.client?.name || 'Cliente Particular', 325, signY + 80);
+
+      // 7. Pie legal
+      doc.fontSize(6.5).fillColor('#94a3b8').font('Helvetica')
+        .text('Este documento constituye justificante liberatorio de pago por el importe consignado según los arts. 1.156 y concordantes del Código Civil. Cumple con la Ley 11/2021 de prevención y lucha contra el fraude fiscal.', 40, 785, { align: 'center', width: 515 });
+
+      doc.end();
+    } catch (e) {
+      reject(e);
+    }
+  });
+}

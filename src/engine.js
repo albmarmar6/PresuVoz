@@ -207,6 +207,12 @@ export class PresuVozEngine {
         validityDays: terms.validityDays,
         conditions: rawInput.customConditions || terms.textConditions
       },
+      payments: [],
+      paymentSummary: {
+        totalPaid: 0,
+        remainingBalance: totalAmount,
+        status: 'PENDIENTE'
+      },
       isDraft,
       status: isDraft ? "BORRADOR_MEDICION" : "PENDIENTE_FIRMA",
       signUrl: `https://presuvoz.app/f/${Math.random().toString(36).substring(2, 9)}`,
@@ -387,5 +393,107 @@ export class PresuVozEngine {
     };
 
     return invoice;
+  }
+
+  /**
+   * Registra un pago/anticipo asociado a un presupuesto y actualiza sus saldos
+   * @param {object} budget - Objeto presupuesto
+   * @param {object} paymentData - { amount, method, concept, date, notes }
+   * @returns {object} { receipt, budget }
+   */
+  registerPayment(budget, paymentData = {}) {
+    if (!budget) {
+      throw new Error('No se puede registrar un cobro sin un presupuesto de referencia.');
+    }
+
+    const amount = Number(paymentData.amount);
+    if (isNaN(amount) || amount <= 0) {
+      throw new Error('El importe del cobro debe ser un número positivo.');
+    }
+
+    if (!budget.payments) budget.payments = [];
+    if (!budget.paymentSummary) {
+      budget.paymentSummary = {
+        totalPaid: 0,
+        remainingBalance: budget.financials?.totalAmount || 0,
+        status: 'PENDIENTE'
+      };
+    }
+
+    const totalAmount = budget.financials?.totalAmount || 0;
+    const previouslyPaid = budget.payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const newTotalPaid = Number((previouslyPaid + amount).toFixed(2));
+    const newRemaining = Number(Math.max(0, totalAmount - newTotalPaid).toFixed(2));
+
+    let newStatus = 'PARCIAL';
+    if (newRemaining === 0) {
+      newStatus = 'LIQUIDADO';
+    } else if (newTotalPaid === 0) {
+      newStatus = 'PENDIENTE';
+    }
+
+    const year = new Date().getFullYear();
+    const receiptId = `REC-${year}-${String(Math.floor(100 + Math.random() * 900))}`;
+    const dateStr = paymentData.date || new Date().toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' });
+
+    const receipt = {
+      id: receiptId,
+      budgetId: budget.id || 'PRE-2026',
+      date: dateStr,
+      amount,
+      method: paymentData.method || 'Bizum',
+      concept: paymentData.concept || (previouslyPaid === 0 ? 'Anticipo para acopio de materiales' : 'Entrega a cuenta de trabajos'),
+      previouslyPaid,
+      totalPaid: newTotalPaid,
+      totalAmount,
+      remainingBalance: newRemaining,
+      status: newStatus,
+      client: budget.client || {},
+      company: budget.company || this.company
+    };
+
+    budget.payments.push({
+      id: receiptId,
+      amount,
+      method: receipt.method,
+      concept: receipt.concept,
+      date: dateStr
+    });
+
+    budget.paymentSummary = {
+      totalPaid: newTotalPaid,
+      remainingBalance: newRemaining,
+      status: newStatus
+    };
+
+    return { receipt, budget };
+  }
+
+  /**
+   * Obtiene un resumen claro del estado de pagos y deuda de un presupuesto
+   * @param {object} budget
+   * @returns {object}
+   */
+  getPaymentSummary(budget) {
+    if (!budget) return null;
+    const totalAmount = budget.financials?.totalAmount || 0;
+    const payments = budget.payments || [];
+    const totalPaid = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const remainingBalance = Number(Math.max(0, totalAmount - totalPaid).toFixed(2));
+
+    let status = 'PENDIENTE';
+    if (remainingBalance === 0 && totalAmount > 0) status = 'LIQUIDADO';
+    else if (totalPaid > 0) status = 'PARCIAL';
+
+    return {
+      budgetId: budget.id,
+      clientName: budget.client?.name || 'Cliente Particular',
+      totalAmount,
+      totalPaid,
+      remainingBalance,
+      status,
+      paymentsCount: payments.length,
+      payments
+    };
   }
 }

@@ -16,7 +16,7 @@ import pino from 'pino';
 import dotenv from 'dotenv';
 import { PresuVozEngine } from './engine.js';
 import { GEMINI_SYSTEM_PROMPT, GEMINI_UPDATE_PROMPT } from './ai_service.js';
-import { generateBudgetPDF, generateInvoicePDF } from './pdf_service.js';
+import { generateBudgetPDF, generateInvoicePDF, generateReceiptPDF } from './pdf_service.js';
 
 dotenv.config();
 
@@ -370,6 +370,128 @@ async function startWhatsAppGateway() {
     }
   }
 
+  async function handlePaymentRegistration(sock, remoteJid, session, targetBudget, paymentInfo = {}) {
+    if (!targetBudget) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: '⚠️ *No se encontró el presupuesto para registrar el cobro.*\n\nPor favor, indica el nombre del cliente o número de obra (ej: *"cobro 1.500€ de José Luis"* o *"apunta pago de 800€ para PRE-2026-..."*).'
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      return;
+    }
+
+    const amount = Number(paymentInfo.amount);
+    if (!amount || isNaN(amount) || amount <= 0) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: '⚠️ *Importe de cobro no detectado o inválido.*\n\nPor favor, especifica la cantidad que te han pagado (ej: *"José Luis me ha pagado 1.500€ por Bizum"*).'
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      return;
+    }
+
+    try {
+      console.log(`💰 Registrando cobro de ${amount} € para el presupuesto ${targetBudget.id}...`);
+      const { receipt } = engine.registerPayment(targetBudget, paymentInfo);
+
+      // Generar PDF formal del recibo
+      const receiptPdfBuffer = await generateReceiptPDF(receipt);
+      const receiptFileName = `Recibo_${receipt.id}.pdf`;
+
+      const isSettled = receipt.status === 'LIQUIDADO';
+      const statusEmoji = isSettled ? '✅' : '⏳';
+      const statusTitle = isSettled ? '*¡OBRA TOTALMENTE LIQUIDADA Y COBRADA!*' : '*PAGO A CUENTA REGISTRADO*';
+
+      const paymentMsgLines = [
+        `💰 ${statusTitle}`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `👤 *Cliente:* ${receipt.client?.name || 'Cliente'}`,
+        `📍 *Dirección:* ${receipt.client?.address || 'Ubicación de obra'}`,
+        `📄 *Presupuesto:* ${receipt.budgetId}`,
+        `💵 *Importe recibido:* *+${receipt.amount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
+        `💳 *Método de pago:* ${receipt.method}`,
+        `📝 *Concepto:* ${receipt.concept}`,
+        `📅 *Fecha:* ${receipt.date}`,
+        '',
+        '📊 *ESTADO ACTUAL DE LA CUENTA:*',
+        `• Total obra presupuestado: ${receipt.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
+        `• Total cobrado acumulado: ${receipt.totalPaid.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
+        `• ${statusEmoji} *SALDO PENDIENTE:* *${receipt.remainingBalance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        '📄 _Se adjunta el Recibo Oficial en PDF para reenviar al cliente como justificante._'
+      ];
+
+      const sentSummary = await sock.sendMessage(remoteJid, { text: paymentMsgLines.join('\n') });
+      if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
+
+      // Enviar documento PDF del recibo
+      const sentDoc = await sock.sendMessage(remoteJid, {
+        document: receiptPdfBuffer,
+        mimetype: 'application/pdf',
+        fileName: receiptFileName,
+        caption: `📄 *${receiptFileName}*\nJustificante oficial de cobro expedido por ${receipt.company?.name || 'la empresa'}.`
+      });
+      if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
+
+      console.log(`✅ Recibo ${receipt.id} (${receiptPdfBuffer.length} bytes) enviado por WhatsApp.`);
+
+      // Opciones posteriores
+      const followUpText = [
+        '👉 *Opciones disponibles:*',
+        '• Si quieres ver el resumen de todas tus cuentas responde *1*.',
+        '• Para emitir la factura final di *"facturar"*.',
+        '• Si quieres un presupuesto nuevo di *presupuesto nuevo*.'
+      ].join('\n');
+
+      const sentOpts = await sock.sendMessage(remoteJid, { text: followUpText });
+      if (sentOpts?.key?.id) botSentMessageIds.add(sentOpts.key.id);
+
+    } catch (payErr) {
+      console.error('❌ Error registrando cobro:', payErr.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *No se pudo registrar el cobro:* ${payErr.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
+  async function handleQueryBalance(sock, remoteJid, session, targetBudget) {
+    if (!targetBudget) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: '⚠️ *No se encontró el presupuesto para consultar el saldo.*\n\nPor favor, indica el nombre del cliente (ej: *"¿cuánto me debe José Luis?"*).'
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      return;
+    }
+
+    const summary = engine.getPaymentSummary(targetBudget);
+    const isSettled = summary.status === 'LIQUIDADO';
+    const statusEmoji = isSettled ? '✅' : (summary.status === 'PARCIAL' ? '⏳' : '🔴');
+    const statusText = isSettled ? 'Totalmente pagado (sin deuda)' : (summary.status === 'PARCIAL' ? 'Pago parcial' : 'Pendiente de cobro íntegro');
+
+    const lines = [
+      `📊 *ESTADO DE CUENTA: ${summary.clientName}*`,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `📄 *Presupuesto:* ${summary.budgetId}`,
+      `💰 *Total de la obra:* ${summary.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
+      `💵 *Total cobrado:* ${summary.totalPaid.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
+      `📌 *Estado:* ${statusEmoji} ${statusText}`,
+      '',
+      `⚠️ *SALDO PENDIENTE DE COBRO:* *${summary.remainingBalance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━'
+    ];
+
+    if (summary.payments && summary.payments.length > 0) {
+      lines.push('🧾 *Pagos registrados:*');
+      summary.payments.forEach((p, idx) => {
+        lines.push(`${idx + 1}. ${p.date}: *+${p.amount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €* (${p.method} - ${p.concept})`);
+      });
+    } else {
+      lines.push('ℹ️ _Aún no se ha registrado ningún cobro para este cliente._');
+    }
+
+    const sentSummary = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+    if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
+  }
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     // Aceptar tanto 'notify' (mensajes de terceros) como 'append' (mensajes a ti mismo desde tu móvil)
     if (type !== 'notify' && type !== 'append') return;
@@ -473,7 +595,14 @@ async function startWhatsAppGateway() {
           const address = b.client?.address || 'Ubicación según visita';
           const total = b.financials?.totalAmount ? `${b.financials.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : 'A valorar';
           const status = b.isDraft ? 'Borrador' : 'Formal';
-          listText += `\n${idx}️⃣ *Presupuesto ${id}*${isActive}\n   👤 ${clientName} (${address})\n   💰 Total: *${total}* (${status})\n`;
+
+          const paid = b.paymentSummary?.totalPaid || 0;
+          const remaining = b.paymentSummary?.remainingBalance !== undefined ? b.paymentSummary.remainingBalance : (b.financials?.totalAmount || 0);
+          const payBadge = b.paymentSummary?.status === 'LIQUIDADO'
+            ? ' | 🟢 *COBRADO*'
+            : (paid > 0 ? ` | ⏳ *Pendiente:* ${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '');
+
+          listText += `\n${idx}️⃣ *Presupuesto ${id}*${isActive}\n   👤 ${clientName} (${address})\n   💰 Total: *${total}* (${status})${payBadge}\n`;
           idx++;
         }
 
@@ -489,7 +618,7 @@ async function startWhatsAppGateway() {
           }
         }
 
-        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para modificar un presupuesto di: "En el de José Luis cambia..."_\n💡 _Para emitir factura di: "Facturar el de José Luis" o "Factura PRE-..."_\n💡 _Para crear uno nuevo di: "Presupuesto nuevo..."_';
+        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para registrar un cobro di: "Apunta 1.500€ de José Luis por Bizum"_\n💡 _Para consultar deuda di: "¿Cuánto me debe José Luis?"_\n💡 _Para facturar di: "Facturar el de José Luis"_\n💡 _Para crear uno nuevo di: "Presupuesto nuevo..."_';
 
         const sentList = await sock.sendMessage(remoteJid, { text: listText });
         if (sentList?.key?.id) botSentMessageIds.add(sentList.key.id);
@@ -504,6 +633,46 @@ async function startWhatsAppGateway() {
         });
         if (sentReset?.key?.id) botSentMessageIds.add(sentReset.key.id);
         console.log(`🔄 Sesión puesta en modo NUEVO presupuesto para ${remoteJid}`);
+        continue;
+      }
+
+      // Comando directo para registrar cobro: ej. "cobro 1500", "pago 1000 Jose Luis Bizum", "anticipo 800 transferencia"
+      const paymentCmdMatch = rawUserText.match(/^(?:cobro|pago|cobrado|pagado|ingreso|anticipo)\s+(\d+(?:[.,]\d+)?)\s*(?:€|euros?)?(?:\s+(?:de|por|en|para)?\s*(.+))?$/i);
+      if (paymentCmdMatch) {
+        if (session.budgets.size === 0) {
+          const sentNoBudg = await sock.sendMessage(remoteJid, {
+            text: '📂 *No tienes ningún presupuesto activo para registrar cobros.*\n\nPrimero crea una obra y luego podrás apuntar los anticipos y pagos.'
+          });
+          if (sentNoBudg?.key?.id) botSentMessageIds.add(sentNoBudg.key.id);
+          continue;
+        }
+
+        const rawAmount = paymentCmdMatch[1].replace(',', '.');
+        const amount = parseFloat(rawAmount);
+        const rest = (paymentCmdMatch[2] || '').trim();
+
+        let method = 'Bizum';
+        if (/transferencia|banco|cuenta/i.test(rest)) method = 'Transferencia';
+        else if (/efectivo|met[aá]lico|mano/i.test(rest)) method = 'Efectivo';
+        else if (/bizum/i.test(rest)) method = 'Bizum';
+
+        const cleanQuery = rest.replace(/bizum|transferencia|efectivo|met[aá]lico|en\s+mano/gi, '').trim();
+        const target = findBudgetInSession(session, cleanQuery);
+
+        await handlePaymentRegistration(sock, remoteJid, session, target, {
+          amount,
+          method,
+          concept: 'Entrega a cuenta de trabajos'
+        });
+        continue;
+      }
+
+      // Comando directo para consultar saldo o deuda: ej. "¿cuánto me debe José Luis?", "deuda José Luis", "saldo"
+      const balanceCmdMatch = rawUserText.match(/^(?:[¿?]?(?:cu[aá]nto\s+me\s+debe|deuda|saldo|pagos|estado\s+de\s+cuenta)\s*(?:de\s+)?(.+)?)$/i);
+      if (balanceCmdMatch) {
+        const query = (balanceCmdMatch[1] || '').replace(/[?¿]/g, '').trim();
+        const target = findBudgetInSession(session, query);
+        await handleQueryBalance(sock, remoteJid, session, target);
         continue;
       }
 
@@ -602,6 +771,28 @@ async function startWhatsAppGateway() {
             || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
 
           await emitInvoiceForBudget(sock, remoteJid, session, target, aiResult.clientNif);
+          continue;
+        }
+
+        // Si la IA detectó registro de cobro o anticipo
+        if (aiResult?.action === 'payment') {
+          const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
+            || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
+            || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
+            || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
+
+          await handlePaymentRegistration(sock, remoteJid, session, target, aiResult.paymentInfo || {});
+          continue;
+        }
+
+        // Si la IA detectó consulta de saldo o deuda
+        if (aiResult?.action === 'query_balance') {
+          const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
+            || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
+            || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
+            || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
+
+          await handleQueryBalance(sock, remoteJid, session, target);
           continue;
         }
 
@@ -736,9 +927,9 @@ async function startWhatsAppGateway() {
         // Enviar mensaje interactivo de opciones
         const optionsText = [
           '👉 *Opciones disponibles:*',
-          '• Si quieres ver todos tus presupuestos y facturas responde *1*.',
-          '• Si quieres modificar alguno di el número del presupuesto o el nombre del cliente.',
-          '• Para *emitir la factura oficial* de esta obra di *"facturar"* o *"factura de José Luis"*.',
+          '• Si quieres ver todos tus presupuestos, facturas y saldos responde *1*.',
+          '• Para *registrar un cobro/anticipo* di: *"José Luis me ha pagado 1.500€ por Bizum"*.',
+          '• Para *emitir la factura oficial* di: *"facturar"*.',
           '• Si quieres uno nuevo manda un audio o texto comentando *presupuesto nuevo*.'
         ].join('\n');
 
