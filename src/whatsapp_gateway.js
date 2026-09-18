@@ -16,9 +16,15 @@ import pino from 'pino';
 import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
+import { Resend } from 'resend';
 import { PresuVozEngine } from './engine.js';
 import { GEMINI_SYSTEM_PROMPT, GEMINI_UPDATE_PROMPT } from './ai_service.js';
-import { generateBudgetPDF, generateInvoicePDF, generateReceiptPDF } from './pdf_service.js';
+import {
+  generateBudgetPDF,
+  generateInvoicePDF,
+  generateReceiptPDF,
+  generateQuarterTaxPDF
+} from './pdf_service.js';
 import {
   getCompany,
   saveCompany,
@@ -29,7 +35,9 @@ import {
   getInvoice,
   listInvoices,
   savePayment,
-  getPayments
+  getPayments,
+  getQuarterInvoices,
+  generateQuarterCSV
 } from './db_service.js';
 
 dotenv.config();
@@ -38,6 +46,8 @@ const makeWASocket = makeWASocketPkg.default || makeWASocketPkg;
 const engine = new PresuVozEngine();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 const PRESUVOZ_BACKEND_URL = process.env.PRESUVOZ_BACKEND_URL || 'https://presuvoz.vercel.app';
 const SAFE_MODE = (process.env.SAFE_MODE ?? 'true').toLowerCase() === 'true';
 const ALLOWED_NUMBERS = (process.env.ALLOWED_NUMBERS || '')
@@ -311,9 +321,10 @@ async function startWhatsAppGateway() {
       `✉️ *Email:* ${company.email}`,
       `🏦 *IBAN para cobros:* ${company.iban}`,
       `📱 *Bizum profesional:* ${company.bizum}`,
+      `📧 *Email de tu Gestoría:* ${company.gestoriaEmail ? `*${company.gestoriaEmail}*` : '❌ _No configurado_'}`,
       `🖼️ *Logotipo:* ${hasLogo ? '✅ Configurado (se incluye en tus PDFs)' : '❌ Sin logotipo (envía una foto con el texto "logo")'}`,
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      '💡 _Para modificar tus datos fiscales o bancarios di:_\n*"Configurar empresa Nombre Reformas Pepe, CIF B-12345678, IBAN ES91..."* o *"Mi Bizum es 612345678"*.\n💡 _Para poner tu logo, envía una foto con el texto "logo"._'
+      '💡 _Para modificar datos di: "Configurar empresa Nombre..., CIF..., IBAN..."_\n💡 _Para guardar email de tu gestor di: "Mi gestoría es info@asesoria.com"_\n💡 _Para exportar el trimestre di: "Gestoría" o "Exportar 3T"_\n💡 _Para poner tu logo, envía una foto con el texto "logo"._'
     ].join('\n');
   }
 
@@ -555,6 +566,165 @@ async function startWhatsAppGateway() {
     if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
   }
 
+  function formatQuarterSummaryForWhatsApp(company, quarterData) {
+    const s = quarterData.summary;
+    const formatEur = (n) => `${Number(n || 0).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+
+    const lines = [
+      `📊 *INFORME FISCAL PARA GESTORÍA — ${quarterData.quarterLabel}*`,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `🏢 *Empresa:* ${company.name || 'Empresa'} (${company.cif || 'Sin CIF'})`,
+      `📅 *Periodo:* ${quarterData.startDateFormatted} al ${quarterData.endDateFormatted}`,
+      '',
+      '📈 *LIQUIDACIÓN ESTIMADA IVA (MOD. 303):*',
+      `• Facturas emitidas: *${s.totalInvoices}*`,
+      `• Base Imponible Total: *${formatEur(s.totalTaxableBase)}*`,
+      `• Cuota IVA al 10% (reducido): ${formatEur(s.tax10)} _(Base: ${formatEur(s.base10)})_`,
+      `• Cuota IVA al 21% (general): ${formatEur(s.tax21)} _(Base: ${formatEur(s.base21)})_`,
+      `📌 *TOTAL IVA REPERCUTIDO A DECLARAR:* *${formatEur(s.totalTaxAmount)}*`,
+      `🏷️ *TOTAL FACTURADO:* *${formatEur(s.totalAmount)}*`,
+      '',
+      '💳 *ESTADO DE COBROS Y TESORERÍA:*',
+      `• Cobrado acumulado: *${formatEur(s.totalPaid)}* (${s.paidCount} cobradas)`,
+      `• ${s.totalRemaining > 0 ? '⏳' : '✅'} Saldo pendiente de cobro: *${formatEur(s.totalRemaining)}* (${s.pendingCount} pendientes)`
+    ];
+
+    lines.push('');
+    lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+    lines.push('📎 _Te adjunto el **Libro de Facturas en Excel (CSV)** y el **Informe Oficial en PDF** listos para enviar a tu gestor._');
+
+    if (company.gestoriaEmail) {
+      lines.push(`\n📧 *Email de tu gestoría configurado:* ${company.gestoriaEmail}`);
+      lines.push('💡 _Para enviárselo directamente por correo di: "Enviar a mi gestoría"_');
+    } else {
+      lines.push('\n💡 _Si quieres enviarlo por email con 1 clic, guarda el correo de tu gestor diciendo:_\n*"Mi gestoría es despacho@asesoria.com"*');
+    }
+
+    return lines.join('\n');
+  }
+
+  async function handleQuarterExport(sock, remoteJid, session, quarterInput = null, yearInput = null, sendToGestoria = false) {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const quarterData = getQuarterInvoices(cleanPhone, quarterInput, yearInput);
+
+      console.log(`📊 Generando exportación fiscal para ${cleanPhone} (${quarterData.quarterLabel})... Facturas: ${quarterData.invoices.length}`);
+
+      if (quarterData.invoices.length === 0) {
+        const sentEmpty = await sock.sendMessage(remoteJid, {
+          text: `📂 *No se encontraron facturas emitidas en el periodo ${quarterData.quarterLabel}*\n(${quarterData.startDateFormatted} al ${quarterData.endDateFormatted})\n\n💡 _Para emitir una factura legal de una obra existente, di por ejemplo: *"facturar"* o *"facturar el de José Luis"*. En cuanto emitas tu primera factura podrás exportar el libro trimestral completo._`
+        });
+        if (sentEmpty?.key?.id) botSentMessageIds.add(sentEmpty.key.id);
+        return;
+      }
+
+      // 1. Generar CSV estándar para gestorías
+      const csvContent = generateQuarterCSV(session.company, quarterData);
+      const csvBuffer = Buffer.from(csvContent, 'utf8');
+      const cleanLabel = quarterData.quarterLabel.replace(/\s+/g, '_');
+      const csvFileName = `Libro_Facturas_Emitidas_${cleanLabel}.csv`;
+
+      // 2. Generar PDF oficial
+      const pdfBuffer = await generateQuarterTaxPDF(session.company, quarterData);
+      const pdfFileName = `Informe_Fiscal_Gestoria_${cleanLabel}.pdf`;
+
+      // 3. Enviar resumen en texto a WhatsApp
+      const summaryText = formatQuarterSummaryForWhatsApp(session.company, quarterData);
+      const sentText = await sock.sendMessage(remoteJid, { text: summaryText });
+      if (sentText?.key?.id) botSentMessageIds.add(sentText.key.id);
+
+      // 4. Enviar archivo CSV para Excel
+      const sentCsv = await sock.sendMessage(remoteJid, {
+        document: csvBuffer,
+        mimetype: 'text/csv',
+        fileName: csvFileName,
+        caption: `📊 *${csvFileName}*\nLibro Oficial normalizado en Excel/CSV (con delimitador punto y coma y UTF-8 con BOM para apertura directa en Microsoft Excel, A3 y Contasol).`
+      });
+      if (sentCsv?.key?.id) botSentMessageIds.add(sentCsv.key.id);
+
+      // 5. Enviar archivo PDF del informe fiscal
+      const sentPdf = await sock.sendMessage(remoteJid, {
+        document: pdfBuffer,
+        mimetype: 'application/pdf',
+        fileName: pdfFileName,
+        caption: `📄 *${pdfFileName}*\nInforme fiscal en PDF con desglose de bases y cuotas de IVA para la liquidación del Modelo 303 de la AEAT.`
+      });
+      if (sentPdf?.key?.id) botSentMessageIds.add(sentPdf.key.id);
+
+      console.log(`✅ Archivos de trimestre ${quarterData.quarterLabel} enviados por WhatsApp con éxito.`);
+
+      // 6. Si el usuario solicitó envío directo por email a su gestoría
+      if (sendToGestoria || (typeof quarterInput === 'string' && /enviar|mandar/i.test(quarterInput))) {
+        if (!session.company.gestoriaEmail) {
+          const sentNoEmail = await sock.sendMessage(remoteJid, {
+            text: '⚠️ *No tienes configurado el email de tu gestoría.*\n\nEscribe *"mi gestoría es correo@ejemplo.com"* para guardarlo y poder enviarlo en 1 clic.'
+          });
+          if (sentNoEmail?.key?.id) botSentMessageIds.add(sentNoEmail.key.id);
+        } else if (!resend) {
+          const sentNoResend = await sock.sendMessage(remoteJid, {
+            text: '⚠️ *El servicio de correo electrónico no está configurado en el servidor.*'
+          });
+          if (sentNoResend?.key?.id) botSentMessageIds.add(sentNoResend.key.id);
+        } else {
+          try {
+            console.log(`📧 Enviando trimestre por email a la gestoría (${session.company.gestoriaEmail})...`);
+            await resend.emails.send({
+              from: 'PresuVoz <onboarding@resend.dev>',
+              to: session.company.gestoriaEmail,
+              subject: `Cierre Fiscal y Facturas ${quarterData.quarterLabel} — ${session.company.name}`,
+              html: `
+                <div style="font-family: Arial, sans-serif; color: #1e293b; max-width: 600px; margin: 0 auto; padding: 20px;">
+                  <h2 style="color: #1e40af; margin-bottom: 5px;">Libro de Facturas y Cierre Fiscal — ${quarterData.quarterLabel}</h2>
+                  <p style="color: #64748b; font-size: 14px; margin-top: 0;">Periodo: ${quarterData.startDateFormatted} al ${quarterData.endDateFormatted}</p>
+                  <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 15px 0;">
+                  <p>Estimada asesoría / gestoría,</p>
+                  <p>Remitimos adjunto el <b>Libro Oficial de Facturas Emitidas</b> y el <b>Informe Fiscal</b> de la empresa <b>${session.company.name}</b> (CIF: <b>${session.company.cif}</b>) para la preparación de las declaraciones tributarias del <b>${quarterData.quarterLabel}</b>.</p>
+                  <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 15px; margin: 15px 0;">
+                    <h4 style="margin: 0 0 10px 0; color: #0f172a;">Resumen Económico Declarable (Modelo 303):</h4>
+                    <ul style="margin: 0; padding-left: 20px; font-size: 14px; line-height: 1.6;">
+                      <li><b>Facturas expedidas:</b> ${quarterData.summary.totalInvoices}</li>
+                      <li><b>Base Imponible Total:</b> ${quarterData.summary.totalTaxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €</li>
+                      <li><b>Cuota IVA 10%:</b> ${quarterData.summary.tax10.toLocaleString('es-ES', { minimumFractionDigits: 2 })} € (Base: ${quarterData.summary.base10.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €)</li>
+                      <li><b>Cuota IVA 21%:</b> ${quarterData.summary.tax21.toLocaleString('es-ES', { minimumFractionDigits: 2 })} € (Base: ${quarterData.summary.base21.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €)</li>
+                      <li><b>Total IVA Repercutido:</b> ${quarterData.summary.totalTaxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €</li>
+                      <li><b>Total Facturado:</b> <b>${quarterData.summary.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €</b></li>
+                    </ul>
+                  </div>
+                  <p style="font-size: 13px; color: #64748b;">Se adjuntan los archivos <b>${csvFileName}</b> (Excel) y <b>${pdfFileName}</b> (PDF oficial).</p>
+                  <br>
+                  <p>Atentamente,<br><b>${session.company.name}</b><br>Tel: ${session.company.phone || ''}</p>
+                </div>
+              `,
+              attachments: [
+                { filename: csvFileName, content: csvBuffer },
+                { filename: pdfFileName, content: pdfBuffer }
+              ]
+            });
+
+            const sentEmailOk = await sock.sendMessage(remoteJid, {
+              text: `📧 *¡Enviado con éxito a tu gestoría!*\n\nSe han remitido el Excel y el PDF por correo a *${session.company.gestoriaEmail}* para que preparen tus impuestos.`
+            });
+            if (sentEmailOk?.key?.id) botSentMessageIds.add(sentEmailOk.key.id);
+            console.log(`✅ Email enviado con éxito a ${session.company.gestoriaEmail}`);
+          } catch (mailErr) {
+            console.error('❌ Error enviando email a gestoría:', mailErr.message);
+            const sentEmailErr = await sock.sendMessage(remoteJid, {
+              text: `⚠️ *No se pudo enviar el email a la gestoría:* ${mailErr.message}`
+            });
+            if (sentEmailErr?.key?.id) botSentMessageIds.add(sentEmailErr.key.id);
+          }
+        }
+      }
+
+    } catch (exportErr) {
+      console.error('❌ Error exportando trimestre:', exportErr);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error generando la exportación del trimestre:* ${exportErr.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     // Aceptar tanto 'notify' (mensajes de terceros) como 'append' (mensajes a ti mismo desde tu móvil)
     if (type !== 'notify' && type !== 'append') return;
@@ -735,6 +905,38 @@ async function startWhatsAppGateway() {
         continue;
       }
 
+      // Comando directo para configurar email de la gestoría: ej. "mi gestoría es gestoria@ejemplo.com"
+      const configGestoriaMatch = rawUserText.match(/^(?:mi gestor[ií]a es|email gestor[ií]a|configurar gestor[ií]a)\s+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/i);
+      if (configGestoriaMatch) {
+        const gestoriaEmail = configGestoriaMatch[1].trim().toLowerCase();
+        const updated = saveCompany(senderNumber, { gestoriaEmail });
+        session.company = updated;
+        const sentConf = await sock.sendMessage(remoteJid, {
+          text: `✅ *¡Email de tu gestoría guardado con éxito!*\n\n📧 *Gestoría:* ${gestoriaEmail}\n\nA partir de ahora, cuando quieras enviar tus facturas solo di: *"Enviar trimestre a mi gestoría"* o *"gestoría"* y se le remitirá el Excel y el PDF en 1 clic.`
+        });
+        if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
+        continue;
+      }
+
+      // Comando directo para exportar el trimestre para la gestoría: ej. "gestoría", "trimestre", "3T", "exportar 3T"
+      const quarterCmdMatch = rawUserText.match(/^(?:(?:exportar|cerrar|sacar|enviar|mandar|resumen)?\s*(?:el\s+)?(?:trimestre|gestor[ií]a|modelo\s*303|informe\s*fiscal)|1t|2t|3t|4t)(?:\s+(?:del?\s+)?(1t|2t|3t|4t|\d{4}))?(?:\s+(?:del?\s+)?(\d{4}))?$/i);
+      if (quarterCmdMatch) {
+        let qInput = null;
+        let yInput = null;
+
+        const directQ = rawUserText.match(/\b([1-4]t)\b/i);
+        if (directQ) qInput = directQ[1];
+        else if (quarterCmdMatch[1] && /[1-4]t/i.test(quarterCmdMatch[1])) qInput = quarterCmdMatch[1];
+
+        const yearMatch = rawUserText.match(/\b(202[4-9])\b/);
+        if (yearMatch) yInput = yearMatch[1];
+
+        const shouldEmail = /enviar|mandar/i.test(rawUserText);
+
+        await handleQuarterExport(sock, remoteJid, session, qInput, yInput, shouldEmail);
+        continue;
+      }
+
       // Opción 1: Ver lista de presupuestos guardados
       if (/^(1|presupuestos|mis presupuestos|ver presupuestos|lista)$/i.test(rawUserText)) {
         if (session.budgets.size === 0) {
@@ -776,7 +978,7 @@ async function startWhatsAppGateway() {
           }
         }
 
-        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para registrar un cobro di: "Apunta 1.500€ de José Luis por Bizum"_\n💡 _Para consultar deuda di: "¿Cuánto me debe José Luis?"_\n💡 _Para facturar di: "Facturar el de José Luis"_\n💡 _Para ver o modificar tus datos de empresa y logo di: "Mi empresa"_\n💡 _Para crear uno nuevo di: "Presupuesto nuevo..."_';
+        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para registrar un cobro di: "Apunta 1.500€ de José Luis por Bizum"_\n💡 _Para consultar deuda di: "¿Cuánto me debe José Luis?"_\n💡 _Para facturar di: "Facturar el de José Luis"_\n💡 _Para exportar el trimestre a tu gestor di: "Gestoría" o "3T"_\n💡 _Para ver o modificar tus datos de empresa y logo di: "Mi empresa"_\n💡 _Para crear uno nuevo di: "Presupuesto nuevo..."_';
 
         const sentList = await sock.sendMessage(remoteJid, { text: listText });
         if (sentList?.key?.id) botSentMessageIds.add(sentList.key.id);
@@ -979,6 +1181,26 @@ async function startWhatsAppGateway() {
 
           const sentConf = await sock.sendMessage(remoteJid, { text: confText });
           if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
+          continue;
+        }
+
+        // Si la IA detectó configuración del email de la gestoría
+        if (aiResult?.action === 'configure_gestoria') {
+          const gestoriaEmail = (aiResult.gestoriaEmail || '').trim().toLowerCase();
+          if (gestoriaEmail) {
+            const updated = saveCompany(senderNumber, { gestoriaEmail });
+            session.company = updated;
+            const sentConf = await sock.sendMessage(remoteJid, {
+              text: `✅ *¡Email de tu gestoría guardado!*\n\n📧 *Gestoría:* ${gestoriaEmail}\n\nCuando quieras enviar tus facturas di: *"Enviar trimestre a mi gestoría"* o *"gestoría"* para enviarle el Excel y PDF en 1 clic.`
+            });
+            if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
+          }
+          continue;
+        }
+
+        // Si la IA detectó solicitud de exportación del trimestre para la gestoría
+        if (aiResult?.action === 'export_quarter') {
+          await handleQuarterExport(sock, remoteJid, session, aiResult.quarter, aiResult.year, Boolean(aiResult.sendToGestoria));
           continue;
         }
 

@@ -523,3 +523,208 @@ export function generateReceiptPDF(receipt) {
     }
   });
 }
+
+/**
+ * Genera un Buffer con el PDF del Informe Fiscal Trimestral para la Gestoría (Libro de Facturas)
+ * @param {object} company - Datos de la empresa
+ * @param {object} quarterData - Objeto devuelto por getQuarterInvoices
+ * @returns {Promise<Buffer>}
+ */
+export function generateQuarterTaxPDF(company, quarterData) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({
+        size: 'A4',
+        margin: 40,
+        bufferPages: true,
+        info: {
+          Title: `Informe Fiscal Gestoría - ${quarterData.quarterLabel}`,
+          Author: company?.name || 'PresuVoz',
+          Subject: 'Libro Registro de Facturas Emitidas y Resumen Modelo 303'
+        }
+      });
+
+      const buffers = [];
+      doc.on('data', (chunk) => buffers.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(buffers)));
+      doc.on('error', (err) => reject(err));
+
+      const primaryColor = '#1e40af'; // Blue 800 - Profesional fiscal
+      const accentColor = '#0284c7';  // Sky 600
+      const darkColor = '#0f172a';    // Slate 900
+      const grayColor = '#64748b';    // Slate 500
+      const borderColor = '#cbd5e1';  // Slate 300
+      const lightBg = '#f8fafc';      // Slate 50
+
+      const formatEur = (n) => `${Number(n || 0).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+
+      const drawHeader = () => {
+        // 1. Barra superior
+        doc.rect(0, 0, 595.28, 8).fill(primaryColor);
+
+        // 2. Cabecera (Empresa vs Datos del documento)
+        let textStartX = 40;
+        const logoPath = company?.logoPath;
+        if (logoPath && fs.existsSync(logoPath)) {
+          try {
+            doc.image(logoPath, 40, 24, { fit: [50, 50] });
+            textStartX = 100;
+          } catch (e) {}
+        }
+
+        doc.fontSize(14).fillColor(darkColor).font('Helvetica-Bold')
+          .text(company?.name || 'Empresa', textStartX, 28, { width: 260 });
+
+        doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
+          .text(`NIF / CIF: ${company?.cif || 'Sin CIF'}`, textStartX, 45)
+          .text(company?.address || 'Dirección fiscal', textStartX, 56, { width: 260 })
+          .text(`Tel: ${company?.phone || ''} | ${company?.email || ''}`, textStartX, 67);
+
+        // Caja documento (derecha)
+        doc.roundedRect(350, 24, 205, 66, 4).strokeColor(borderColor).stroke();
+        doc.fontSize(8).fillColor(accentColor).font('Helvetica-Bold')
+          .text('INFORME FISCAL PARA GESTORÍA', 360, 31);
+        doc.fontSize(12).fillColor(primaryColor).font('Helvetica-Bold')
+          .text(`LIBRO FACTURAS ${quarterData.quarterLabel}`, 360, 43);
+        doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
+          .text(`Periodo: ${quarterData.startDateFormatted} al ${quarterData.endDateFormatted}`, 360, 60)
+          .text(`Fecha emisión: ${new Date().toLocaleDateString('es-ES')}`, 360, 71);
+      };
+
+      drawHeader();
+
+      const s = quarterData.summary;
+
+      // 3. Resumen Fiscal Cuadro 1: Desglose IVA Modelo 303
+      const boxY = 102;
+      doc.roundedRect(40, boxY, 255, 88, 4).fillColor(lightBg).fillAndStroke(lightBg, borderColor);
+      doc.fontSize(8.5).fillColor(primaryColor).font('Helvetica-Bold')
+        .text('📊 LIQUIDACIÓN IVA REPERCUTIDO (MOD. 303)', 50, boxY + 8);
+
+      doc.fontSize(7.5).fillColor(darkColor).font('Helvetica')
+        .text('• Base IVA Reducido (10%):', 50, boxY + 24)
+        .font('Helvetica-Bold').text(formatEur(s.base10), 195, boxY + 24, { width: 90, align: 'right' });
+
+      doc.font('Helvetica')
+        .text('  └ Cuota IVA 10% repercutido:', 50, boxY + 36)
+        .font('Helvetica-Bold').text(formatEur(s.tax10), 195, boxY + 36, { width: 90, align: 'right' });
+
+      doc.font('Helvetica')
+        .text('• Base IVA General (21%):', 50, boxY + 49)
+        .font('Helvetica-Bold').text(formatEur(s.base21), 195, boxY + 49, { width: 90, align: 'right' });
+
+      doc.font('Helvetica')
+        .text('  └ Cuota IVA 21% repercutido:', 50, boxY + 61)
+        .font('Helvetica-Bold').text(formatEur(s.tax21), 195, boxY + 61, { width: 90, align: 'right' });
+
+      doc.rect(50, boxY + 73, 235, 0.5).strokeColor(borderColor).stroke();
+      doc.fontSize(8).fillColor(primaryColor).font('Helvetica-Bold')
+        .text('TOTAL CUOTA IVA A DECLARAR:', 50, boxY + 76)
+        .text(formatEur(s.totalTaxAmount), 195, boxY + 76, { width: 90, align: 'right' });
+
+      // Resumen Cuadro 2: Totales Facturación y Tesorería
+      doc.roundedRect(305, boxY, 250, 88, 4).fillColor(lightBg).fillAndStroke(lightBg, borderColor);
+      doc.fontSize(8.5).fillColor(primaryColor).font('Helvetica-Bold')
+        .text('💰 TOTALES FACTURACIÓN Y COBROS', 315, boxY + 8);
+
+      doc.fontSize(7.5).fillColor(darkColor).font('Helvetica')
+        .text(`• Total facturas emitidas:`, 315, boxY + 24)
+        .font('Helvetica-Bold').text(`${s.totalInvoices} facturas`, 455, boxY + 24, { width: 90, align: 'right' });
+
+      doc.font('Helvetica')
+        .text('• Base Imponible Total:', 315, boxY + 36)
+        .font('Helvetica-Bold').text(formatEur(s.totalTaxableBase), 455, boxY + 36, { width: 90, align: 'right' });
+
+      doc.font('Helvetica')
+        .text('• Total Facturado (Base + IVA):', 315, boxY + 49)
+        .font('Helvetica-Bold').text(formatEur(s.totalAmount), 455, boxY + 49, { width: 90, align: 'right' });
+
+      doc.font('Helvetica')
+        .text(`• Total Cobrado (${s.paidCount} pagadas):`, 315, boxY + 61)
+        .font('Helvetica-Bold').fillColor('#059669').text(formatEur(s.totalPaid), 455, boxY + 61, { width: 90, align: 'right' });
+
+      doc.rect(315, boxY + 73, 230, 0.5).strokeColor(borderColor).stroke();
+      doc.fontSize(8).fillColor(s.totalRemaining > 0 ? '#b91c1c' : primaryColor).font('Helvetica-Bold')
+        .text('SALDO PENDIENTE DE COBRO:', 315, boxY + 76)
+        .text(formatEur(s.totalRemaining), 455, boxY + 76, { width: 90, align: 'right' });
+
+      // 4. Tabla de Facturas Emitidas
+      let currentY = 202;
+      const drawTableHeaders = (y) => {
+        doc.roundedRect(40, y, 515, 20, 2).fillColor(primaryColor).fill();
+        doc.fontSize(7).fillColor('#ffffff').font('Helvetica-Bold')
+          .text('Nº FACTURA', 46, y + 6, { width: 68 })
+          .text('FECHA', 116, y + 6, { width: 48 })
+          .text('CLIENTE / NIF', 166, y + 6, { width: 140 })
+          .text('BASE IMP.', 308, y + 6, { width: 55, align: 'right' })
+          .text('IVA', 365, y + 6, { width: 28, align: 'center' })
+          .text('CUOTA IVA', 395, y + 6, { width: 50, align: 'right' })
+          .text('TOTAL', 447, y + 6, { width: 55, align: 'right' })
+          .text('ESTADO', 504, y + 6, { width: 46, align: 'center' });
+      };
+
+      drawTableHeaders(currentY);
+      currentY += 20;
+
+      if (quarterData.invoices.length === 0) {
+        doc.roundedRect(40, currentY, 515, 30, 2).fillColor('#f8fafc').fillAndStroke('#f8fafc', borderColor);
+        doc.fontSize(8.5).fillColor(grayColor).font('Helvetica')
+          .text('No hay facturas emitidas registradas en este trimestre.', 40, currentY + 10, { align: 'center', width: 515 });
+        currentY += 35;
+      } else {
+        quarterData.invoices.forEach((inv, index) => {
+          if (currentY > 740) {
+            doc.addPage();
+            drawHeader();
+            currentY = 105;
+            drawTableHeaders(currentY);
+            currentY += 20;
+          }
+
+          const fin = inv.financials || {};
+          const isEven = index % 2 === 0;
+          if (isEven) {
+            doc.rect(40, currentY, 515, 18).fillColor('#f8fafc').fill();
+          }
+
+          const advance = fin.advanceAmount || 0;
+          const total = fin.totalAmount || 0;
+          const remaining = fin.remainingAmount !== undefined ? fin.remainingAmount : Math.max(0, total - advance);
+          const isPaid = inv.status === 'PAGADA' || remaining <= 0;
+
+          const clientText = `${inv.client?.name || 'Cliente'} (${inv.client?.nif || 'Sin NIF'})`;
+          const shortClient = clientText.length > 28 ? clientText.substring(0, 26) + '...' : clientText;
+
+          doc.fontSize(7).fillColor(darkColor).font('Helvetica-Bold')
+            .text(inv.id, 46, currentY + 5, { width: 68 });
+
+          doc.font('Helvetica')
+            .text(inv.issueDate || quarterData.startDateFormatted, 116, currentY + 5, { width: 48 })
+            .text(shortClient, 166, currentY + 5, { width: 140 })
+            .text(formatEur(fin.taxableBase), 308, currentY + 5, { width: 55, align: 'right' })
+            .text(`${fin.taxRatePercentage || 10}%`, 365, currentY + 5, { width: 28, align: 'center' })
+            .text(formatEur(fin.taxAmount), 395, currentY + 5, { width: 50, align: 'right' })
+            .font('Helvetica-Bold')
+            .text(formatEur(total), 447, currentY + 5, { width: 55, align: 'right' });
+
+          doc.fontSize(6.5).fillColor(isPaid ? '#059669' : '#d97706').font('Helvetica-Bold')
+            .text(isPaid ? 'COBRADA' : 'PEND.', 504, currentY + 5, { width: 46, align: 'center' });
+
+          currentY += 18;
+        });
+      }
+
+      // 5. Pie de página legal en todas las páginas
+      const range = doc.bufferedPageRange();
+      for (let i = range.start; i < range.start + range.count; i++) {
+        doc.switchToPage(i);
+        doc.fontSize(6.5).fillColor('#94a3b8').font('Helvetica')
+          .text(`Libro Registro Oficial de Facturas Expedidas según el Real Decreto 1619/2012 y el Art. 62 del RIVA — Generado por PresuVoz — Página ${i + 1} de ${range.count}`, 40, 792, { align: 'center', width: 515 });
+      }
+
+      doc.end();
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
