@@ -1,5 +1,6 @@
 import { PresuVozEngine } from './engine.js';
 import { PresuVozParser } from './parser.js';
+import { generateInvoicePDF } from './pdf_service.js';
 
 console.log("==========================================================");
 console.log("🛡️  BATERÍA DE PRUEBAS DE ESTRÉS Y SEGURIDAD PRESUVOZ");
@@ -357,6 +358,65 @@ assert(res11.financials.taxRatePercentage === 10, "Aplica IVA reducido del 10% p
 assert(res11.financials.taxAmount === 110.7, `IVA 10% calculado: 110,70 €. Obtenido: ${res11.financials.taxAmount} €`);
 // Total final: 1107 + 110.7 = 1217.70 €
 assert(res11.financials.totalAmount === 1217.7, `Total final con descuento e IVA: 1.217,70 €. Obtenido: ${res11.financials.totalAmount} €`);
+
+// -----------------------------------------------------------------------------
+// CASO 12: Factura de Anticipo con Devengo de IVA y Factura Final de Liquidación (RD 1619/2012 y Ley 37/1992)
+// -----------------------------------------------------------------------------
+console.log("\nTEST 12: Factura Legal de Anticipo con IVA y Factura Final de Liquidación");
+
+// 1. Crear presupuesto base de 4.785,00 € (4.350,00 € Base + 435,00 € IVA 10%)
+const budget12 = {
+  id: "PRE-2026-TEST12",
+  client: { name: "María del Carmen", address: "Calle Sierpes 24, Sevilla" },
+  items: [
+    { id: "1", description: "Reforma integral de baño", qty: 1, unit: "pa", unitPrice: 4350, total: 4350 }
+  ],
+  financials: {
+    subtotal: 4350,
+    taxableBase: 4350,
+    taxRatePercentage: 10,
+    taxAmount: 435,
+    totalAmount: 4785,
+    advanceAmount: 1000
+  }
+};
+
+// 2. Emitir Factura Oficial de Anticipo de 1.000,00 €
+const advanceInv = engine.createAdvanceInvoice(budget12, {
+  amount: 1000,
+  method: "Transferencia bancaria",
+  concept: "Anticipo 1ª fase para acopio de materiales"
+});
+
+assert(advanceInv.type === "ANTICIPO", "La factura es de tipo 'ANTICIPO'");
+assert(advanceInv.financials.taxableBase === 909.09, `Base Imponible anticipo calculada (909,09 €). Obtenido: ${advanceInv.financials.taxableBase} €`);
+assert(advanceInv.financials.taxAmount === 90.91, `Cuota IVA 10% anticipo calculada (90,91 €). Obtenido: ${advanceInv.financials.taxAmount} €`);
+assert(advanceInv.financials.totalAmount === 1000, `Total Factura Anticipo exacto (1.000,00 €). Obtenido: ${advanceInv.financials.totalAmount} €`);
+assert(advanceInv.status === "PAGADA", "Factura de anticipo emitida con estado 'PAGADA'");
+assert(budget12.advanceInvoices.length === 1, "El presupuesto registra la factura de anticipo en su historial");
+
+// 3. Emitir Factura Final de Liquidación
+const finalInv = engine.convertToInvoice(budget12);
+
+assert(finalInv.type === "FINAL", "La factura resultante es de tipo 'FINAL'");
+assert(Array.isArray(finalInv.advanceDeductions) && finalInv.advanceDeductions.length === 1, "La factura final incluye el desglose de deducción de anticipos");
+assert(finalInv.advanceDeductions[0].taxableBase === 909.09, "La deducción de base imponible coincide con el anticipo (909,09 €)");
+assert(finalInv.financials.advanceAmount === 1000, "Registra 1.000,00 € de anticipo total deducido");
+assert(finalInv.financials.remainingAmount === 3785, `Saldo restante pendiente a pagar exacto (3.785,00 €). Obtenido: ${finalInv.financials.remainingAmount} €`);
+
+// Comprobación de cuadre contable legal de bases e IVAs
+const totalBases = advanceInv.financials.taxableBase + (finalInv.financials.taxableBase - finalInv.financials.advanceTaxableBase);
+assert(Math.abs(totalBases - 4350) < 0.02, `Cuadre exacto de bases imponibles ante AEAT (4.350,00 €). Suma: ${totalBases.toFixed(2)} €`);
+
+const totalIvas = advanceInv.financials.taxAmount + (finalInv.financials.taxAmount - finalInv.financials.advanceTaxAmount);
+assert(Math.abs(totalIvas - 435) < 0.02, `Cuadre exacto de cuotas de IVA ante AEAT (435,00 €). Suma: ${totalIvas.toFixed(2)} €`);
+
+// 4. Verificación de generación de PDF para Factura de Anticipo y Factura de Liquidación
+const pdfAdvance = await generateInvoicePDF(advanceInv);
+assert(Buffer.isBuffer(pdfAdvance) && pdfAdvance.length > 2000, `Genera correctamente el PDF formal de Factura de Anticipo (${pdfAdvance.length} bytes)`);
+
+const pdfFinal = await generateInvoicePDF(finalInv);
+assert(Buffer.isBuffer(pdfFinal) && pdfFinal.length > 2000, `Genera correctamente el PDF formal de Factura de Liquidación con deducción fiscal (${pdfFinal.length} bytes)`);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

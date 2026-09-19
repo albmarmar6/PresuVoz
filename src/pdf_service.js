@@ -233,9 +233,13 @@ export function generateInvoicePDF(invoice) {
         .text(`Tel: ${invoice.company?.phone || '601 02 23 67'} | ${invoice.company?.email || 'facturas@presuvoz.app'}`, textStartX, 70);
 
       // Caja resumen de factura (derecha)
+      const invoiceTypeTitle = invoice.type === 'ANTICIPO'
+        ? 'FACTURA DE ANTICIPO'
+        : (invoice.advanceDeductions && invoice.advanceDeductions.length > 0 ? 'FACTURA DE LIQUIDACIÓN' : 'FACTURA ORDINARIA');
+
       doc.roundedRect(360, 25, 195, 75, 4).strokeColor(borderColor).stroke();
       doc.fontSize(8).fillColor(primaryColor).font('Helvetica-Bold')
-        .text('FACTURA ORDINARIA', 370, 33);
+        .text(invoiceTypeTitle, 370, 33);
       doc.fontSize(13).fillColor(darkColor).font('Helvetica-Bold')
         .text(invoice.id || 'FAC-2026-0001', 370, 46);
       doc.fontSize(8).fillColor(grayColor).font('Helvetica')
@@ -299,54 +303,82 @@ export function generateInvoicePDF(invoice) {
       // 5. Totales y Liquidación Fiscal
       tableY += 15;
       const fin = invoice.financials || {};
-      const totalsX = 350;
+      const totalsX = 330;
 
       doc.fontSize(8).fillColor(grayColor).font('Helvetica');
 
       if ((fin.discountAmount || 0) > 0) {
         doc.text('Subtotal trabajos:', totalsX, tableY)
-          .text(`${(fin.subtotal || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
+          .text(`${(fin.subtotal || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
         tableY += 14;
 
         doc.text(`Descuento comercial (${fin.discountPercentage}%):`, totalsX, tableY)
-          .text(`-${(fin.discountAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
+          .text(`-${(fin.discountAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
         tableY += 14;
       }
 
-      doc.text('Base Imponible:', totalsX, tableY)
-        .text(`${(fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
-      tableY += 14;
+      if (invoice.advanceDeductions && invoice.advanceDeductions.length > 0) {
+        doc.text('Base Imponible total obra:', totalsX, tableY)
+          .text(`${(fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+        tableY += 14;
 
-      doc.text(`IVA (${fin.taxRatePercentage || 10}%):`, totalsX, tableY)
-        .text(`${(fin.taxAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
-      tableY += 16;
+        invoice.advanceDeductions.forEach(adv => {
+          doc.fontSize(7.5).fillColor('#dc2626')
+            .text(`Menos Anticipo (Fac. ${adv.id}):`, totalsX, tableY)
+            .text(`-${(adv.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+          tableY += 14;
+        });
+
+        doc.fontSize(8).fillColor(grayColor).font('Helvetica');
+        const netBase = Math.max(0, (fin.taxableBase || 0) - (fin.advanceTaxableBase || 0));
+        doc.text('Base Imponible a liquidar:', totalsX, tableY)
+          .text(`${netBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+        tableY += 14;
+
+        const netTax = Math.max(0, (fin.taxAmount || 0) - (fin.advanceTaxAmount || 0));
+        doc.text(`IVA (${fin.taxRatePercentage || 10}%):`, totalsX, tableY)
+          .text(`${netTax.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+        tableY += 16;
+      } else {
+        doc.text('Base Imponible:', totalsX, tableY)
+          .text(`${(fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+        tableY += 14;
+
+        doc.text(`IVA (${fin.taxRatePercentage || 10}%):`, totalsX, tableY)
+          .text(`${(fin.taxAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+        tableY += 16;
+      }
 
       // Cuadro de Total Factura
-      doc.rect(totalsX - 10, tableY - 4, 215, 24).fill(primaryColor);
+      const finalInvoiceTotal = invoice.advanceDeductions && invoice.advanceDeductions.length > 0
+        ? (fin.remainingAmount !== undefined ? fin.remainingAmount : Math.max(0, (fin.totalAmount || 0) - (fin.advanceAmount || 0)))
+        : (fin.totalAmount || 0);
+
+      doc.rect(totalsX - 10, tableY - 4, 235, 24).fill(primaryColor);
       doc.fontSize(9).fillColor('#ffffff').font('Helvetica-Bold')
-        .text('TOTAL FACTURA:', totalsX, tableY + 4)
-        .text(`${(fin.totalAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 475, tableY + 4, { width: 70, align: 'right' });
+        .text(invoice.type === 'ANTICIPO' ? 'TOTAL FACTURA ANTICIPO:' : (invoice.advanceDeductions?.length > 0 ? 'TOTAL A PAGAR LIQUIDACIÓN:' : 'TOTAL FACTURA:'), totalsX, tableY + 4)
+        .text(`${finalInvoiceTotal.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 465, tableY + 4, { width: 90, align: 'right' });
       tableY += 28;
 
-      // Desglose de anticipo y saldo pendiente
+      // Desglose informativo si es ordinaria con anticipo sin deducción explícita de base
       const advance = fin.advanceAmount || 0;
       const remaining = fin.remainingAmount !== undefined ? fin.remainingAmount : Math.max(0, (fin.totalAmount || 0) - advance);
 
-      if (advance > 0) {
+      if (advance > 0 && (!invoice.advanceDeductions || invoice.advanceDeductions.length === 0) && invoice.type !== 'ANTICIPO') {
         doc.fontSize(8).fillColor(grayColor).font('Helvetica')
           .text(`Anticipo percibido a cuenta:`, totalsX, tableY)
-          .text(`-${advance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
+          .text(`-${advance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
         tableY += 14;
 
-        doc.rect(totalsX - 10, tableY - 3, 215, 22).fill('#f1f5f9');
+        doc.rect(totalsX - 10, tableY - 3, 235, 22).fill('#f1f5f9');
         doc.fontSize(8.5).fillColor(darkColor).font('Helvetica-Bold')
           .text('TOTAL PENDIENTE DE PAGO:', totalsX, tableY + 3)
-          .text(`${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 475, tableY + 3, { width: 70, align: 'right' });
+          .text(`${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 465, tableY + 3, { width: 90, align: 'right' });
       }
 
       // 6. Datos Bancarios para la liquidación (abajo a la izquierda)
       const bankY = tableY - (advance > 0 ? 55 : 40);
-      doc.roundedRect(40, bankY, 285, 80, 4).fillColor('#f8fafc').fillAndStroke('#f8fafc', borderColor);
+      doc.roundedRect(40, bankY, 275, 80, 4).fillColor('#f8fafc').fillAndStroke('#f8fafc', borderColor);
 
       doc.fontSize(8).fillColor(primaryColor).font('Helvetica-Bold')
         .text('DATOS BANCARIOS PARA EL PAGO:', 50, bankY + 8);
@@ -358,9 +390,13 @@ export function generateInvoicePDF(invoice) {
         .text(`• Concepto: Pago ${invoice.id || 'Factura'}`, 50, bankY + 55)
         .text(`• O pago por Bizum al ${invoice.company?.bizum || invoice.company?.phone || '601 02 23 67'}`, 50, bankY + 66);
 
-      // 7. Pie de página legal según RD 1619/2012
+      // 7. Pie de página legal según RD 1619/2012 y Ley del IVA
+      const legalNote = invoice.type === 'ANTICIPO'
+        ? 'Factura de anticipo emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA (devengo por cobro de pago anticipado) y RD 1619/2012. El IVA devengado se deduce en la liquidación final.'
+        : 'Factura emitida conforme al Real Decreto 1619/2012 (Reglamento de Facturación en España). Garantía de 2 años en mano de obra según Ley de Ordenación de la Edificación (LOE).';
+
       doc.fontSize(6.5).fillColor('#94a3b8').font('Helvetica')
-        .text('Factura emitida conforme al Real Decreto 1619/2012 (Reglamento de Facturación en España). Garantía de 2 años en mano de obra según Ley de Ordenación de la Edificación (LOE).', 40, 785, { align: 'center', width: 515 });
+        .text(legalNote, 40, 785, { align: 'center', width: 515 });
 
       doc.end();
     } catch (e) {

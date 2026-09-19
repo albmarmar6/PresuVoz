@@ -331,7 +331,87 @@ export class PresuVozEngine {
   }
 
   /**
-   * Convierte un presupuesto en una Factura legal formal
+   * Genera una Factura Legal de Anticipo con devengo y desglose de IVA (Art. 75.Dos Ley 37/1992)
+   * @param {object} budget - Presupuesto origen
+   * @param {object} paymentData - { amount, method, concept, date }
+   * @param {object} [options] - Opciones adicionales
+   * @returns {object} Objeto factura de anticipo
+   */
+  createAdvanceInvoice(budget, paymentData = {}, options = {}) {
+    if (!budget) {
+      throw new Error('No se puede generar factura de anticipo sin un presupuesto de referencia.');
+    }
+
+    const rawAmount = Number(paymentData.amount);
+    if (isNaN(rawAmount) || rawAmount <= 0) {
+      throw new Error('El importe del anticipo debe ser un número positivo.');
+    }
+
+    const year = new Date().getFullYear();
+    const invoiceCounter = options.invoiceNumber || Math.floor(100 + Math.random() * 900);
+    const invoiceId = `FAC-${year}-${String(invoiceCounter).padStart(4, '0')}`;
+    const today = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
+    const taxRate = (budget.financials?.taxRatePercentage || 10) / 100;
+    const taxableBase = Number((rawAmount / (1 + taxRate)).toFixed(2));
+    const taxAmount = Number((rawAmount - taxableBase).toFixed(2));
+    const totalAmount = Number((taxableBase + taxAmount).toFixed(2));
+
+    const addressPart = budget.client?.address ? ` en ${budget.client.address}` : '';
+    const itemDesc = options.concept || `Entrega a cuenta / Anticipo por aceptación de presupuesto ${budget.id || ''}${addressPart}`;
+
+    const advanceInvoice = {
+      id: invoiceId,
+      type: 'ANTICIPO',
+      budgetId: budget.id || 'PRE-2026',
+      issueDate: today,
+      operationDate: paymentData.date || today,
+      company: {
+        ...this.company,
+        ...(budget.company || {}),
+        ...(options.company || {})
+      },
+      client: {
+        name: options.clientName || budget.client?.name || 'Cliente Particular',
+        address: options.clientAddress || budget.client?.address || 'Ubicación según visita',
+        nif: options.clientNif || budget.client?.nif || 'Consignado en contrato',
+        phone: options.clientPhone || budget.client?.phone || null,
+        email: options.clientEmail || budget.client?.email || null
+      },
+      items: [
+        {
+          id: 'item-ant-1',
+          description: itemDesc,
+          qty: 1,
+          unit: 'pa',
+          unitPrice: taxableBase,
+          total: taxableBase
+        }
+      ],
+      financials: {
+        subtotal: taxableBase,
+        discountPercentage: 0,
+        discountAmount: 0,
+        taxableBase,
+        taxRatePercentage: budget.financials?.taxRatePercentage || 10,
+        taxAmount,
+        totalAmount,
+        advanceAmount: 0,
+        remainingAmount: 0
+      },
+      status: 'PAGADA',
+      paymentMethod: paymentData.method || 'Transferencia bancaria / Bizum',
+      legalNote: 'Factura de anticipo emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA y RD 1619/2012.'
+    };
+
+    if (!budget.advanceInvoices) budget.advanceInvoices = [];
+    budget.advanceInvoices.push(advanceInvoice);
+
+    return advanceInvoice;
+  }
+
+  /**
+   * Convierte un presupuesto en una Factura legal formal (con deducción de anticipos previos si existen)
    * @param {object} budget - Objeto presupuesto original
    * @param {object} [options] - Opciones adicionales (clientNif, operationDate, etc.)
    * @returns {object} Objeto factura formal
@@ -351,11 +431,40 @@ export class PresuVozEngine {
     const fin = budget.financials || {};
     const totalAmount = fin.totalAmount || 0;
     const paidSoFar = budget.paymentSummary?.totalPaid || 0;
-    const advanceAmount = options.advanceAmount !== undefined ? options.advanceAmount : (paidSoFar > 0 ? paidSoFar : (fin.advanceAmount || 0));
+
+    // Verificar si existen facturas de anticipo emitidas formalmente
+    const advanceInvoices = options.advanceInvoices || budget.advanceInvoices || [];
+    let advanceTaxableBase = 0;
+    let advanceTaxAmount = 0;
+    let advanceTotalAmount = 0;
+
+    const advanceDeductions = advanceInvoices.map(adv => {
+      const b = adv.financials?.taxableBase || 0;
+      const t = adv.financials?.taxAmount || 0;
+      const tot = adv.financials?.totalAmount || 0;
+      advanceTaxableBase += b;
+      advanceTaxAmount += t;
+      advanceTotalAmount += tot;
+      return {
+        id: adv.id,
+        date: adv.issueDate || adv.operationDate,
+        taxableBase: b,
+        taxAmount: t,
+        total: tot,
+        description: `Deducción por anticipo percibido según Factura nº ${adv.id} de fecha ${adv.issueDate || adv.operationDate}`
+      };
+    });
+
+    // Si no hay facturas de anticipo explícitas pero sí hay cobros registrados, usar el importe cobrado
+    const advanceAmount = advanceTotalAmount > 0 
+      ? Number(advanceTotalAmount.toFixed(2))
+      : (options.advanceAmount !== undefined ? options.advanceAmount : (paidSoFar > 0 ? paidSoFar : (fin.advanceAmount || 0)));
+
     const remainingAmount = Number(Math.max(0, totalAmount - advanceAmount).toFixed(2));
 
     const invoice = {
       id: invoiceId,
+      type: 'FINAL',
       budgetId: budget.id || 'PRE-2026',
       issueDate: today,
       operationDate,
@@ -379,6 +488,7 @@ export class PresuVozEngine {
         unitPrice: item.unitPrice || 0,
         total: item.total || 0
       })),
+      advanceDeductions: advanceDeductions.length > 0 ? advanceDeductions : undefined,
       financials: {
         subtotal: fin.subtotal || 0,
         discountPercentage: fin.discountPercentage || 0,
@@ -387,6 +497,8 @@ export class PresuVozEngine {
         taxRatePercentage: fin.taxRatePercentage || 10,
         taxAmount: fin.taxAmount || 0,
         totalAmount,
+        advanceTaxableBase: Number(advanceTaxableBase.toFixed(2)),
+        advanceTaxAmount: Number(advanceTaxAmount.toFixed(2)),
         advanceAmount,
         remainingAmount
       },

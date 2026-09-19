@@ -82,8 +82,26 @@ const ALLOWED_NUMBERS = (process.env.ALLOWED_NUMBERS || '')
 const GEMINI_MODELS = [
   'gemini-3.8-flash',
   'gemini-3.6-flash',
-  'gemini-3.7-flash'
+  'gemini-3.7-flash',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash'
 ];
+
+// Almacén en memoria de mensajes de WhatsApp para responder a solicitudes 'retry' (evita 'Esperando mensaje')
+const messageStore = new Map();
+function storeMessage(keyId, message) {
+  if (!keyId || !message) return;
+  if (messageStore.size > 2000) {
+    const oldestKey = messageStore.keys().next().value;
+    messageStore.delete(oldestKey);
+  }
+  messageStore.set(keyId, message);
+}
+
+// Cola de tareas en espera (stand-by) para Gemini ante saturación o alta demanda temporal (429/503)
+const aiStandbyQueue = [];
+let isProcessingAiQueue = false;
 
 let cachedWorkingModel = null;
 
@@ -317,8 +335,27 @@ async function startWhatsAppGateway() {
     auth: state,
     logger,
     printQRInTerminal: false,
-    browser: ['PresuVoz Bot', 'Chrome', '1.0.0']
+    browser: ['PresuVoz Bot', 'Chrome', '1.0.0'],
+    getMessage: async (key) => {
+      if (key?.id && messageStore.has(key.id)) {
+        return messageStore.get(key.id);
+      }
+      return undefined;
+    }
   });
+
+  // Interceptar todos los envíos para alimentar el almacén de reintentos criptográficos y evitar bucles
+  const _rawSendMessage = sock.sendMessage.bind(sock);
+  sock.sendMessage = async (...args) => {
+    const sentMsg = await _rawSendMessage(...args);
+    if (sentMsg?.key?.id) {
+      botSentMessageIds.add(sentMsg.key.id);
+      if (sentMsg.message) {
+        storeMessage(sentMsg.key.id, sentMsg.message);
+      }
+    }
+    return sentMsg;
+  };
 
   sock.ev.on('creds.update', saveCreds);
 
@@ -388,6 +425,13 @@ async function startWhatsAppGateway() {
           }
         } catch (e) {}
       }, 8000);
+
+      // Sondeo cada 4 segundos para reintentar tareas en cola de espera (stand-by)
+      setInterval(async () => {
+        try {
+          await processAiStandbyQueue(sock);
+        } catch (e) {}
+      }, 4000);
     }
   });
 
@@ -494,23 +538,37 @@ async function startWhatsAppGateway() {
       const fin = invoice.financials || {};
       const advance = fin.advanceAmount || 0;
       const remaining = fin.remainingAmount !== undefined ? fin.remainingAmount : (fin.totalAmount || 0);
+      const isSettlement = Boolean(invoice.advanceDeductions && invoice.advanceDeductions.length > 0);
+      const title = isSettlement ? `🧾 *FACTURA OFICIAL DE LIQUIDACIÓN: ${invoice.id}*` : `🧾 *FACTURA OFICIAL EMITIDA: ${invoice.id}*`;
 
       const invoiceMsgLines = [
-        `🧾 *FACTURA OFICIAL EMITIDA: ${invoice.id}*`,
+        title,
         '━━━━━━━━━━━━━━━━━━━━━━━━━',
         `👤 *Cliente:* ${invoice.client.name}`,
         `📍 *Dirección:* ${invoice.client.address}`,
         `📄 *Presupuesto de origen:* ${invoice.budgetId}`,
         `📅 *Fecha emisión:* ${invoice.issueDate}`,
-        '',
-        `💰 *Base Imponible:* ${fin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
-        `📊 *IVA (${fin.taxRatePercentage}%):* ${fin.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
-        `🏷️ *TOTAL FACTURA:* *${fin.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`
+        ''
       ];
 
-      if (advance > 0) {
-        invoiceMsgLines.push(`💵 *Anticipo abonado:* -${advance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-        invoiceMsgLines.push(`💳 *TOTAL PENDIENTE DE COBRO:* *${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
+      if (isSettlement) {
+        invoiceMsgLines.push(`💰 *Base Imponible total obra:* ${fin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+        invoice.advanceDeductions.forEach(adv => {
+          invoiceMsgLines.push(`📉 *Menos Anticipo (Factura ${adv.id}):* -${adv.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+        });
+        const netBase = Math.max(0, fin.taxableBase - (fin.advanceTaxableBase || 0));
+        const netTax = Math.max(0, fin.taxAmount - (fin.advanceTaxAmount || 0));
+        invoiceMsgLines.push(`💵 *Base Imponible a liquidar:* ${netBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+        invoiceMsgLines.push(`📊 *IVA liquidado (${fin.taxRatePercentage}%):* ${netTax.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+        invoiceMsgLines.push(`🏷️ *TOTAL A PAGAR LIQUIDACIÓN:* *${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
+      } else {
+        invoiceMsgLines.push(`💰 *Base Imponible:* ${fin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+        invoiceMsgLines.push(`📊 *IVA (${fin.taxRatePercentage}%):* ${fin.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+        invoiceMsgLines.push(`🏷️ *TOTAL FACTURA:* *${fin.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
+        if (advance > 0) {
+          invoiceMsgLines.push(`💵 *Anticipo abonado:* -${advance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+          invoiceMsgLines.push(`💳 *TOTAL PENDIENTE DE COBRO:* *${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
+        }
       }
 
       invoiceMsgLines.push('');
@@ -541,6 +599,7 @@ async function startWhatsAppGateway() {
       const followUpText = [
         '👉 *Opciones disponibles:*',
         '• Si quieres ver todos tus presupuestos y facturas responde *1*.',
+        '• Para consultar tus números para la gestoría di *"gestoría"*.',
         '• Si quieres un presupuesto nuevo manda un audio o texto diciendo *presupuesto nuevo*.'
       ].join('\n');
 
@@ -551,6 +610,90 @@ async function startWhatsAppGateway() {
       console.error('❌ Error generando factura:', invErr.message);
       const sentErr = await sock.sendMessage(remoteJid, {
         text: `⚠️ *No se pudo generar la factura:* ${invErr.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
+  async function handleAdvanceInvoice(sock, remoteJid, session, targetBudget, clientNif = null) {
+    if (!targetBudget) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: '⚠️ *No se encontró el presupuesto para emitir la factura de anticipo.*\n\nPor favor, indica el nombre del cliente o número de obra (ej: *"factura de anticipo de Juan"*).'
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      return;
+    }
+
+    try {
+      const fin = targetBudget.financials || {};
+      const paidSoFar = targetBudget.paymentSummary?.totalPaid || 0;
+      const advanceAmount = paidSoFar > 0 ? paidSoFar : (fin.advanceAmount || (fin.totalAmount ? Number((fin.totalAmount * 0.3).toFixed(2)) : 300));
+      const payments = targetBudget.payments || [];
+      const lastMethod = payments.length > 0 ? payments[payments.length - 1].method : 'Transferencia bancaria / Bizum';
+      const lastDate = payments.length > 0 ? payments[payments.length - 1].date : new Date().toLocaleDateString('es-ES');
+
+      console.log(`🧾 Emitiendo Factura Legal de Anticipo (${advanceAmount} €) para ${targetBudget.id}...`);
+
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const advanceInvoice = engine.createAdvanceInvoice(targetBudget, {
+        amount: advanceAmount,
+        method: lastMethod,
+        date: lastDate
+      }, { clientNif, company: session.company });
+
+      if (!session.invoices) session.invoices = new Map();
+      session.invoices.set(advanceInvoice.id, advanceInvoice);
+
+      saveInvoice(cleanPhone, advanceInvoice);
+      saveBudget(cleanPhone, targetBudget);
+
+      const invoicePdfBuffer = await generateInvoicePDF(advanceInvoice);
+      const invoiceFileName = `Factura_Anticipo_${advanceInvoice.id}.pdf`;
+
+      const advFin = advanceInvoice.financials || {};
+      const invoiceMsgLines = [
+        `🧾 *FACTURA OFICIAL DE ANTICIPO: ${advanceInvoice.id}*`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `👤 *Cliente:* ${advanceInvoice.client.name}`,
+        `📍 *Dirección:* ${advanceInvoice.client.address}`,
+        `📄 *Presupuesto de referencia:* ${advanceInvoice.budgetId}`,
+        `📅 *Fecha emisión / devengo:* ${advanceInvoice.issueDate}`,
+        '',
+        `💰 *Base Imponible Anticipo:* ${advFin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
+        `📊 *IVA (${advFin.taxRatePercentage}%):* ${advFin.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
+        `🏷️ *TOTAL FACTURA ANTICIPO:* *${advFin.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
+        '',
+        '⚖️ _Factura emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA (devengo anticipado) y RD 1619/2012. Esta base e IVA se deducirán automáticamente al emitir la factura final de liquidación._',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━'
+      ];
+
+      const sentSummary = await sock.sendMessage(remoteJid, { text: invoiceMsgLines.join('\n') });
+      if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
+
+      const sentDoc = await sock.sendMessage(remoteJid, {
+        document: invoicePdfBuffer,
+        mimetype: 'application/pdf',
+        fileName: invoiceFileName,
+        caption: `🧾 *${invoiceFileName}*\nFactura legal de anticipo lista para entregar al cliente o deducir en gestoría.`
+      });
+      if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
+
+      console.log(`✅ Factura de anticipo ${advanceInvoice.id} enviada por WhatsApp.`);
+
+      const followUpText = [
+        '👉 *Opciones disponibles:*',
+        '• Para emitir la factura final de liquidación cuando acaben los trabajos di *"facturar"*.',
+        '• Para consultar tus números para la gestoría di *"gestoría"*.',
+        '• Para un nuevo trabajo di *"presupuesto nuevo"*.'
+      ].join('\n');
+
+      const sentOpts = await sock.sendMessage(remoteJid, { text: followUpText });
+      if (sentOpts?.key?.id) botSentMessageIds.add(sentOpts.key.id);
+
+    } catch (advErr) {
+      console.error('❌ Error emitiendo factura de anticipo:', advErr.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *No se pudo generar la factura de anticipo:* ${advErr.message}`
       });
       if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
     }
@@ -628,6 +771,7 @@ async function startWhatsAppGateway() {
       // Opciones posteriores
       const followUpText = [
         '👉 *Opciones disponibles:*',
+        '• Si deseas emitir la *Factura Oficial de Anticipo* con IVA desglosado responde *"factura de anticipo"*.',
         '• Si quieres ver el resumen de todas tus cuentas responde *1*.',
         '• Para emitir la factura final di *"facturar"*.',
         '• Si quieres un presupuesto nuevo di *presupuesto nuevo*.'
@@ -1005,12 +1149,382 @@ async function startWhatsAppGateway() {
     }
   }
 
+  async function handleAiProcessing(sock, remoteJid, session, taskData, isRetry = false) {
+    await sock.sendPresenceUpdate('composing', remoteJid);
+
+    const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+
+    // Construir contexto enriquecido
+    const budgetsList = Array.from(session.budgets.values()).slice(-5).map(b => ({
+      id: b.id,
+      clientName: b.client?.name !== 'Cliente Particular' ? b.client?.name : null,
+      clientAddress: b.client?.address !== 'Ubicación obra según visita' ? b.client?.address : null,
+      isDraft: b.isDraft,
+      items: (b.items || []).map(i => ({
+        id: i.id,
+        description: i.description,
+        qty: i.qty,
+        unit: i.unit,
+        unitPrice: i.unitPrice,
+        isPricePending: i.isPricePending
+      })),
+      taxRate: b.financials?.taxRatePercentage || 10,
+      discount: b.financials?.discountPercentage > 0 ? { type: 'percentage', value: b.financials.discountPercentage } : null
+    }));
+
+    const companyContext = {
+      name: session.company?.name,
+      cif: session.company?.cif,
+      address: session.company?.address,
+      phone: session.company?.phone,
+      email: session.company?.email,
+      iban: session.company?.iban,
+      bizum: session.company?.bizum
+    };
+
+    const nowObj = new Date();
+    const daysOfWeek = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+    const dayName = daysOfWeek[nowObj.getDay()];
+    const currentDateStr = nowObj.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid' });
+    const currentIsoDate = nowObj.toISOString().split('T')[0];
+    const currentTimeStr = nowObj.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' });
+
+    const contextPrompt = `FECHA Y HORA ACTUAL (utilízala como referencia para resolver días relativos como "hoy", "mañana", "el jueves", etc.):\n${dayName}, ${currentDateStr} (${currentIsoDate}), ${currentTimeStr}\n\nPRESUPUESTOS GUARDADOS EN MEMORIA DEL PROFESIONAL:\n${budgetsList.length > 0 ? JSON.stringify(budgetsList, null, 2) : 'Ninguno todavía'}\n\nPRESUPUESTO ACTIVO ACTUALMENTE: ${session.activeBudgetId || 'Ninguno (modo nuevo cliente)'}\n\nDATOS DE LA EMPRESA DEL PROFESIONAL:\n${JSON.stringify(companyContext, null, 2)}`;
+
+    let aiResult;
+    if (taskData.isAudio) {
+      console.log(`🎙️ Enviando audio a Gemini (${taskData.audioBuffer?.length} bytes)...`);
+      aiResult = await callGemini({
+        audioBuffer: taskData.audioBuffer,
+        mimeType: taskData.audioMimeType || 'audio/ogg',
+        promptText: `${contextPrompt}\n\nEl profesional está dictando una nota de voz. Identifica su intención: si es agendar cita/visita, consultar agenda, cancelar cita, configurar datos de su empresa, consultar empresa, registrar cobro, consultar saldo, facturar, factura de anticipo, exportar trimestre, o crear/modificar presupuesto.`
+      }, GEMINI_UPDATE_PROMPT);
+    } else {
+      console.log(`\n💬 Enviando texto a Gemini: "${taskData.rawUserText}"`);
+      aiResult = await callGemini(
+        `${contextPrompt}\n\nINSTRUCCIONES DEL PROFESIONAL:\n${taskData.rawUserText}`,
+        GEMINI_UPDATE_PROMPT
+      );
+    }
+
+    if (isRetry) {
+      const sentRetryNote = await sock.sendMessage(remoteJid, {
+        text: '🎉 *¡Tu petición guardada en stand-by ha sido procesada con éxito!*\nAquí tienes el documento generado:'
+      });
+      if (sentRetryNote?.key?.id) botSentMessageIds.add(sentRetryNote.key.id);
+    }
+
+    // 1. Factura de anticipo
+    if (aiResult?.action === 'advance_invoice') {
+      const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
+        || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
+        || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
+        || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
+
+      await handleAdvanceInvoice(sock, remoteJid, session, target, aiResult.clientNif);
+      return;
+    }
+
+    // 2. Facturación general / liquidación
+    if (aiResult?.action === 'invoice' || aiResult?.isInvoice) {
+      const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
+        || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
+        || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
+        || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
+
+      await emitInvoiceForBudget(sock, remoteJid, session, target, aiResult.clientNif);
+      return;
+    }
+
+    // 3. Registro de cobro o anticipo
+    if (aiResult?.action === 'payment') {
+      const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
+        || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
+        || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
+        || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
+
+      await handlePaymentRegistration(sock, remoteJid, session, target, aiResult.paymentInfo || {});
+      return;
+    }
+
+    // 4. Consulta de saldo o deuda
+    if (aiResult?.action === 'query_balance') {
+      const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
+        || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
+        || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
+        || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
+
+      await handleQueryBalance(sock, remoteJid, session, target);
+      return;
+    }
+
+    // 5. Consulta datos empresa
+    if (aiResult?.action === 'show_company') {
+      const companyText = formatCompanyForWhatsApp(session.company);
+      const sentComp = await sock.sendMessage(remoteJid, { text: companyText });
+      if (sentComp?.key?.id) botSentMessageIds.add(sentComp.key.id);
+      return;
+    }
+
+    // 6. Configurar empresa
+    if (aiResult?.action === 'configure_company') {
+      const cleanInfo = {};
+      if (aiResult.companyInfo) {
+        for (const [k, v] of Object.entries(aiResult.companyInfo)) {
+          if (v && typeof v === 'string' && v.trim() !== '') {
+            cleanInfo[k] = v.trim();
+          }
+        }
+      }
+      const updated = saveCompany(taskData.senderNumber, cleanInfo);
+      session.company = updated;
+
+      const confText = [
+        '✅ *¡Datos de tu empresa actualizados con éxito!*',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `📛 *Empresa:* ${updated.name}`,
+        `🆔 *CIF:* ${updated.cif}`,
+        `📍 *Dirección:* ${updated.address}`,
+        `🏦 *IBAN:* ${updated.iban}`,
+        `📱 *Bizum:* ${updated.bizum}`,
+        `📞 *Teléfono:* ${updated.phone}`,
+        `✉️ *Email:* ${updated.email}`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        '📄 _Tus nuevos presupuestos, facturas y recibos oficiales se emitirán con estos datos fiscales._'
+      ].join('\n');
+
+      const sentConf = await sock.sendMessage(remoteJid, { text: confText });
+      if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
+      return;
+    }
+
+    // 7. Configurar email gestoría
+    if (aiResult?.action === 'configure_gestoria') {
+      const gestoriaEmail = (aiResult.gestoriaEmail || '').trim().toLowerCase();
+      if (gestoriaEmail) {
+        const updated = saveCompany(taskData.senderNumber, { gestoriaEmail });
+        session.company = updated;
+        const sentConf = await sock.sendMessage(remoteJid, {
+          text: `✅ *¡Email de tu gestoría guardado!*\n\n📧 *Gestoría:* ${gestoriaEmail}\n\nCuando quieras enviar tus facturas di: *"Enviar trimestre a mi gestoría"* o *"gestoría"* para enviarle el Excel y PDF en 1 clic.`
+        });
+        if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
+      }
+      return;
+    }
+
+    // 8. Exportar trimestre
+    if (aiResult?.action === 'export_quarter') {
+      await handleQuarterExport(sock, remoteJid, session, aiResult.quarter, aiResult.year, Boolean(aiResult.sendToGestoria));
+      return;
+    }
+
+    // 9. Agendar cita
+    if (aiResult?.action === 'schedule_appointment') {
+      await handleScheduleAppointment(sock, remoteJid, session, aiResult.appointmentInfo || {});
+      return;
+    }
+
+    // 10. Listar citas
+    if (aiResult?.action === 'list_appointments') {
+      await handleListAppointments(sock, remoteJid, session, aiResult.appointmentFilter || 'upcoming');
+      return;
+    }
+
+    // 11. Cancelar cita
+    if (aiResult?.action === 'cancel_appointment') {
+      await handleCancelAppointment(sock, remoteJid, session, aiResult.appointmentQuery || aiResult.clientName || '');
+      return;
+    }
+
+    // 12. Aceptar presupuesto
+    if (aiResult?.action === 'accept_budget') {
+      const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
+        || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
+        || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
+        || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
+
+      await handleAcceptBudget(sock, remoteJid, session, target);
+      return;
+    }
+
+    if (!aiResult || !aiResult.items || aiResult.items.length === 0) {
+      const sentHelp = await sock.sendMessage(remoteJid, {
+        text: `🤖 *PresuVoz Bot*\n\nNo he detectado partidas técnicas en el mensaje. Puedes dictarme los trabajos de obra (ej: _"tirar tabique de 4x3 metros y mover 2 enchufes por 600 euros"_).`
+      });
+      if (sentHelp?.key?.id) botSentMessageIds.add(sentHelp.key.id);
+      return;
+    }
+
+    // 13. Cálculo y guardado de Presupuesto
+    let targetId = aiResult.targetBudgetId || session.activeBudgetId;
+    const isUpdate = !aiResult.isNewBudget && targetId && session.budgets.has(targetId);
+    const prevBudget = isUpdate ? session.budgets.get(targetId) : null;
+
+    if (prevBudget) {
+      if (!aiResult.clientName && prevBudget.client?.name && prevBudget.client.name !== 'Cliente Particular') {
+        aiResult.clientName = prevBudget.client.name;
+      }
+      if (!aiResult.clientAddress && prevBudget.client?.address && prevBudget.client.address !== 'Ubicación obra según visita') {
+        aiResult.clientAddress = prevBudget.client.address;
+      }
+    }
+
+    const engineResult = engine.process({
+      rawTranscript: '',
+      company: session.company,
+      clientName: aiResult.clientName,
+      clientAddress: aiResult.clientAddress,
+      items: aiResult.items,
+      taxRate: (aiResult.taxRate || session.company?.defaultTaxRate || 10) / 100,
+      discount: aiResult.discount || null,
+      customConditions: aiResult.paymentTerms
+        ? `${aiResult.paymentTerms.advancePercentage}% al aceptar. ${100 - aiResult.paymentTerms.advancePercentage}% a la entrega.`
+        : null
+    });
+
+    if (!engineResult.success) {
+      const sentErrEngine = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *PresuVoz*: ${engineResult.assistantFeedback || 'No se pudo calcular el presupuesto.'}`
+      });
+      if (sentErrEngine?.key?.id) botSentMessageIds.add(sentErrEngine.key.id);
+      return;
+    }
+
+    if (prevBudget && prevBudget.id) {
+      engineResult.budget.id = prevBudget.id;
+      engineResult.budget.payments = prevBudget.payments || [];
+      engineResult.budget.paymentSummary = prevBudget.paymentSummary || engineResult.budget.paymentSummary;
+      engineResult.budget.advanceInvoices = prevBudget.advanceInvoices || [];
+    }
+
+    engineResult.budget.company = session.company;
+    session.budgets.set(engineResult.budget.id, engineResult.budget);
+    session.activeBudgetId = engineResult.budget.id;
+
+    saveBudget(cleanPhone, engineResult.budget);
+    console.log(`💾 Presupuesto guardado en SQLite y sesión: ${engineResult.budget.id} (Total guardados: ${session.budgets.size})`);
+
+    const replyText = formatBudgetForWhatsApp(engineResult.budget, aiResult.warnings || []);
+    const sent = await sock.sendMessage(remoteJid, { text: replyText });
+    if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    console.log('✅ Resumen de texto enviado por WhatsApp.');
+
+    try {
+      console.log('📄 Generando documento PDF oficial...');
+      const pdfBuffer = await generateBudgetPDF(engineResult.budget);
+      const pdfFileName = `Presupuesto_${engineResult.budget.id || 'Obra'}.pdf`;
+
+      const sentDoc = await sock.sendMessage(remoteJid, {
+        document: pdfBuffer,
+        mimetype: 'application/pdf',
+        fileName: pdfFileName,
+        caption: `📄 *${pdfFileName}*\nPresupuesto formal en PDF listo para enviar a tu cliente o imprimir con firma y validez legal.`
+      });
+      if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
+      console.log(`✅ Archivo PDF (${pdfBuffer.length} bytes) enviado con éxito por WhatsApp.`);
+
+      try {
+        const compactBudget = {
+          i: engineResult.budget.id,
+          c: {
+            n: session.company?.name || engineResult.budget.company?.name || 'Carpintería y Reformas Manolo S.L.',
+            f: session.company?.cif || engineResult.budget.company?.cif || 'B-41987654',
+            p: session.company?.phone || cleanPhone,
+            e: session.company?.email || 'presupuestos@presuvoz.app'
+          },
+          k: {
+            n: engineResult.budget.client?.name || 'Cliente Particular',
+            a: engineResult.budget.client?.address || 'Ubicación según visita'
+          },
+          t: (engineResult.budget.items || []).map(it => [it.description, it.qty, it.unitPrice, it.total]),
+          f: {
+            b: engineResult.budget.financials?.subtotal || 0,
+            r: engineResult.budget.financials?.taxRatePercentage || 10,
+            x: engineResult.budget.financials?.taxAmount || 0,
+            t: engineResult.budget.financials?.totalAmount || 0
+          },
+          terms: engineResult.budget.terms
+        };
+
+        const compressed = zlib.deflateRawSync(Buffer.from(JSON.stringify(compactBudget), 'utf-8'));
+        const budgetZ = compressed.toString('base64url');
+        const signingUrl = `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z=${budgetZ}`;
+
+        const sentSig = await sock.sendMessage(remoteJid, {
+          text: `✍️ *Enlace de Aceptación y Firma Digital:*\n${signingUrl}\n\n📲 _Puedes abrirlo tú o enviárselo a tu cliente para que firme cómodamente desde su móvil o desde su casa. Al firmar, el presupuesto pasa a estado *Aceptado* y el cliente recibe su copia sellada por email._`
+        });
+        if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
+        console.log(`✅ Enlace de firma enviado por WhatsApp (${signingUrl}).`);
+      } catch (sigErr) {
+        console.warn('⚠️ No se pudo generar el enlace de firma:', sigErr.message);
+      }
+
+    } catch (pdfErr) {
+      console.error('⚠️ No se pudo generar o enviar el PDF:', pdfErr.message);
+    }
+
+    const optionsText = [
+      '👉 *Opciones disponibles:*',
+      '• Si quieres ver todos tus presupuestos, facturas y saldos responde *1*.',
+      '• Para *registrar un cobro/anticipo* di: *"José Luis me ha pagado 1.500€ por Bizum"*.',
+      '• Para *emitir la factura oficial* di: *"facturar"*.',
+      '• Si quieres uno nuevo manda un audio o texto comentando *presupuesto nuevo*.'
+    ].join('\n');
+
+    const sentOptions = await sock.sendMessage(remoteJid, { text: optionsText });
+    if (sentOptions?.key?.id) botSentMessageIds.add(sentOptions.key.id);
+  }
+
+  async function processAiStandbyQueue(sock) {
+    if (isProcessingAiQueue || aiStandbyQueue.length === 0) return;
+    isProcessingAiQueue = true;
+
+    try {
+      const now = Date.now();
+      for (let i = 0; i < aiStandbyQueue.length; i++) {
+        const item = aiStandbyQueue[i];
+        if (now < item.nextRetryAt) continue;
+
+        console.log(`⏳ Reintentando tarea en stand-by para ${item.remoteJid} (intento ${item.attempts + 1})...`);
+        try {
+          await handleAiProcessing(sock, item.remoteJid, item.session, item.taskData, true);
+          aiStandbyQueue.splice(i, 1);
+          i--;
+          console.log(`✅ Tarea en cola completada con éxito para ${item.remoteJid}.`);
+        } catch (queueErr) {
+          item.attempts += 1;
+          const isOverload = /429|503|quota|exhausted|overload|demand|busy|unavailable|high demand/i.test(queueErr.message || '');
+          if (item.attempts >= 12 || !isOverload) {
+            console.warn(`❌ Tarea en stand-by cancelada tras ${item.attempts} intentos:`, queueErr.message);
+            try {
+              await sock.sendMessage(item.remoteJid, {
+                text: `⚠️ *No se pudo procesar tu mensaje tras varios intentos en cola*\n\nLos servidores de IA continúan saturados (${queueErr.message.substring(0, 80)}...). Por favor, reenvía tu solicitud en unos minutos.`
+              });
+            } catch(e) {}
+            aiStandbyQueue.splice(i, 1);
+            i--;
+          } else {
+            const delay = Math.min(60000, 5000 * Math.pow(1.35, item.attempts));
+            item.nextRetryAt = Date.now() + delay;
+            console.log(`⏳ Próximo reintento para ${item.remoteJid} en ${Math.round(delay / 1000)}s.`);
+          }
+        }
+      }
+    } finally {
+      isProcessingAiQueue = false;
+    }
+  }
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     // Aceptar tanto 'notify' (mensajes de terceros) como 'append' (mensajes a ti mismo desde tu móvil)
     if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of messages) {
       if (!msg.message) continue;
+
+      if (msg.key?.id) {
+        storeMessage(msg.key.id, msg.message);
+      }
 
       // Evitar procesar mensajes que el propio bot acaba de enviar
       if (msg.key?.id && botSentMessageIds.has(msg.key.id)) {
@@ -1324,6 +1838,23 @@ async function startWhatsAppGateway() {
         continue;
       }
 
+      // Comando directo para Factura de Anticipo con IVA: "factura de anticipo", "facturar anticipo", "factura anticipo Juan"
+      const advanceInvCmdMatch = rawUserText.match(/^(?:factura\s+(?:de\s+)?anticipo|facturar\s+anticipo|emitir\s+factura\s+(?:de\s+)?anticipo)(?:\s+(?:de\s+|del\s+presupuesto\s+|de\s+la\s+obra\s+de\s+|el\s+presupuesto\s+)?(.+))?$/i);
+      if (advanceInvCmdMatch) {
+        if (session.budgets.size === 0) {
+          const sentNoBudget = await sock.sendMessage(remoteJid, {
+            text: '📂 *No tienes ningún presupuesto registrado todavía.*\n\nPrimero genera un presupuesto y podrás emitir la factura de anticipo.'
+          });
+          if (sentNoBudget?.key?.id) botSentMessageIds.add(sentNoBudget.key.id);
+          continue;
+        }
+
+        const query = advanceInvCmdMatch[1] ? advanceInvCmdMatch[1].trim() : '';
+        const target = findBudgetInSession(session, query);
+        await handleAdvanceInvoice(sock, remoteJid, session, target);
+        continue;
+      }
+
       // Comando directo para facturar: "factura", "facturar", "factura de José Luis", "facturar 5129"
       const invoiceCmdMatch = rawUserText.match(/^(?:factura|facturar|emitir factura)(?:\s+(?:de\s+|del\s+presupuesto\s+|de\s+la\s+obra\s+de\s+|el\s+presupuesto\s+)?(.+))?$/i);
       if (invoiceCmdMatch) {
@@ -1371,368 +1902,60 @@ async function startWhatsAppGateway() {
         continue;
       }
 
-      try {
-        await sock.sendPresenceUpdate('composing', remoteJid);
-
-        let aiResult;
-
-        // Construir resumen de los presupuestos guardados para dar contexto a Gemini
-        const budgetsList = Array.from(session.budgets.values()).slice(-5).map(b => ({
-          id: b.id,
-          clientName: b.client?.name !== 'Cliente Particular' ? b.client?.name : null,
-          clientAddress: b.client?.address !== 'Ubicación obra según visita' ? b.client?.address : null,
-          isDraft: b.isDraft,
-          items: (b.items || []).map(i => ({
-            id: i.id,
-            description: i.description,
-            qty: i.qty,
-            unit: i.unit,
-            unitPrice: i.unitPrice,
-            isPricePending: i.isPricePending
-          })),
-          taxRate: b.financials?.taxRatePercentage || 10,
-          discount: b.financials?.discountPercentage > 0 ? { type: 'percentage', value: b.financials.discountPercentage } : null
-        }));
-
-        const companyContext = {
-          name: session.company?.name,
-          cif: session.company?.cif,
-          address: session.company?.address,
-          phone: session.company?.phone,
-          email: session.company?.email,
-          iban: session.company?.iban,
-          bizum: session.company?.bizum
-        };
-
-        const nowObj = new Date();
-        const daysOfWeek = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
-        const dayName = daysOfWeek[nowObj.getDay()];
-        const currentDateStr = nowObj.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid' });
-        const currentIsoDate = nowObj.toISOString().split('T')[0];
-        const currentTimeStr = nowObj.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' });
-
-        const contextPrompt = `FECHA Y HORA ACTUAL (utilízala como referencia para resolver días relativos como "hoy", "mañana", "el jueves", etc.):\n${dayName}, ${currentDateStr} (${currentIsoDate}), ${currentTimeStr}\n\nPRESUPUESTOS GUARDADOS EN MEMORIA DEL PROFESIONAL:\n${budgetsList.length > 0 ? JSON.stringify(budgetsList, null, 2) : 'Ninguno todavía'}\n\nPRESUPUESTO ACTIVO ACTUALMENTE: ${session.activeBudgetId || 'Ninguno (modo nuevo cliente)'}\n\nDATOS DE LA EMPRESA DEL PROFESIONAL:\n${JSON.stringify(companyContext, null, 2)}`;
-
-        if (isAudio) {
+      // Preparar payload de IA (audio o texto)
+      let audioBuffer = null;
+      if (isAudio) {
+        try {
           console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
-          const buffer = await downloadMediaMessage(
+          audioBuffer = await downloadMediaMessage(
             { key: msg.key, message: messageContent },
             'buffer',
             {},
             { logger, reuploadRequest: sock.updateMediaMessage }
           );
-
-          console.log(`🎙️ Audio descargado (${buffer.length} bytes). Enviando a Gemini con contexto inteligente...`);
-          aiResult = await callGemini({
-            audioBuffer: buffer,
-            mimeType: audioMsg?.mimetype || 'audio/ogg',
-            promptText: `${contextPrompt}\n\nEl profesional está dictando una nota de voz. Identifica su intención: si es agendar cita/visita, consultar agenda, cancelar cita, configurar datos de su empresa, consultar empresa, registrar cobro, consultar saldo, facturar, exportar trimestre, o crear/modificar presupuesto.`
-          }, GEMINI_UPDATE_PROMPT);
-        } else {
-          console.log(`\n💬 Texto recibido: "${rawUserText}"`);
-          aiResult = await callGemini(
-            `${contextPrompt}\n\nINSTRUCCIONES DEL PROFESIONAL:\n${rawUserText}`,
-            GEMINI_UPDATE_PROMPT
-          );
-        }
-
-        // Si la IA detectó solicitud de facturación
-        if (aiResult?.action === 'invoice' || aiResult?.isInvoice) {
-          const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
-            || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
-            || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
-            || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
-
-          await emitInvoiceForBudget(sock, remoteJid, session, target, aiResult.clientNif);
-          continue;
-        }
-
-        // Si la IA detectó registro de cobro o anticipo
-        if (aiResult?.action === 'payment') {
-          const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
-            || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
-            || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
-            || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
-
-          await handlePaymentRegistration(sock, remoteJid, session, target, aiResult.paymentInfo || {});
-          continue;
-        }
-
-        // Si la IA detectó consulta de saldo o deuda
-        if (aiResult?.action === 'query_balance') {
-          const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
-            || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
-            || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
-            || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
-
-          await handleQueryBalance(sock, remoteJid, session, target);
-          continue;
-        }
-
-        // Si la IA detectó consulta de datos de la empresa
-        if (aiResult?.action === 'show_company') {
-          const companyText = formatCompanyForWhatsApp(session.company);
-          const sentComp = await sock.sendMessage(remoteJid, { text: companyText });
-          if (sentComp?.key?.id) botSentMessageIds.add(sentComp.key.id);
-          continue;
-        }
-
-        // Si la IA detectó configuración o actualización de empresa
-        if (aiResult?.action === 'configure_company') {
-          const cleanInfo = {};
-          if (aiResult.companyInfo) {
-            for (const [k, v] of Object.entries(aiResult.companyInfo)) {
-              if (v && typeof v === 'string' && v.trim() !== '') {
-                cleanInfo[k] = v.trim();
-              }
-            }
-          }
-          const updated = saveCompany(senderNumber, cleanInfo);
-          session.company = updated;
-
-          const confText = [
-            '✅ *¡Datos de tu empresa actualizados con éxito!*',
-            '━━━━━━━━━━━━━━━━━━━━━━━━━',
-            `📛 *Empresa:* ${updated.name}`,
-            `🆔 *CIF:* ${updated.cif}`,
-            `📍 *Dirección:* ${updated.address}`,
-            `🏦 *IBAN:* ${updated.iban}`,
-            `📱 *Bizum:* ${updated.bizum}`,
-            `📞 *Teléfono:* ${updated.phone}`,
-            `✉️ *Email:* ${updated.email}`,
-            '━━━━━━━━━━━━━━━━━━━━━━━━━',
-            '📄 _Tus nuevos presupuestos, facturas y recibos oficiales se emitirán con estos datos fiscales._'
-          ].join('\n');
-
-          const sentConf = await sock.sendMessage(remoteJid, { text: confText });
-          if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
-          continue;
-        }
-
-        // Si la IA detectó configuración del email de la gestoría
-        if (aiResult?.action === 'configure_gestoria') {
-          const gestoriaEmail = (aiResult.gestoriaEmail || '').trim().toLowerCase();
-          if (gestoriaEmail) {
-            const updated = saveCompany(senderNumber, { gestoriaEmail });
-            session.company = updated;
-            const sentConf = await sock.sendMessage(remoteJid, {
-              text: `✅ *¡Email de tu gestoría guardado!*\n\n📧 *Gestoría:* ${gestoriaEmail}\n\nCuando quieras enviar tus facturas di: *"Enviar trimestre a mi gestoría"* o *"gestoría"* para enviarle el Excel y PDF en 1 clic.`
-            });
-            if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
-          }
-          continue;
-        }
-
-        // Si la IA detectó solicitud de exportación del trimestre para la gestoría
-        if (aiResult?.action === 'export_quarter') {
-          await handleQuarterExport(sock, remoteJid, session, aiResult.quarter, aiResult.year, Boolean(aiResult.sendToGestoria));
-          continue;
-        }
-
-        // Si la IA detectó solicitud de agendar cita o visita técnica
-        if (aiResult?.action === 'schedule_appointment') {
-          await handleScheduleAppointment(sock, remoteJid, session, aiResult.appointmentInfo || {});
-          continue;
-        }
-
-        // Si la IA detectó consulta de agenda
-        if (aiResult?.action === 'list_appointments') {
-          await handleListAppointments(sock, remoteJid, session, aiResult.appointmentFilter || 'upcoming');
-          continue;
-        }
-
-        // Si la IA detectó cancelación de cita
-        if (aiResult?.action === 'cancel_appointment') {
-          await handleCancelAppointment(sock, remoteJid, session, aiResult.appointmentQuery || aiResult.clientName || '');
-          continue;
-        }
-
-        // Si la IA detectó aceptación del presupuesto
-        if (aiResult?.action === 'accept_budget') {
-          const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
-            || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
-            || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
-            || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
-
-          await handleAcceptBudget(sock, remoteJid, session, target);
-          continue;
-        }
-
-        if (!aiResult || !aiResult.items || aiResult.items.length === 0) {
-          const sentHelp = await sock.sendMessage(remoteJid, {
-            text: `🤖 *PresuVoz Bot*\n\nNo he detectado partidas técnicas en el mensaje. Puedes dictarme los trabajos de obra (ej: _"tirar tabique de 4x3 metros y mover 2 enchufes por 600 euros"_).`
+        } catch (dlErr) {
+          console.error('❌ Error descargando audio:', dlErr.message);
+          const sentDlErr = await sock.sendMessage(remoteJid, {
+            text: '⚠️ *No se pudo descargar la nota de voz.* Por favor, vuelve a enviarla.'
           });
-          if (sentHelp?.key?.id) botSentMessageIds.add(sentHelp.key.id);
+          if (sentDlErr?.key?.id) botSentMessageIds.add(sentDlErr.key.id);
           continue;
         }
+      }
 
-        // Determinar si actualiza un presupuesto existente o crea uno nuevo
-        let targetId = aiResult.targetBudgetId || session.activeBudgetId;
-        const isUpdate = !aiResult.isNewBudget && targetId && session.budgets.has(targetId);
-        const prevBudget = isUpdate ? session.budgets.get(targetId) : null;
+      const taskData = {
+        isAudio,
+        audioBuffer,
+        audioMimeType: audioMsg?.mimetype || 'audio/ogg',
+        rawUserText,
+        senderNumber
+      };
 
-        // Preservar datos de cliente si es actualización y no los modificó
-        if (prevBudget) {
-          if (!aiResult.clientName && prevBudget.client?.name && prevBudget.client.name !== 'Cliente Particular') {
-            aiResult.clientName = prevBudget.client.name;
-          }
-          if (!aiResult.clientAddress && prevBudget.client?.address && prevBudget.client.address !== 'Ubicación obra según visita') {
-            aiResult.clientAddress = prevBudget.client.address;
-          }
-        }
-
-        const engineResult = engine.process({
-          rawTranscript: '',
-          company: session.company,
-          clientName: aiResult.clientName,
-          clientAddress: aiResult.clientAddress,
-          items: aiResult.items,
-          taxRate: (aiResult.taxRate || session.company?.defaultTaxRate || 10) / 100,
-          discount: aiResult.discount || null,
-          customConditions: aiResult.paymentTerms
-            ? `${aiResult.paymentTerms.advancePercentage}% al aceptar. ${100 - aiResult.paymentTerms.advancePercentage}% a la entrega.`
-            : null
-        });
-
-        if (!engineResult.success) {
-          const sentErrEngine = await sock.sendMessage(remoteJid, {
-            text: `⚠️ *PresuVoz*: ${engineResult.assistantFeedback || 'No se pudo calcular el presupuesto.'}`
-          });
-          if (sentErrEngine?.key?.id) botSentMessageIds.add(sentErrEngine.key.id);
-          continue;
-        }
-
-        // Mantener el mismo número de presupuesto y pagos si es actualización
-        if (prevBudget && prevBudget.id) {
-          engineResult.budget.id = prevBudget.id;
-          engineResult.budget.payments = prevBudget.payments || [];
-          engineResult.budget.paymentSummary = prevBudget.paymentSummary || engineResult.budget.paymentSummary;
-        }
-
-        // Asegurar que el presupuesto tiene los datos de la empresa actualizados
-        engineResult.budget.company = session.company;
-
-        // Guardar en el historial de la sesión y marcarlo como activo
-        session.budgets.set(engineResult.budget.id, engineResult.budget);
-        session.activeBudgetId = engineResult.budget.id;
-
-        // Persistir en SQLite
-        const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-        saveBudget(cleanPhone, engineResult.budget);
-        console.log(`💾 Presupuesto guardado en SQLite y sesión: ${engineResult.budget.id} (Total guardados: ${session.budgets.size})`);
-
-        // Enviar resumen por WhatsApp
-        const replyText = formatBudgetForWhatsApp(engineResult.budget, aiResult.warnings || []);
-        const sent = await sock.sendMessage(remoteJid, { text: replyText });
-        if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-        console.log('✅ Resumen de texto enviado por WhatsApp.');
-
-        // Generar y enviar documento PDF oficial adjunto
-        try {
-          console.log('📄 Generando documento PDF oficial...');
-          const pdfBuffer = await generateBudgetPDF(engineResult.budget);
-          const pdfFileName = `Presupuesto_${engineResult.budget.id || 'Obra'}.pdf`;
-
-          const sentDoc = await sock.sendMessage(remoteJid, {
-            document: pdfBuffer,
-            mimetype: 'application/pdf',
-            fileName: pdfFileName,
-            caption: `📄 *${pdfFileName}*\nPresupuesto formal en PDF listo para enviar a tu cliente o imprimir con firma y validez legal.`
-          });
-          if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
-          console.log(`✅ Archivo PDF (${pdfBuffer.length} bytes) enviado con éxito por WhatsApp.`);
-
-          // Generar enlace de firma digital táctil con datos limpios
-          try {
-            const cleanBudget = {
-              id: engineResult.budget.id,
-              company: {
-                name: session.company?.name || engineResult.budget.company?.name || 'Carpintería y Reformas Manolo S.L.',
-                cif: session.company?.cif || '',
-                address: session.company?.address || '',
-                phone: session.company?.phone || ''
-              },
-              client: {
-                name: engineResult.budget.client?.name || 'Cliente Particular',
-                address: engineResult.budget.client?.address || 'Ubicación según visita'
-              },
-              items: (engineResult.budget.items || []).map(i => ({
-                id: i.id,
-                description: i.description,
-                qty: i.qty,
-                unit: i.unit,
-                unitPrice: i.unitPrice,
-                total: i.total,
-                isPricePending: i.isPricePending
-              })),
-              financials: {
-                subtotal: engineResult.budget.financials?.subtotal || 0,
-                discountPercentage: engineResult.budget.financials?.discountPercentage || 0,
-                discountAmount: engineResult.budget.financials?.discountAmount || 0,
-                taxableBase: engineResult.budget.financials?.taxableBase || 0,
-                taxRatePercentage: engineResult.budget.financials?.taxRatePercentage || 10,
-                taxAmount: engineResult.budget.financials?.taxAmount || 0,
-                totalAmount: engineResult.budget.financials?.totalAmount || 0,
-                advancePercentage: engineResult.budget.financials?.advancePercentage || 30,
-                advanceAmount: engineResult.budget.financials?.advanceAmount || 0
-              },
-              terms: engineResult.budget.terms,
-              isDraft: engineResult.budget.isDraft
-            };
-
-            // Compactar y comprimir con Deflate para reducir el tamaño un 70% (evita cualquier truncamiento en navegadores)
-            const compactBudget = {
-              i: cleanBudget.id,
-              c: { n: cleanBudget.company?.name, c: cleanBudget.company?.cif, a: cleanBudget.company?.address, p: cleanBudget.company?.phone },
-              k: { n: cleanBudget.client?.name, a: cleanBudget.client?.address },
-              t: (cleanBudget.items || []).map(it => ({ d: it.description, q: it.qty, u: it.unit, p: it.unitPrice, t: it.total })),
-              f: {
-                b: cleanBudget.financials?.taxableBase,
-                r: cleanBudget.financials?.taxRatePercentage,
-                a: cleanBudget.financials?.taxAmount,
-                t: cleanBudget.financials?.totalAmount,
-                ap: cleanBudget.financials?.advancePercentage,
-                aa: cleanBudget.financials?.advanceAmount
-              },
-              terms: cleanBudget.terms
-            };
-
-            const compressed = zlib.deflateRawSync(Buffer.from(JSON.stringify(compactBudget), 'utf-8'));
-            const budgetZ = compressed.toString('base64url');
-            // Enlace directo oficial de GitHub Pages (100% fiable, sin intermediarios ni acortadores externos)
-            const signingUrl = `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z=${budgetZ}`;
-
-            const sentSig = await sock.sendMessage(remoteJid, {
-              text: `✍️ *Enlace de Aceptación y Firma Digital:*\n${signingUrl}\n\n📲 _Puedes abrirlo tú o enviárselo a tu cliente para que firme cómodamente desde su móvil o desde su casa. Al firmar, el presupuesto pasa a estado *Aceptado* y el cliente recibe su copia sellada por email._`
-            });
-            if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
-            console.log(`✅ Enlace de firma enviado por WhatsApp (${signingUrl}).`);
-          } catch (sigErr) {
-            console.warn('⚠️ No se pudo generar el enlace de firma:', sigErr.message);
-          }
-
-        } catch (pdfErr) {
-          console.error('⚠️ No se pudo generar o enviar el PDF:', pdfErr.message);
-        }
-
-        // Enviar mensaje interactivo de opciones
-        const optionsText = [
-          '👉 *Opciones disponibles:*',
-          '• Si quieres ver todos tus presupuestos, facturas y saldos responde *1*.',
-          '• Para *registrar un cobro/anticipo* di: *"José Luis me ha pagado 1.500€ por Bizum"*.',
-          '• Para *emitir la factura oficial* di: *"facturar"*.',
-          '• Si quieres uno nuevo manda un audio o texto comentando *presupuesto nuevo*.'
-        ].join('\n');
-
-        const sentOptions = await sock.sendMessage(remoteJid, { text: optionsText });
-        if (sentOptions?.key?.id) botSentMessageIds.add(sentOptions.key.id);
-
+      try {
+        await handleAiProcessing(sock, remoteJid, session, taskData, false);
       } catch (err) {
         console.error('❌ Error procesando mensaje de WhatsApp:', err.message);
-        const sentErr = await sock.sendMessage(remoteJid, {
-          text: `⚠️ *No se ha podido procesar el presupuesto*\n\nHa habido una saturación momentánea en el servicio de IA. Por favor, reenvía tu audio o mensaje en unos segundos.`
-        });
-        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+        const isOverload = /429|503|quota|exhausted|overload|demand|busy|unavailable|high demand/i.test(err.message || '');
+        if (isOverload) {
+          aiStandbyQueue.push({
+            id: Date.now(),
+            remoteJid,
+            session,
+            taskData,
+            attempts: 0,
+            nextRetryAt: Date.now() + 5000
+          });
+          console.log(`⏳ Petición guardada en cola stand-by para ${remoteJid} por alta demanda de Gemini.`);
+          const sentStandby = await sock.sendMessage(remoteJid, {
+            text: `⏳ *Servidores de IA con alta demanda temporal*\n\nHe dejado tu ${isAudio ? 'nota de voz' : 'mensaje'} guardado en *cola de espera (stand-by)*. El bot reintentará procesarlo automáticamente en segundo plano hasta que se genere tu presupuesto, sin que tengas que volver a grabar ni enviar nada.\n\n_En cuanto esté listo, te llegará aquí el presupuesto._`
+          });
+          if (sentStandby?.key?.id) botSentMessageIds.add(sentStandby.key.id);
+        } else {
+          const sentErr = await sock.sendMessage(remoteJid, {
+            text: `⚠️ *No se ha podido procesar el presupuesto*\n\nHa habido una incidencia temporal (${err.message.substring(0, 80)}...). Por favor, reenvía tu solicitud.`
+          });
+          if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+        }
       } finally {
         await sock.sendPresenceUpdate('paused', remoteJid);
       }
