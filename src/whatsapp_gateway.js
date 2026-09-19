@@ -50,6 +50,22 @@ import {
 
 dotenv.config();
 
+// Silenciar volcados internos de depuración de claves criptográficas de libsignal (Signal Protocol)
+const _origInfo = console.info;
+console.info = (...args) => {
+  if (typeof args[0] === 'string' && (args[0].includes('session:') || args[0].includes('Session:') || args[0].includes('Migrating session'))) {
+    return;
+  }
+  _origInfo(...args);
+};
+const _origWarn = console.warn;
+console.warn = (...args) => {
+  if (typeof args[0] === 'string' && (args[0].includes('Session already') || args[0].includes('Closing open session'))) {
+    return;
+  }
+  _origWarn(...args);
+};
+
 const makeWASocket = makeWASocketPkg.default || makeWASocketPkg;
 const engine = new PresuVozEngine();
 
