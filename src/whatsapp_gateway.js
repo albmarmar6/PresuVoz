@@ -44,7 +44,8 @@ import {
   listAppointments,
   updateAppointmentStatus,
   cancelAppointment,
-  updateBudgetStatus
+  updateBudgetStatus,
+  syncPendingSignaturesFromCloud
 } from './db_service.js';
 
 dotenv.config();
@@ -327,6 +328,24 @@ async function startWhatsAppGateway() {
     } else if (connection === 'open') {
       console.log('\n✅ ¡WHATSAPP CONECTADO CON ÉXITO!');
       console.log('🤖 PresuVoz Bot listo para recibir audios y mensajes.\n');
+
+      // Sondeo automático cada 8 segundos para detectar firmas del cliente en la web
+      setInterval(async () => {
+        try {
+          const acceptedList = await syncPendingSignaturesFromCloud();
+          for (const item of acceptedList) {
+            const jid = item.companyPhone?.includes('@') ? item.companyPhone : `${item.companyPhone}@s.whatsapp.net`;
+            try {
+              await sock.sendMessage(jid, {
+                text: `🎉 *¡Presupuesto Aceptado!*\n\nEl cliente *${item.clientName}* acaba de firmar el presupuesto *${item.budgetId}* a través del enlace digital.\n\n✅ *Estado actualizado:* \`🟢 ACEPTADO\`\n📧 *Copia legal enviada a:* ${item.signedEmail || 'Email registrado'}\n\n_Ya puedes preparar los trabajos o registrar el cobro de anticipo cuando lo recibas._`
+              });
+              console.log(`🎉 Notificación de firma enviada por WhatsApp para ${item.budgetId}.`);
+            } catch (sendErr) {
+              console.warn('⚠️ No se pudo enviar notificación de firma por WhatsApp:', sendErr.message);
+            }
+          }
+        } catch (e) {}
+      }, 8000);
     }
   });
 

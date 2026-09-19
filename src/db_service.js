@@ -233,6 +233,66 @@ export function updateBudgetStatus(phone, budgetId, status) {
   return budget;
 }
 
+export async function syncPendingSignaturesFromCloud() {
+  try {
+    const stmt = db.prepare("SELECT id, company_phone, data_json FROM budgets WHERE status != 'ACEPTADO' AND status != 'FIRMADO'");
+    const rows = stmt.all();
+    if (!rows || rows.length === 0) return [];
+
+    const newlyAccepted = [];
+
+    for (const row of rows) {
+      try {
+        const budgetId = row.id;
+        const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
+        const url = `https://keyvalue.immanuel.co/api/KeyVal/GetValue/presuvoz2026/signed_${encodeURIComponent(cleanId)}`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
+        if (!res.ok) continue;
+        const raw = await res.json();
+        if (!raw || typeof raw !== 'string') continue;
+
+        const normalized = raw.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = normalized.padEnd(normalized.length + (4 - normalized.length % 4) % 4, '=');
+        const decoded = Buffer.from(padded, 'base64').toString('utf-8');
+        const signInfo = JSON.parse(decoded);
+
+        if (signInfo && signInfo.signed) {
+          let budgetObj = null;
+          try { budgetObj = JSON.parse(row.data_json); } catch(e) {}
+          if (budgetObj) {
+            budgetObj.status = 'ACEPTADO';
+            budgetObj.signedAt = signInfo.signedAt || new Date().toISOString();
+            budgetObj.signedEmail = signInfo.clientEmail || '';
+          }
+
+          const now = new Date().toISOString();
+          db.prepare(`
+            UPDATE budgets
+            SET status = 'ACEPTADO',
+                updated_at = ?,
+                data_json = ?
+            WHERE id = ?
+          `).run(now, JSON.stringify(budgetObj || { id: budgetId, status: 'ACEPTADO' }), budgetId);
+
+          newlyAccepted.push({
+            budgetId,
+            clientName: signInfo.clientName || budgetObj?.client?.name || 'Cliente',
+            companyPhone: row.company_phone,
+            signedEmail: signInfo.clientEmail,
+            signedAt: signInfo.signedAt
+          });
+        }
+      } catch(err) {
+        // Ignorar fallos de red en sondeos individuales
+      }
+    }
+
+    return newlyAccepted;
+  } catch (e) {
+    return [];
+  }
+}
+
 export function getBudget(id) {
   if (!id) return null;
   const stmt = db.prepare('SELECT data_json FROM budgets WHERE id = ?');

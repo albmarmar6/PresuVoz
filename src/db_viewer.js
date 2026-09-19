@@ -2,6 +2,7 @@ import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import fs from 'node:fs';
+import { syncPendingSignaturesFromCloud } from './db_service.js';
 
 const DB_PATH = path.resolve('data', 'presuvoz.db');
 const PORT = process.env.DB_VIEWER_PORT || 3333;
@@ -314,9 +315,10 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 </body>
 </html>`;
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   if (req.url === '/api/data') {
     try {
+      await syncPendingSignaturesFromCloud();
       const data = getDbData();
       res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
       res.end(JSON.stringify(data));
