@@ -81,11 +81,10 @@ const ALLOWED_NUMBERS = (process.env.ALLOWED_NUMBERS || '')
 
 const GEMINI_MODELS = [
   'gemini-3.8-flash',
-  'gemini-3.6-flash',
   'gemini-3.7-flash',
-  'gemini-2.5-flash',
-  'gemini-2.0-flash',
-  'gemini-1.5-flash'
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
+  'gemini-2.5-flash'
 ];
 
 // Almacén en memoria de mensajes de WhatsApp para responder a solicitudes 'retry' (evita 'Esperando mensaje')
@@ -166,9 +165,13 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
       if (!response.ok) {
         const errMsg = data.error?.message || `Error HTTP ${response.status}`;
         console.warn(`PresuVoz ⚠ Modelo "${model}" no disponible (${response.status}): ${errMsg.substring(0, 100)}`);
-        lastError = new Error(errMsg);
-        if (response.status === 429 || response.status === 503) {
-          await new Promise(r => setTimeout(r, 1200));
+        
+        // Priorizar errores de cuota o alta demanda (429/503) para activar correctamente la cola stand-by
+        if (response.status === 429 || response.status === 503 || /demand|quota|busy|exhausted/i.test(errMsg)) {
+          lastError = new Error(`Servidores de Gemini saturados (${response.status}: ${errMsg.substring(0, 100)})`);
+          await new Promise(r => setTimeout(r, 1000));
+        } else if (!lastError || !/demand|quota|busy|exhausted|429|503/i.test(lastError.message)) {
+          lastError = new Error(errMsg);
         }
         continue;
       }
@@ -180,7 +183,9 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
       return JSON.parse(jsonText);
     } catch (e) {
       console.warn(`PresuVoz ⚠ Error con modelo "${model}":`, e.message);
-      lastError = e;
+      if (!lastError || !/demand|quota|busy|exhausted|429|503/i.test(lastError.message)) {
+        lastError = e;
+      }
     }
   }
 
@@ -1687,7 +1692,7 @@ async function startWhatsAppGateway() {
           console.log(`✅ Tarea en cola completada con éxito para ${item.remoteJid}.`);
         } catch (queueErr) {
           item.attempts += 1;
-          const isOverload = /429|503|quota|exhausted|overload|demand|busy|unavailable|high demand/i.test(queueErr.message || '');
+          const isOverload = /429|503|quota|exhausted|overload|demand|busy|unavailable|high demand|saturad/i.test(queueErr.message || '');
           if (item.attempts >= 12 || !isOverload) {
             console.warn(`❌ Tarea en stand-by cancelada tras ${item.attempts} intentos:`, queueErr.message);
             try {
@@ -2096,7 +2101,7 @@ async function startWhatsAppGateway() {
         await handleAiProcessing(sock, remoteJid, session, taskData, false);
       } catch (err) {
         console.error('❌ Error procesando mensaje de WhatsApp:', err.message);
-        const isOverload = /429|503|quota|exhausted|overload|demand|busy|unavailable|high demand/i.test(err.message || '');
+        const isOverload = /429|503|quota|exhausted|overload|demand|busy|unavailable|high demand|saturad/i.test(err.message || '');
         if (isOverload) {
           aiStandbyQueue.push({
             id: Date.now(),
