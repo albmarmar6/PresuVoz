@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Presupuesto — PresuVoz</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap");
     * { font-family: "Inter", sans-serif; -webkit-tap-highlight-color: transparent; }
@@ -262,6 +263,70 @@ function decodeBase64Utf8(base64Str) {
   return new TextDecoder('utf-8').decode(bytes);
 }
 
+async function decompressZ(b64Str) {
+  const normalized = b64Str.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized.padEnd(normalized.length + (4 - normalized.length % 4) % 4, '=');
+  const binaryString = atob(padded);
+  const bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0));
+
+  // 1. Intentar con DecompressionStream nativo del navegador
+  if (typeof DecompressionStream !== 'undefined') {
+    try {
+      const stream = new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw')));
+      const text = await stream.text();
+      return JSON.parse(text);
+    } catch (e) {
+      console.warn('DecompressionStream nativo falló, probando fallback pako...', e);
+    }
+  }
+
+  // 2. Fallback a pako si está cargado
+  if (typeof window.pako !== 'undefined' && window.pako.inflateRaw) {
+    const text = window.pako.inflateRaw(bytes, { to: 'string' });
+    return JSON.parse(text);
+  }
+
+  throw new Error('El navegador no soporta descompresión deflate.');
+}
+
+function normalizeBudget(raw) {
+  if (!raw) return null;
+  if (raw.id && raw.client && Array.isArray(raw.items)) return raw;
+
+  return {
+    id: raw.i || raw.id || 'PRE-2026',
+    company: {
+      name: raw.c?.n || raw.company?.name || 'Empresa Instaladora',
+      cif: raw.c?.c || raw.company?.cif || '',
+      address: raw.c?.a || raw.company?.address || '',
+      phone: raw.c?.p || raw.company?.phone || ''
+    },
+    client: {
+      name: raw.k?.n || raw.client?.name || 'Cliente Particular',
+      address: raw.k?.a || raw.client?.address || ''
+    },
+    items: (raw.t || raw.items || []).map((it, idx) => ({
+      id: it.id || idx + 1,
+      description: it.d || it.description || '',
+      qty: it.q ?? it.qty ?? 1,
+      unit: it.u || it.unit || 'pa',
+      unitPrice: it.p ?? it.unitPrice ?? 0,
+      total: it.t ?? it.total ?? 0,
+      isPricePending: (it.p === 0 || it.t === 0)
+    })),
+    financials: {
+      taxableBase: raw.f?.b ?? raw.financials?.taxableBase ?? 0,
+      taxRatePercentage: raw.f?.r ?? raw.financials?.taxRatePercentage ?? 10,
+      taxAmount: raw.f?.a ?? raw.financials?.taxAmount ?? 0,
+      totalAmount: raw.f?.t ?? raw.financials?.totalAmount ?? 0,
+      advancePercentage: raw.f?.ap ?? raw.financials?.advancePercentage ?? 30,
+      advanceAmount: raw.f?.aa ?? raw.financials?.advanceAmount ?? 0
+    },
+    terms: raw.terms || { validityDays: 15, conditions: '30% al aceptar. 70% a la entrega.' },
+    status: raw.s || raw.status || 'PENDIENTE_ACEPTACION'
+  };
+}
+
 function getStorageKey(budgetId) {
   return 'presuvoz_signed_' + String(budgetId || '').trim().replace(/\s+/g, '_');
 }
@@ -313,13 +378,28 @@ async function saveRemoteSigned(budgetId, record) {
 
 window.addEventListener('DOMContentLoaded', async () => {
   const params = new URLSearchParams(window.location.search);
-  const data = params.get('data');
-  if (!data) { showState('error'); return; }
+  const zParam = params.get('z');
+  const dataParam = params.get('data');
+
+  if (!zParam && !dataParam) {
+    showState('error');
+    return;
+  }
 
   try {
-    budget = JSON.parse(decodeBase64Utf8(data));
+    if (zParam) {
+      const decompressed = await decompressZ(zParam);
+      budget = normalizeBudget(decompressed);
+    } else {
+      budget = normalizeBudget(JSON.parse(decodeBase64Utf8(dataParam)));
+    }
   } catch(e) {
     console.error('Error decodificando presupuesto:', e);
+    showState('error');
+    return;
+  }
+
+  if (!budget || !budget.id) {
     showState('error');
     return;
   }

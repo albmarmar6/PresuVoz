@@ -15,6 +15,7 @@ import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import dotenv from 'dotenv';
 import { Resend } from 'resend';
 import { PresuVozEngine } from './engine.js';
@@ -219,43 +220,61 @@ function formatBudgetForWhatsApp(budget, warnings = []) {
 }
 
 async function shortenUrl(longUrl) {
-  // 1. Intentar CleanURI (enlace corto directo sin pantallas intermedias ni deprecaciones)
+  // 1. Intentar da.gd (capacidad de más de 3.000 caracteres sin truncar, redirección 302 directa limpia)
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 4000);
-    const res = await fetch('https://cleanuri.com/api/v1/shorten', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ url: longUrl }),
+    const res = await fetch(`https://da.gd/s?url=${encodeURIComponent(longUrl)}`, {
       signal: controller.signal
     });
     clearTimeout(timeout);
     if (res.ok) {
-      const data = await res.json().catch(() => ({}));
-      if (data.result_url && data.result_url.startsWith('http')) {
-        return data.result_url;
-      }
-    }
-  } catch (e) {
-    console.warn('⚠️ CleanURI no disponible, probando servicio secundario...');
-  }
-
-  // 2. Fallback a Ulvis.net
-  try {
-    const controller2 = new AbortController();
-    const timeout2 = setTimeout(() => controller2.abort(), 4000);
-    const res2 = await fetch(`https://ulvis.net/api.php?url=${encodeURIComponent(longUrl)}`, {
-      signal: controller2.signal
-    });
-    clearTimeout(timeout2);
-    if (res2.ok) {
-      const short = (await res2.text()).trim();
+      const short = (await res.text()).trim();
       if (short.startsWith('http')) {
         return short;
       }
     }
   } catch (e) {
-    console.warn('⚠️ No se pudo acortar URL con servicio secundario:', e.message);
+    console.warn('⚠️ da.gd no disponible, probando CleanURI...');
+  }
+
+  // 2. Intentar CleanURI (rápido y limpio para URLs comprimidas)
+  try {
+    const controller2 = new AbortController();
+    const timeout2 = setTimeout(() => controller2.abort(), 4000);
+    const res2 = await fetch('https://cleanuri.com/api/v1/shorten', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ url: longUrl }),
+      signal: controller2.signal
+    });
+    clearTimeout(timeout2);
+    if (res2.ok) {
+      const data = await res2.json().catch(() => ({}));
+      if (data.result_url && data.result_url.startsWith('http')) {
+        return data.result_url;
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ CleanURI no disponible, probando TinyURL...');
+  }
+
+  // 3. Fallback a TinyURL
+  try {
+    const controller3 = new AbortController();
+    const timeout3 = setTimeout(() => controller3.abort(), 4000);
+    const res3 = await fetch(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`, {
+      signal: controller3.signal
+    });
+    clearTimeout(timeout3);
+    if (res3.ok) {
+      const short = (await res3.text()).trim();
+      if (short.startsWith('http')) {
+        return short;
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ No se pudo acortar URL:', e.message);
   }
 
   return longUrl;
@@ -1600,10 +1619,26 @@ async function startWhatsAppGateway() {
               isDraft: engineResult.budget.isDraft
             };
 
-            const budgetJson   = JSON.stringify(cleanBudget);
-            const budgetBase64 = Buffer.from(budgetJson, 'utf8').toString('base64')
-              .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-            const longSigningUrl = `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?data=${budgetBase64}`;
+            // Compactar y comprimir con Deflate para reducir el tamaño un 70% (evita cualquier truncamiento en navegadores)
+            const compactBudget = {
+              i: cleanBudget.id,
+              c: { n: cleanBudget.company?.name, c: cleanBudget.company?.cif, a: cleanBudget.company?.address, p: cleanBudget.company?.phone },
+              k: { n: cleanBudget.client?.name, a: cleanBudget.client?.address },
+              t: (cleanBudget.items || []).map(it => ({ d: it.description, q: it.qty, u: it.unit, p: it.unitPrice, t: it.total })),
+              f: {
+                b: cleanBudget.financials?.taxableBase,
+                r: cleanBudget.financials?.taxRatePercentage,
+                a: cleanBudget.financials?.taxAmount,
+                t: cleanBudget.financials?.totalAmount,
+                ap: cleanBudget.financials?.advancePercentage,
+                aa: cleanBudget.financials?.advanceAmount
+              },
+              terms: cleanBudget.terms
+            };
+
+            const compressed = zlib.deflateRawSync(Buffer.from(JSON.stringify(compactBudget), 'utf-8'));
+            const budgetZ = compressed.toString('base64url');
+            const longSigningUrl = `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z=${budgetZ}`;
 
             // Acortar el enlace para que sea súper limpio y corto en WhatsApp
             const signingUrl = await shortenUrl(longSigningUrl);
