@@ -8,7 +8,9 @@
     "start": "node src/test_run.js",
     "test": "node src/test_suite.js",
     "simulador": "node src/interactive_cli.js",
-    "whatsapp": "node src/whatsapp_gateway.js"
+    "whatsapp": "node src/whatsapp_gateway.js",
+    "visor": "node src/db_viewer.js",
+    "db": "node src/db_viewer.js"
   },
   "keywords": [
     "presupuestos",
