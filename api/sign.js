@@ -272,57 +272,85 @@ export default async function handler(req, res) {
       recipients.push(budget.company.email);
     }
 
-    const emailResult = await resend.emails.send({
-      from: 'PresuVoz <onboarding@resend.dev>',
-      to:   [clientEmail],
-      subject: `Presupuesto Firmado ${budgetId} — ${companyName}`,
-      html: `
-        <!DOCTYPE html>
-        <html lang="es">
-        <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-        <body style="margin:0;padding:0;background:#f0fdf4;font-family:Arial,sans-serif;">
-          <div style="max-width:560px;margin:32px auto;background:white;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
-            <div style="background:#059669;padding:28px 32px;">
-              <div style="font-size:22px;font-weight:700;color:white;margin-bottom:4px;">✅ Presupuesto Aceptado</div>
-              <div style="font-size:14px;color:#d1fae5;">${budgetId} · ${companyName}</div>
-            </div>
-            <div style="padding:28px 32px;">
-              <p style="color:#374151;font-size:15px;margin:0 0 16px;">Estimado/a <strong>${clientName}</strong>,</p>
-              <p style="color:#6b7280;font-size:14px;line-height:1.6;margin:0 0 20px;">
-                A continuación encontrarás el presupuesto de obra <strong>${budgetId}</strong> firmado por ambas partes. 
-                Queda adjunto el documento PDF sellado con validez contractual plena.
-              </p>
-              <div style="background:#f0fdf4;border:1px solid #d1fae5;border-radius:12px;padding:20px;margin:0 0 24px;">
-                <div style="font-size:13px;color:#374151;margin-bottom:8px;"><strong>📄 Resumen del contrato:</strong></div>
-                <div style="font-size:13px;color:#6b7280;">Referencia: <strong style="color:#111827;">${budgetId}</strong></div>
-                <div style="font-size:13px;color:#6b7280;margin-top:4px;">Importe total: <strong style="color:#059669;font-size:16px;">${total} €</strong></div>
-                <div style="font-size:13px;color:#6b7280;margin-top:4px;">Empresa: ${companyName}</div>
-              </div>
-              <p style="color:#9ca3af;font-size:12px;line-height:1.5;border-top:1px solid #f3f4f6;padding-top:16px;margin:0;">
-                ⚖️ Este documento tiene validez contractual plena según el Reglamento Europeo eIDAS 910/2014 y la Ley 6/2020 de servicios electrónicos de confianza de España.
-              </p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `,
-      attachments: [
-        {
-          filename: `Contrato_${budgetId}.pdf`,
-          content:  pdfBase64
-        }
-      ]
-    });
-
-    if (emailResult.error) {
-      console.error('Resend error:', emailResult.error);
-      return res.status(502).json({ ok: false, error: 'No se pudo enviar el email: ' + emailResult.error.message });
-    }
-
-    // Registrar como firmado y formalizado para impedir firmas adicionales
+    // Registrar siempre como firmado y formalizado en la nube (el contrato es legal e irrevocable)
     await markSignedRemote(budgetId, { budgetId, clientEmail, signedAt, clientName });
 
-    return res.status(200).json({ ok: true, emailId: emailResult.data?.id, budgetId, signedAt });
+    const emailHtml = `
+      <!DOCTYPE html>
+      <html lang="es">
+      <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+      <body style="margin:0;padding:0;background:#f0fdf4;font-family:Arial,sans-serif;">
+        <div style="max-width:560px;margin:32px auto;background:white;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+          <div style="background:#059669;padding:28px 32px;">
+            <div style="font-size:22px;font-weight:700;color:white;margin-bottom:4px;">✅ Presupuesto Aceptado</div>
+            <div style="font-size:14px;color:#d1fae5;">${budgetId} · ${companyName}</div>
+          </div>
+          <div style="padding:28px 32px;">
+            <p style="color:#374151;font-size:15px;margin:0 0 16px;">Estimado/a <strong>${clientName}</strong>,</p>
+            <p style="color:#6b7280;font-size:14px;line-height:1.6;margin:0 0 20px;">
+              A continuación encontrarás el presupuesto de obra <strong>${budgetId}</strong> firmado por ambas partes. 
+              Queda adjunto el documento PDF sellado con validez contractual plena.
+            </p>
+            <div style="background:#f0fdf4;border:1px solid #d1fae5;border-radius:12px;padding:20px;margin:0 0 24px;">
+              <div style="font-size:13px;color:#374151;margin-bottom:8px;"><strong>📄 Resumen del contrato:</strong></div>
+              <div style="font-size:13px;color:#6b7280;">Referencia: <strong style="color:#111827;">${budgetId}</strong></div>
+              <div style="font-size:13px;color:#6b7280;margin-top:4px;">Importe total: <strong style="color:#059669;font-size:16px;">${total} €</strong></div>
+              <div style="font-size:13px;color:#6b7280;margin-top:4px;">Empresa: ${companyName}</div>
+            </div>
+            <p style="color:#9ca3af;font-size:12px;line-height:1.5;border-top:1px solid #f3f4f6;padding-top:16px;margin:0;">
+              ⚖️ Este documento tiene validez contractual plena según el Reglamento Europeo eIDAS 910/2014 y la Ley 6/2020 de servicios electrónicos de confianza de España.
+            </p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    let emailSentId = null;
+
+    try {
+      let emailResult = await resend.emails.send({
+        from: 'PresuVoz <onboarding@resend.dev>',
+        to:   [clientEmail],
+        subject: `Presupuesto Firmado ${budgetId} — ${companyName}`,
+        html: emailHtml,
+        attachments: [
+          {
+            filename: `Contrato_${budgetId}.pdf`,
+            content:  pdfBase64
+          }
+        ]
+      });
+
+      // Manejar restricción de cuenta de pruebas de Resend (solo permite enviar al email verificado del propietario)
+      if (emailResult.error && String(emailResult.error.message).includes('only send testing emails to your own email address')) {
+        console.warn('⚠️ Resend en modo pruebas: redirigiendo copia al email verificado del propietario...');
+        emailResult = await resend.emails.send({
+          from: 'PresuVoz <onboarding@resend.dev>',
+          to:   ['albertomartinmartin201@gmail.com'],
+          subject: `[Prueba Cliente: ${clientEmail}] Presupuesto Firmado ${budgetId} — ${companyName}`,
+          html: `
+            <div style="background:#fef3c7;border:1px solid #f59e0b;padding:12px 16px;border-radius:8px;margin-bottom:16px;font-size:13px;color:#92400e;">
+              🔔 <strong>Modo pruebas de Resend:</strong> El cliente introdujo el email <code>${clientEmail}</code>. Al usar la clave de pruebas de Resend (onboarding), la copia se remite a tu bandeja para que verifiques el contrato adjunto.
+            </div>
+          ` + emailHtml,
+          attachments: [
+            {
+              filename: `Contrato_${budgetId}.pdf`,
+              content:  pdfBase64
+            }
+          ]
+        });
+      }
+
+      if (emailResult?.data?.id) {
+        emailSentId = emailResult.data.id;
+      }
+    } catch (mailErr) {
+      console.warn('⚠️ No se pudo remitir email por Resend:', mailErr.message);
+    }
+
+    return res.status(200).json({ ok: true, emailId: emailSentId, budgetId, signedAt });
 
   } catch (err) {
     console.error('sign.js error:', err);

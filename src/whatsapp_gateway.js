@@ -334,14 +334,40 @@ async function startWhatsAppGateway() {
         try {
           const acceptedList = await syncPendingSignaturesFromCloud();
           for (const item of acceptedList) {
-            const jid = item.companyPhone?.includes('@') ? item.companyPhone : `${item.companyPhone}@s.whatsapp.net`;
-            try {
-              await sock.sendMessage(jid, {
-                text: `🎉 *¡Presupuesto Aceptado!*\n\nEl cliente *${item.clientName}* acaba de firmar el presupuesto *${item.budgetId}* a través del enlace digital.\n\n✅ *Estado actualizado:* \`🟢 ACEPTADO\`\n📧 *Copia legal enviada a:* ${item.signedEmail || 'Email registrado'}\n\n_Ya puedes preparar los trabajos o registrar el cobro de anticipo cuando lo recibas._`
+            const targetJids = new Set();
+
+            // 1. Enviar al teléfono autorizado en .env (Alberto)
+            if (ALLOWED_NUMBERS && ALLOWED_NUMBERS.length > 0) {
+              ALLOWED_NUMBERS.forEach(n => {
+                const clean = String(n).replace(/\D/g, '');
+                if (clean) targetJids.add(`${clean}@s.whatsapp.net`);
               });
-              console.log(`🎉 Notificación de firma enviada por WhatsApp para ${item.budgetId}.`);
-            } catch (sendErr) {
-              console.warn('⚠️ No se pudo enviar notificación de firma por WhatsApp:', sendErr.message);
+            }
+
+            // 2. Enviar a los chats activos donde se haya hablado con el bot
+            for (const activeJid of userSessions.keys()) {
+              if (activeJid && !activeJid.includes('broadcast') && !activeJid.includes('@g.us')) {
+                targetJids.add(activeJid);
+              }
+            }
+
+            // 3. Teléfono de empresa si es un número válido estándar
+            if (item.companyPhone) {
+              const clean = String(item.companyPhone).replace(/\D/g, '');
+              if (clean.length >= 9 && clean.length <= 12) {
+                targetJids.add(`${clean}@s.whatsapp.net`);
+              }
+            }
+
+            for (const jid of targetJids) {
+              try {
+                await sock.sendMessage(jid, {
+                  text: `🎉 *¡Presupuesto Aceptado!*\n\nEl cliente *${item.clientName}* acaba de firmar formalmente el presupuesto *${item.budgetId}* a través del enlace digital.\n\n✅ *Estado actualizado:* \`🟢 ACEPTADO\`\n📧 *Copia legal enviada a:* ${item.signedEmail || 'Email registrado'}\n\n_Ya puedes preparar los trabajos o registrar el cobro de anticipo cuando lo recibas._`
+                });
+                console.log(`🎉 Notificación de firma enviada por WhatsApp a ${jid} para ${item.budgetId}.`);
+              } catch (sendErr) {
+                console.warn(`⚠️ No se pudo enviar notificación de firma a ${jid}:`, sendErr.message);
+              }
             }
           }
         } catch (e) {}
