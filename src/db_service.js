@@ -193,7 +193,7 @@ export function saveBudget(phone, budget) {
     payments: budget.payments || [],
     paymentSummary: budget.paymentSummary || { totalPaid: 0, remainingBalance: total, status: 'PENDIENTE' },
     isDraft: budget.isDraft,
-    status: budget.status
+    status: budget.status || 'PENDIENTE_ACEPTACION'
   };
 
   const stmt = db.prepare(`
@@ -216,11 +216,21 @@ export function saveBudget(phone, budget) {
     budget.client?.address || '',
     budget.client?.phone || '',
     total,
-    budget.status || 'PENDIENTE_FIRMA',
+    budget.status || 'PENDIENTE_ACEPTACION',
     JSON.stringify(cleanBudget),
     now,
     now
   );
+}
+
+export function updateBudgetStatus(phone, budgetId, status) {
+  if (!budgetId) return null;
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const budget = getBudget(budgetId);
+  if (!budget) return null;
+  budget.status = status;
+  saveBudget(cleanPhone, budget);
+  return budget;
 }
 
 export function getBudget(id) {

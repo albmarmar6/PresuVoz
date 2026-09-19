@@ -123,15 +123,29 @@ function generateSignedPDF(budget, signaturePro, signatureClient, signedAt) {
 
       // Estampar las imágenes de firma si se pasan como base64
       const embedSignature = (b64, x, y, w, h) => {
-        if (!b64 || !b64.startsWith('data:image')) return;
+        if (!b64 || !b64.startsWith('data:image')) return false;
         const mimeMatch = b64.match(/data:(image\/\w+);base64,/);
-        if (!mimeMatch) return;
+        if (!mimeMatch) return false;
         const imgBuf = Buffer.from(b64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
         doc.image(imgBuf, x, y, { fit: [w, h], align: 'center', valign: 'center' });
+        return true;
       };
 
-      embedSignature(signaturePro,    50,  signY + 18, 210, 35);
-      embedSignature(signatureClient, 325, signY + 18, 210, 35);
+      const hasProSig = embedSignature(signaturePro, 50, signY + 18, 210, 35);
+      if (!hasProSig) {
+        doc.fontSize(7).fillColor(primary).font('Helvetica-Bold')
+          .text('EMITIDO Y CERTIFICADO TELEMÁTICAMENTE', 50, signY + 22, { width: 220, align: 'center' });
+        doc.fontSize(6.5).fillColor(gray).font('Helvetica')
+          .text(`Por ${budget.company?.name || 'la empresa instaladora'}`, 50, signY + 34, { width: 220, align: 'center' });
+        doc.fontSize(6).fillColor('#94a3b8').font('Helvetica')
+          .text(`CIF: ${budget.company?.cif || ''} · Validez legal eIDAS`, 50, signY + 45, { width: 220, align: 'center' });
+      }
+
+      const hasClientSig = embedSignature(signatureClient, 325, signY + 18, 210, 35);
+      if (!hasClientSig) {
+        doc.fontSize(7).fillColor(primary).font('Helvetica-Bold')
+          .text('CONFORME REGISTRADO TELEMÁTICAMENTE', 325, signY + 25, { width: 220, align: 'center' });
+      }
 
       // Pie legal con timestamp de firma
       const signedDate = new Date(signedAt).toLocaleString('es-ES');
@@ -156,8 +170,8 @@ export default async function handler(req, res) {
 
   const { budget, signaturePro, signatureClient, clientEmail } = req.body || {};
 
-  if (!budget || !clientEmail || !signaturePro || !signatureClient) {
-    return res.status(400).json({ ok: false, error: 'Faltan campos obligatorios: budget, clientEmail, signaturePro, signatureClient.' });
+  if (!budget || !clientEmail || (!signaturePro && !signatureClient)) {
+    return res.status(400).json({ ok: false, error: 'Faltan campos obligatorios: presupuesto, email o la firma de aceptación.' });
   }
 
   const apiKey = process.env.RESEND_API_KEY;
@@ -175,6 +189,11 @@ export default async function handler(req, res) {
     const companyName = budget.company?.name || 'PresuVoz Reformas';
     const clientName  = budget.client?.name  || 'Cliente';
     const total = (budget.financials?.totalAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 });
+
+    const recipients = [clientEmail];
+    if (budget.company?.email && budget.company.email.includes('@') && !recipients.includes(budget.company.email)) {
+      recipients.push(budget.company.email);
+    }
 
     const emailResult = await resend.emails.send({
       from: 'PresuVoz <onboarding@resend.dev>',

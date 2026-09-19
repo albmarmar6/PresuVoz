@@ -90,7 +90,9 @@ Tu función es:
      pon 'action: "configure_company"' y rellena 'companyInfo': { "name": "...", "cif": "...", "address": "...", "phone": "...", "email": "...", "iban": "...", "bizum": "..." } (solo los campos mencionados o detectados).
    - CONSULTAR DATOS DE EMPRESA: Si el profesional pregunta por su empresa o perfil (ej: "¿cuáles son mis datos de empresa?", "ver mi empresa", "mis datos fiscales", "mi perfil"):
      pon 'action: "show_company"'.
-   - REGISTRO DE COBRO / ANTICIPO: Si el profesional indica que le han pagado o ingresado un dinero (ej: "José Luis me ha pagado 1.500€ por Bizum", "apunta cobro de 1.000€ en efectivo de...", "me acaba de transferir 2.000€ para la obra de..."):
+   - ACEPTAR PRESUPUESTO / CLIENTE FIRMÓ: Si el profesional indica que el cliente ha aceptado o firmado el presupuesto (ej: "el cliente ha aceptado el presupuesto", "marca como aceptado el de José Luis", "presupuesto aceptado", "el cliente ya ha firmado", "cliente aceptó"):
+     pon 'action: "accept_budget"' y selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente).
+   - REGISTRO DE COBRO / ANTICIPO: Si el profesional indica que le han pagado o ingresado un dinero (ej: "José Luis me ha pagado 1.500€ por Bizum", "apunta cobro de 1.000€ en efectivo de...", "me acaba de transferir 2.000€ para la obra de...", "anticipo de 1.500€ por transferencia"):
      pon 'action: "payment"', selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente) y rellena 'paymentInfo': { "amount": 1500, "method": "Bizum"|"Transferencia"|"Efectivo", "concept": "Anticipo"|"Entrega a cuenta" }.
    - CONSULTA DE DEUDA / SALDO: Si el profesional pregunta cuánto le deben o el estado de pagos (ej: "¿cuánto me debe José Luis?", "¿cómo va la cuenta de...?", "deuda de..."):
      pon 'action: "query_balance"' y selecciona el presupuesto en 'targetBudgetId'.
@@ -114,7 +116,7 @@ Tu función es:
 
 FORMATO DE RESPUESTA (JSON estricto):
 {
-  "action": "budget", // "budget" | "invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment"
+  "action": "budget", // "budget" | "invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "accept_budget"
   "appointmentInfo": {
     "clientName": "Nombre cliente",
     "clientPhone": null,

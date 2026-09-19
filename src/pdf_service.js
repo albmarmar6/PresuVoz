@@ -499,19 +499,22 @@ export function generateReceiptPDF(receipt) {
       doc.fontSize(11).fillColor(statusTextColor).font('Helvetica-Bold')
         .text(isSettled ? '0,00 €' : remainingStr, 400, tableY + 11, { width: 145, align: 'right' });
 
-      // 6. Sección de Firmas y Justificación
+      // 6. Sección de Certificación y Justificación de Pago (sin exigir firma de cliente)
       const signY = 560;
       doc.roundedRect(40, signY, 240, 100, 4).strokeColor(borderColor).stroke();
       doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
-        .text('POR LA EMPRESA PERCEPTORA', 50, signY + 10)
-        .text('Firma y Sello (Recibí):', 50, signY + 25)
+        .text('EMPRESA PERCEPTORA (CERTIFICACIÓN)', 50, signY + 10)
+        .text('Validación y Sello Oficial:', 50, signY + 25)
         .text(receipt.company?.name || 'PresuVoz Reformas S.L.', 50, signY + 80);
 
-      doc.roundedRect(315, signY, 240, 100, 4).strokeColor(borderColor).stroke();
-      doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
-        .text('CONFORME DEL CLIENTE / PAGADOR', 325, signY + 10)
-        .text('Firma:', 325, signY + 25)
-        .text(receipt.client?.name || 'Cliente Particular', 325, signY + 80);
+      doc.roundedRect(315, signY, 240, 100, 4).fillColor('#f8fafc').fillAndStroke('#f8fafc', borderColor);
+      doc.fontSize(7.5).fillColor(primaryColor).font('Helvetica-Bold')
+        .text('DATOS DE LA OPERACIÓN ACREDITADA', 325, signY + 10);
+      doc.fontSize(7.5).fillColor(darkColor).font('Helvetica')
+        .text(`• Pagador: ${receipt.client?.name || 'Cliente Particular'}`, 325, signY + 28)
+        .text(`• Medio de cobro: ${receipt.method || 'Transferencia bancaria'}`, 325, signY + 42)
+        .text(`• Fecha contable: ${receipt.date || new Date().toLocaleDateString('es-ES')}`, 325, signY + 56)
+        .text('• Justificante liberatorio conforme art. 1.156 CC', 325, signY + 70);
 
       // 7. Pie legal
       doc.fontSize(6.5).fillColor('#94a3b8').font('Helvetica')

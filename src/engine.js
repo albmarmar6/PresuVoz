@@ -350,7 +350,8 @@ export class PresuVozEngine {
 
     const fin = budget.financials || {};
     const totalAmount = fin.totalAmount || 0;
-    const advanceAmount = options.advanceAmount !== undefined ? options.advanceAmount : (fin.advanceAmount || 0);
+    const paidSoFar = budget.paymentSummary?.totalPaid || 0;
+    const advanceAmount = options.advanceAmount !== undefined ? options.advanceAmount : (paidSoFar > 0 ? paidSoFar : (fin.advanceAmount || 0));
     const remainingAmount = Number(Math.max(0, totalAmount - advanceAmount).toFixed(2));
 
     const invoice = {

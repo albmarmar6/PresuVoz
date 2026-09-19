@@ -42,7 +42,8 @@ import {
   getAppointment,
   listAppointments,
   updateAppointmentStatus,
-  cancelAppointment
+  cancelAppointment,
+  updateBudgetStatus
 } from './db_service.js';
 
 dotenv.config();
@@ -152,9 +153,16 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
 
 function formatBudgetForWhatsApp(budget, warnings = []) {
   const isDraft = budget.isDraft;
-  const statusHeader = isDraft 
-    ? '📋 *BORRADOR DE PRESUPUESTO TÉCNICO*' 
-    : '✅ *PRESUPUESTO FORMAL DE OBRA*';
+  const isAccepted = budget.status === 'ACEPTADO';
+  const statusHeader = isAccepted
+    ? '🎉 *PRESUPUESTO ACEPTADO DE OBRA*'
+    : (isDraft 
+        ? '📋 *BORRADOR DE PRESUPUESTO TÉCNICO*' 
+        : '✅ *PRESUPUESTO FORMAL DE OBRA*');
+
+  const statusLabel = isAccepted
+    ? '🟢 *Estado:* Aceptado'
+    : (isDraft ? '🟡 *Estado:* Borrador (partidas pendientes de valorar)' : '⏳ *Estado:* Pendiente de aceptación');
 
   const lines = [
     statusHeader,
@@ -162,6 +170,7 @@ function formatBudgetForWhatsApp(budget, warnings = []) {
     `👤 *Cliente:* ${budget.client.name}`,
     `📍 *Ubicación:* ${budget.client.address}`,
     `📅 *Fecha:* ${new Date().toLocaleDateString('es-ES')}`,
+    statusLabel,
     '',
     '🛠️ *PARTIDAS Y MEDICIONES:*'
   ];
@@ -210,22 +219,45 @@ function formatBudgetForWhatsApp(budget, warnings = []) {
 }
 
 async function shortenUrl(longUrl) {
+  // 1. Intentar CleanURI (enlace corto directo sin pantallas intermedias ni deprecaciones)
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3500);
-    const res = await fetch(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`, {
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch('https://cleanuri.com/api/v1/shorten', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ url: longUrl }),
       signal: controller.signal
     });
     clearTimeout(timeout);
     if (res.ok) {
-      const short = (await res.text()).trim();
-      if (short.startsWith('https://tinyurl.com/')) {
+      const data = await res.json().catch(() => ({}));
+      if (data.result_url && data.result_url.startsWith('http')) {
+        return data.result_url;
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ CleanURI no disponible, probando servicio secundario...');
+  }
+
+  // 2. Fallback a Ulvis.net
+  try {
+    const controller2 = new AbortController();
+    const timeout2 = setTimeout(() => controller2.abort(), 4000);
+    const res2 = await fetch(`https://ulvis.net/api.php?url=${encodeURIComponent(longUrl)}`, {
+      signal: controller2.signal
+    });
+    clearTimeout(timeout2);
+    if (res2.ok) {
+      const short = (await res2.text()).trim();
+      if (short.startsWith('http')) {
         return short;
       }
     }
   } catch (e) {
-    console.warn('⚠️ No se pudo acortar URL, usando enlace directo:', e.message);
+    console.warn('⚠️ No se pudo acortar URL con servicio secundario:', e.message);
   }
+
   return longUrl;
 }
 
@@ -466,7 +498,8 @@ async function startWhatsAppGateway() {
       console.log(`💰 Registrando cobro de ${amount} € para el presupuesto ${targetBudget.id}...`);
       const { receipt } = engine.registerPayment(targetBudget, paymentInfo);
 
-      // Persistir cobro y presupuesto actualizado en SQLite
+      // Persistir cobro y asegurar que el presupuesto pasa a estado ACEPTADO
+      targetBudget.status = 'ACEPTADO';
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
       savePayment(cleanPhone, receipt);
       saveBudget(cleanPhone, targetBudget);
@@ -477,25 +510,25 @@ async function startWhatsAppGateway() {
 
       const isSettled = receipt.status === 'LIQUIDADO';
       const statusEmoji = isSettled ? '✅' : '⏳';
-      const statusTitle = isSettled ? '*¡OBRA TOTALMENTE LIQUIDADA Y COBRADA!*' : '*PAGO A CUENTA REGISTRADO*';
+      const statusTitle = isSettled ? '*¡OBRA TOTALMENTE LIQUIDADA Y COBRADA!*' : '*ANTICIPO / PAGO A CUENTA REGISTRADO*';
 
       const paymentMsgLines = [
         `💰 ${statusTitle}`,
         '━━━━━━━━━━━━━━━━━━━━━━━━━',
         `👤 *Cliente:* ${receipt.client?.name || 'Cliente'}`,
         `📍 *Dirección:* ${receipt.client?.address || 'Ubicación de obra'}`,
-        `📄 *Presupuesto:* ${receipt.budgetId}`,
+        `📄 *Presupuesto:* ${receipt.budgetId} (🟢 *Estado:* Aceptado)`,
         `💵 *Importe recibido:* *+${receipt.amount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
         `💳 *Método de pago:* ${receipt.method}`,
         `📝 *Concepto:* ${receipt.concept}`,
-        `📅 *Fecha:* ${receipt.date}`,
+        `📅 *Fecha valor:* ${receipt.date}`,
         '',
         '📊 *ESTADO ACTUAL DE LA CUENTA:*',
         `• Total obra presupuestado: ${receipt.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
         `• Total cobrado acumulado: ${receipt.totalPaid.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
         `• ${statusEmoji} *SALDO PENDIENTE:* *${receipt.remainingBalance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
         '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        '📄 _Se adjunta el Recibo Oficial en PDF para reenviar al cliente como justificante._'
+        '📄 _Se adjunta el Justificante Oficial de Cobro en PDF (no requiere firma del cliente, es emitido formalmente por tu empresa)._'
       ];
 
       const sentSummary = await sock.sendMessage(remoteJid, { text: paymentMsgLines.join('\n') });
@@ -569,6 +602,49 @@ async function startWhatsAppGateway() {
 
     const sentSummary = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
     if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
+  }
+
+  async function handleAcceptBudget(sock, remoteJid, session, targetBudget) {
+    if (!targetBudget) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: '⚠️ *No se encontró el presupuesto para marcar como aceptado.*\n\nIndica el nombre del cliente o número de obra (ej: *"aceptar presupuesto de Alberto"* o *"presupuesto aceptado"*).'
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      return;
+    }
+
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      targetBudget.status = 'ACEPTADO';
+      saveBudget(cleanPhone, targetBudget);
+
+      const total = targetBudget.financials?.totalAmount ? `${targetBudget.financials.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '';
+      const advance = targetBudget.financials?.advanceAmount ? `${targetBudget.financials.advanceAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '';
+
+      const lines = [
+        '🎉 *¡PRESUPUESTO MARCADO COMO ACEPTADO!*',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `🆔 *Documento:* ${targetBudget.id}`,
+        `👤 *Cliente:* ${targetBudget.client?.name || 'Cliente Particular'}`,
+        `📍 *Ubicación:* ${targetBudget.client?.address || 'Ubicación de obra'}`,
+        `💰 *Total Presupuestado:* *${total}*`,
+        advance ? `💳 *Anticipo pactado:* ${advance} (${targetBudget.financials?.advancePercentage || 30}%)` : null,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        '🟢 *Nuevo estado:* *Aceptado* (antes: _Pendiente de aceptación_)',
+        '',
+        '💡 _Si el cliente te ha pagado el anticipo por transferencia bancaria o Bizum, puedes registrarlo diciendo:_\n*"Apunta anticipo de [importe]€ por transferencia"*'
+      ].filter(Boolean);
+
+      const sent = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+      console.log(`✅ Presupuesto ${targetBudget.id} marcado como ACEPTADO para ${cleanPhone}`);
+    } catch (err) {
+      console.error('❌ Error aceptando presupuesto:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error al marcar el presupuesto como aceptado:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
   }
 
   function formatQuarterSummaryForWhatsApp(company, quarterData) {
@@ -1077,8 +1153,7 @@ async function startWhatsAppGateway() {
           const isActive = id === session.activeBudgetId ? ' 🟢 *(ACTIVO)*' : '';
           const clientName = b.client?.name || 'Cliente Particular';
           const address = b.client?.address || 'Ubicación según visita';
-          const total = b.financials?.totalAmount ? `${b.financials.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : 'A valorar';
-          const status = b.isDraft ? 'Borrador' : 'Formal';
+          const status = b.status === 'ACEPTADO' ? '🟢 Aceptado' : (b.isDraft ? '📝 Borrador' : '⏳ Pendiente de aceptación');
 
           const paid = b.paymentSummary?.totalPaid || 0;
           const remaining = b.paymentSummary?.remainingBalance !== undefined ? b.paymentSummary.remainingBalance : (b.financials?.totalAmount || 0);
@@ -1086,7 +1161,7 @@ async function startWhatsAppGateway() {
             ? ' | 🟢 *COBRADO*'
             : (paid > 0 ? ` | ⏳ *Pendiente:* ${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '');
 
-          listText += `\n${idx}️⃣ *Presupuesto ${id}*${isActive}\n   👤 ${clientName} (${address})\n   💰 Total: *${total}* (${status})${payBadge}\n`;
+          listText += `\n${idx}️⃣ *Presupuesto ${id}*${isActive}\n   👤 ${clientName} (${address})\n   💰 Total: *${total}* · ${status}${payBadge}\n`;
           idx++;
         }
 
@@ -1157,6 +1232,15 @@ async function startWhatsAppGateway() {
         const query = (balanceCmdMatch[1] || '').replace(/[?¿]/g, '').trim();
         const target = findBudgetInSession(session, query);
         await handleQueryBalance(sock, remoteJid, session, target);
+        continue;
+      }
+
+      // Comando directo para aceptar presupuesto: ej. "aceptar", "aceptado", "presupuesto aceptado", "aceptar José Luis", "firmado"
+      const acceptCmdMatch = rawUserText.match(/^(?:aceptar|aceptado|firmado|aprobar|confirmar)\s*(?:el\s+)?(?:presupuesto)?(?:\s+(?:de\s+)?(.+))?$/i);
+      if (acceptCmdMatch && !/^(?:citas|visitas|agenda)/i.test(rawUserText)) {
+        const query = (acceptCmdMatch[1] || '').trim();
+        const target = findBudgetInSession(session, query);
+        await handleAcceptBudget(sock, remoteJid, session, target);
         continue;
       }
 
@@ -1383,6 +1467,17 @@ async function startWhatsAppGateway() {
           continue;
         }
 
+        // Si la IA detectó aceptación del presupuesto
+        if (aiResult?.action === 'accept_budget') {
+          const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
+            || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
+            || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
+            || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
+
+          await handleAcceptBudget(sock, remoteJid, session, target);
+          continue;
+        }
+
         if (!aiResult || !aiResult.items || aiResult.items.length === 0) {
           const sentHelp = await sock.sendMessage(remoteJid, {
             text: `🤖 *PresuVoz Bot*\n\nNo he detectado partidas técnicas en el mensaje. Puedes dictarme los trabajos de obra (ej: _"tirar tabique de 4x3 metros y mover 2 enchufes por 600 euros"_).`
@@ -1514,7 +1609,7 @@ async function startWhatsAppGateway() {
             const signingUrl = await shortenUrl(longSigningUrl);
 
             const sentSig = await sock.sendMessage(remoteJid, {
-              text: `✍️ *Firma del presupuesto*\n\nCuando el cliente esté presente, abre este enlace para firmar digitalmente y que reciba el contrato por email:\n${signingUrl}`
+              text: `✍️ *Enlace de Aceptación y Firma Digital:*\n${signingUrl}\n\n📲 _Puedes abrirlo tú o enviárselo a tu cliente para que firme cómodamente desde su móvil o desde su casa. Al firmar, el presupuesto pasa a estado *Aceptado* y el cliente recibe su copia sellada por email._`
             });
             if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
             console.log(`✅ Enlace de firma enviado por WhatsApp (${signingUrl}).`);
