@@ -157,13 +157,77 @@ function generateSignedPDF(budget, signaturePro, signatureClient, signedAt) {
   });
 }
 
+// ─── Control de firmas únicas (Persistencia remota) ───────────────────────────
+const KEYVALUE_APP = 'presuvoz2026';
+const inMemorySigned = new Map();
+
+async function checkSignedRemote(budgetId) {
+  if (!budgetId) return null;
+  const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
+  if (inMemorySigned.has(cleanId)) {
+    return inMemorySigned.get(cleanId);
+  }
+  try {
+    const key = `signed_${cleanId}`;
+    const url = `https://keyvalue.immanuel.co/api/KeyVal/GetValue/${KEYVALUE_APP}/${encodeURIComponent(key)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) return null;
+    const raw = await res.json();
+    if (!raw || typeof raw !== 'string') return null;
+    const decoded = Buffer.from(raw, 'base64').toString('utf-8');
+    const parsed = JSON.parse(decoded);
+    inMemorySigned.set(cleanId, parsed);
+    return parsed;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function markSignedRemote(budgetId, info) {
+  if (!budgetId) return;
+  const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
+  const record = {
+    signed: true,
+    budgetId: cleanId,
+    signedAt: info.signedAt || new Date().toISOString(),
+    clientEmail: info.clientEmail || '',
+    clientName: info.clientName || ''
+  };
+  inMemorySigned.set(cleanId, record);
+  try {
+    const key = `signed_${cleanId}`;
+    const raw = JSON.stringify(record);
+    const b64 = Buffer.from(raw).toString('base64url');
+    const url = `https://keyvalue.immanuel.co/api/KeyVal/UpdateValue/${KEYVALUE_APP}/${encodeURIComponent(key)}/${b64}`;
+    await fetch(url, { method: 'POST', signal: AbortSignal.timeout(3000) });
+  } catch (e) {
+    console.error('Error guardando firma remota:', e);
+  }
+}
+
 // ─── Handler principal ───────────────────────────────────────────────────────
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
+
+  // Endpoint de comprobación: GET /api/sign?id=PRE-2026-XXXX
+  if (req.method === 'GET') {
+    const budgetId = req.query.id || req.query.check;
+    if (!budgetId) {
+      return res.status(400).json({ ok: false, error: 'Falta parámetro id o check.' });
+    }
+    const check = await checkSignedRemote(budgetId);
+    return res.status(200).json({
+      ok: true,
+      budgetId,
+      alreadySigned: Boolean(check),
+      details: check || null
+    });
+  }
+
   if (req.method !== 'POST') {
     return res.status(405).json({ ok: false, error: 'Método no permitido.' });
   }
@@ -172,6 +236,19 @@ export default async function handler(req, res) {
 
   if (!budget || !clientEmail || (!signaturePro && !signatureClient)) {
     return res.status(400).json({ ok: false, error: 'Faltan campos obligatorios: presupuesto, email o la firma de aceptación.' });
+  }
+
+  const budgetId = budget.id || 'PRE-2026';
+
+  // Verificar si ya fue firmado previamente
+  const alreadySigned = await checkSignedRemote(budgetId);
+  if (alreadySigned) {
+    return res.status(409).json({
+      ok: false,
+      alreadySigned: true,
+      error: 'Este presupuesto ya ha sido firmado y aceptado previamente. No se admiten firmas duplicadas.',
+      details: alreadySigned
+    });
   }
 
   const apiKey = process.env.RESEND_API_KEY;
@@ -242,7 +319,10 @@ export default async function handler(req, res) {
       return res.status(502).json({ ok: false, error: 'No se pudo enviar el email: ' + emailResult.error.message });
     }
 
-    return res.status(200).json({ ok: true, emailId: emailResult.data?.id, budgetId });
+    // Registrar como firmado y formalizado para impedir firmas adicionales
+    await markSignedRemote(budgetId, { budgetId, clientEmail, signedAt, clientName });
+
+    return res.status(200).json({ ok: true, emailId: emailResult.data?.id, budgetId, signedAt });
 
   } catch (err) {
     console.error('sign.js error:', err);

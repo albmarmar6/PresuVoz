@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Firmar Presupuesto — PresuVoz</title>
+  <title>Presupuesto — PresuVoz</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap");
@@ -17,46 +17,193 @@
     .spinner { animation: spin 0.8s linear infinite; }
   </style>
 </head>
-<body class="bg-green-50">
-  <div class="bg-white shadow-sm border-b border-green-100 sticky top-0 z-10">
-    <div class="max-w-lg mx-auto px-4 py-3 flex items-center gap-3">
-      <div class="w-8 h-8 bg-emerald-600 rounded-lg flex items-center justify-center text-white text-sm font-bold">P</div>
-      <div><div class="text-sm font-semibold text-gray-900">PresuVoz</div><div class="text-xs text-emerald-600">Firma Digital de Presupuesto</div></div>
+<body class="bg-green-50 text-gray-800">
+
+  <!-- Cabecera Superior -->
+  <header class="bg-white shadow-sm border-b border-green-100 sticky top-0 z-20">
+    <div class="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 bg-emerald-600 rounded-lg flex items-center justify-center text-white text-sm font-bold shadow-sm">P</div>
+        <div>
+          <div class="text-sm font-bold text-gray-900">PresuVoz</div>
+          <div id="headerSubtitle" class="text-xs text-emerald-600 font-medium">Firma Digital de Presupuesto</div>
+        </div>
+      </div>
+      <div id="headerStatusBadge" class="hidden text-xs font-semibold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800">
+        🟢 Aceptado
+      </div>
     </div>
-  </div>
+  </header>
+
+  <!-- 1. ESTADO DE ERROR -->
   <div id="errorState" class="hidden max-w-lg mx-auto px-4 py-12 text-center fade-in">
     <div class="text-5xl mb-4">⚠️</div>
-    <h2 class="text-lg font-semibold text-gray-800 mb-2">Enlace inválido</h2>
-    <p class="text-sm text-gray-500">El enlace de firma no contiene datos válidos. Pide al profesional que te reenvíe el enlace desde WhatsApp.</p>
+    <h2 class="text-lg font-semibold text-gray-800 mb-2">Enlace no válido</h2>
+    <p class="text-sm text-gray-500">Este enlace de presupuesto no contiene datos correctos. Pide al profesional instalador que te reenvíe el enlace actualizado desde WhatsApp.</p>
   </div>
-  <div id="successState" class="hidden max-w-lg mx-auto px-4 py-12 text-center fade-in">
-    <div class="w-20 h-20 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-6">
-      <svg class="w-10 h-10 text-emerald-600" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+
+  <!-- 2. ESTADO PLANO / YA FIRMADO (Acción única completada) -->
+  <div id="flatSignedState" class="hidden max-w-lg mx-auto px-4 py-6 space-y-4 fade-in">
+    
+    <!-- Alerta temporal si acaba de pulsar en firmar -->
+    <div id="flatJustSignedAlert" class="hidden bg-emerald-500 text-white rounded-2xl p-4 shadow-lg flex items-center gap-3">
+      <div class="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center text-xl flex-shrink-0">✓</div>
+      <div>
+        <div class="text-sm font-bold">¡Presupuesto firmado y aceptado con éxito!</div>
+        <div class="text-xs text-emerald-100 mt-0.5">Se ha remitido la copia oficial sellada en PDF por email.</div>
+      </div>
     </div>
-    <h2 class="text-xl font-bold text-gray-900 mb-2">¡Presupuesto firmado!</h2>
-    <p class="text-sm text-gray-500 mb-1">El presupuesto firmado ha sido sellado y enviado a</p>
-    <p id="successEmail" class="text-sm font-semibold text-emerald-600 mb-6"></p>
-    <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-4 text-left">
-      <p class="text-xs text-emerald-700 font-medium mb-1">⚖️ Validez legal</p>
-      <p class="text-xs text-gray-500">Este documento tiene validez contractual plena según el Reglamento Europeo eIDAS y la Ley 6/2020 de España.</p>
+
+    <!-- Banner Oficial de Certificación -->
+    <div class="bg-gradient-to-br from-emerald-700 to-emerald-800 rounded-2xl p-5 text-white shadow-md">
+      <div class="flex items-center justify-between gap-3 mb-3">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center text-white text-xl">🛡️</div>
+          <div>
+            <div class="text-[11px] uppercase tracking-wider font-bold text-emerald-200">Documento Oficial Formalizado</div>
+            <h2 class="text-base font-bold">Presupuesto Firmado y Aceptado</h2>
+          </div>
+        </div>
+        <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold bg-white text-emerald-800 shadow-sm">
+          CONTRATO CERRADO
+        </span>
+      </div>
+
+      <div class="pt-3 border-t border-emerald-600/60 text-xs text-emerald-100 space-y-1.5">
+        <div class="flex justify-between">
+          <span class="text-emerald-200">Ref. Presupuesto:</span>
+          <strong id="flatBudgetId" class="text-white font-mono"></strong>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-emerald-200">Fecha de aceptación:</span>
+          <strong id="flatSignedDate" class="text-white"></strong>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-emerald-200">Copia legal remitida a:</span>
+          <strong id="flatSignedEmail" class="text-white"></strong>
+        </div>
+      </div>
+    </div>
+
+    <!-- Aviso de Enlace Plano / Acción Única -->
+    <div class="bg-amber-50 border border-amber-200/80 rounded-xl p-3.5 text-xs text-amber-900 flex items-start gap-2.5 shadow-sm">
+      <span class="text-base leading-none">🔒</span>
+      <div class="leading-relaxed">
+        <strong>Enlace en modo consulta (Acción única realizada):</strong> Este presupuesto ya ha sido firmado y aceptado formalmente. Para garantizar la seguridad jurídica entre ambas partes, este enlace ya no admite nuevas firmas ni modificaciones.
+      </div>
+    </div>
+
+    <!-- Resumen Plano del Presupuesto -->
+    <div class="bg-white rounded-2xl shadow-sm border border-green-100 overflow-hidden">
+      <div class="bg-slate-900 px-4 py-3 flex justify-between items-center text-white">
+        <div>
+          <div class="text-[10px] text-slate-400 uppercase font-semibold">Empresa emisora</div>
+          <div id="flatCompanyName" class="font-bold text-sm"></div>
+          <div id="flatCompanyCif" class="text-[11px] text-slate-400"></div>
+        </div>
+        <div class="text-right">
+          <div class="text-[10px] text-slate-400 uppercase font-semibold">Total con IVA</div>
+          <div id="flatBudgetTotal" class="text-emerald-400 font-bold text-lg"></div>
+        </div>
+      </div>
+
+      <!-- Datos del cliente -->
+      <div class="px-4 py-3 border-b border-gray-100 bg-slate-50/50">
+        <div class="text-[10px] text-gray-400 uppercase font-semibold">Cliente y Dirección de Obra</div>
+        <div id="flatClientName" class="font-semibold text-gray-800 text-sm mt-0.5"></div>
+        <div id="flatClientAddress" class="text-xs text-gray-500 mt-0.5"></div>
+      </div>
+
+      <!-- Partidas de los trabajos -->
+      <div class="px-4 py-3">
+        <div class="text-[10px] text-gray-400 uppercase font-semibold mb-2">Desglose de trabajos contratados</div>
+        <div id="flatItemsList" class="space-y-2"></div>
+      </div>
+
+      <!-- Cuadro de Totales -->
+      <div class="px-4 py-3 bg-gray-50 border-t border-gray-100 space-y-1.5 text-xs">
+        <div class="flex justify-between text-gray-600">
+          <span>Base imponible:</span>
+          <span id="flatSubtotal" class="font-medium text-gray-900"></span>
+        </div>
+        <div class="flex justify-between text-gray-600">
+          <span>IVA aplicable:</span>
+          <span id="flatTaxAmount" class="font-medium text-gray-900"></span>
+        </div>
+        <div class="flex justify-between text-sm font-bold text-gray-900 pt-1.5 border-t border-gray-200">
+          <span>TOTAL PRESUPUESTO:</span>
+          <span id="flatTotalFinal" class="text-emerald-700"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Condiciones pactadas -->
+    <div class="bg-white rounded-2xl shadow-sm border border-green-100 p-4 text-xs text-gray-600 space-y-1.5">
+      <div class="font-bold text-gray-800 text-xs mb-1">📋 Condiciones acordadas:</div>
+      <div id="flatAdvanceText">• Anticipo inicial acordado a la firma.</div>
+      <div>• Resto del pago a la recepción y finalización de los trabajos.</div>
+      <div>• Garantía legal de 2 años en instalaciones y reformas ejecutadas.</div>
+    </div>
+
+    <!-- Cajas de Sellos y Firmas Estampadas (Planas, no editables) -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <!-- Sello Empresa -->
+      <div class="bg-white rounded-xl border border-gray-200 p-3 text-center">
+        <div class="text-[10px] uppercase font-bold text-gray-400 mb-2">Por la empresa instaladora</div>
+        <div class="py-2 px-3 bg-emerald-50 rounded-lg border border-emerald-100">
+          <div class="text-xs font-bold text-emerald-800">EMITIDO Y CERTIFICADO</div>
+          <div class="text-[10px] text-emerald-600">Telemáticamente por la empresa</div>
+        </div>
+      </div>
+
+      <!-- Conformidad del Cliente -->
+      <div class="bg-white rounded-xl border border-gray-200 p-3 text-center">
+        <div class="text-[10px] uppercase font-bold text-gray-400 mb-2">Conforme del cliente</div>
+        <div id="flatClientSigBox" class="py-2 px-3 bg-slate-50 rounded-lg border border-slate-200 min-h-[50px] flex items-center justify-center">
+          <img id="flatClientSigImg" class="hidden max-h-12 mx-auto" alt="Firma del cliente" />
+          <div id="flatClientSigPlaceholder" class="text-xs font-bold text-slate-700">
+            ✍️ FIRMADO Y ACEPTADO
+            <div class="text-[10px] text-slate-500 font-normal">Identificación validada</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pie Legal -->
+    <div class="text-center text-[11px] text-gray-400 py-3 leading-relaxed">
+      ⚖️ Documento con validez contractual plena conforme al <strong>Reglamento UE eIDAS 910/2014</strong> y la <strong>Ley 6/2020</strong> de España. Copia electrónica certificada.
     </div>
   </div>
+
+  <!-- 3. ESTADO FORMULARIO ACTIVO (Solo se muestra si aún no ha sido firmado) -->
   <div id="mainContent" class="hidden max-w-lg mx-auto px-4 py-6 space-y-5 fade-in">
+    
+    <!-- Resumen del Presupuesto a firmar -->
     <div class="bg-white rounded-2xl shadow-sm border border-green-100 overflow-hidden">
       <div class="bg-emerald-600 px-4 py-3 flex justify-between items-start">
-        <div><div class="text-xs text-emerald-100 font-medium">PRESUPUESTO DE OBRA</div><div id="budgetId" class="text-white font-bold text-lg"></div></div>
-        <div class="text-right"><div class="text-xs text-emerald-100">Total con IVA</div><div id="budgetTotal" class="text-white font-bold text-xl"></div></div>
+        <div>
+          <div class="text-xs text-emerald-100 font-medium">PRESUPUESTO DE OBRA</div>
+          <div id="budgetId" class="text-white font-bold text-lg"></div>
+        </div>
+        <div class="text-right">
+          <div class="text-xs text-emerald-100">Total con IVA</div>
+          <div id="budgetTotal" class="text-white font-bold text-xl"></div>
+        </div>
       </div>
+
       <div class="px-4 py-3 border-b border-gray-50">
         <div class="text-xs text-gray-400 uppercase font-semibold mb-1">Cliente</div>
         <div id="clientName" class="font-semibold text-gray-800 text-sm"></div>
         <div id="clientAddress" class="text-xs text-gray-500 mt-0.5"></div>
       </div>
+
       <div class="px-4 py-3">
         <div class="text-xs text-gray-400 uppercase font-semibold mb-2">Trabajos incluidos</div>
         <div id="itemsList" class="space-y-1.5"></div>
       </div>
     </div>
+
+    <!-- Firma de Aceptación del Cliente -->
     <div class="bg-white rounded-2xl shadow-sm border border-green-100 p-4">
       <div class="flex items-center justify-between mb-3">
         <div>
@@ -69,6 +216,7 @@
       <p class="text-xs text-gray-400 mt-2 text-center">Firma aquí con el dedo o ratón</p>
     </div>
 
+    <!-- Email para recibir copia sellada -->
     <div class="bg-white rounded-2xl shadow-sm border border-green-100 p-4">
       <label class="text-sm font-semibold text-gray-800 block mb-1">📧 Email del cliente para recibir copia</label>
       <p class="text-xs text-gray-400 mb-3">Se remitirá el contrato firmado y sellado en PDF con plena validez</p>
@@ -92,14 +240,17 @@
     </details>
 
     <div id="formError" class="hidden bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-600"></div>
+
     <button id="btnSign" onclick="submitSignatures()" class="w-full bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold text-base py-4 rounded-2xl shadow-lg transition-all flex items-center justify-center gap-3">
       <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
       Aceptar y Firmar Presupuesto
     </button>
-    <p class="text-center text-xs text-gray-400 pb-6">Al pulsar este botón aceptas formalmente las condiciones del presupuesto.<br>Validez legal según <strong>Reglamento eIDAS</strong> y <strong>Ley 6/2020</strong> de España.</p>
+    <p class="text-center text-xs text-gray-400 pb-6">Esta acción es única: al firmar, el presupuesto queda formalizado y el enlace pasa a modo consulta.<br>Validez legal según <strong>Reglamento eIDAS</strong> y <strong>Ley 6/2020</strong> de España.</p>
   </div>
+
 <script>
 const SIGN_ENDPOINT = 'https://presuvoz.vercel.app/api/sign';
+const KEYVALUE_APP = 'presuvoz2026';
 let budget = null;
 const sigStates = { canvasPro: false, canvasClient: false };
 
@@ -111,10 +262,60 @@ function decodeBase64Utf8(base64Str) {
   return new TextDecoder('utf-8').decode(bytes);
 }
 
-window.addEventListener('DOMContentLoaded', () => {
+function getStorageKey(budgetId) {
+  return 'presuvoz_signed_' + String(budgetId || '').trim().replace(/\s+/g, '_');
+}
+
+async function checkRemoteSigned(budgetId) {
+  if (!budgetId) return null;
+  const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
+  
+  // 1. Intentar consultar el backend de PresuVoz
+  try {
+    const res = await fetch(`${SIGN_ENDPOINT}?check=${encodeURIComponent(cleanId)}`, { signal: AbortSignal.timeout(3000) });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.alreadySigned && data.details) return data.details;
+    }
+  } catch(e) {}
+
+  // 2. Fallback a nube de persistencia global
+  try {
+    const key = `signed_${cleanId}`;
+    const res2 = await fetch(`https://keyvalue.immanuel.co/api/KeyVal/GetValue/${KEYVALUE_APP}/${encodeURIComponent(key)}`, { signal: AbortSignal.timeout(3000) });
+    if (res2.ok) {
+      const raw = await res2.json();
+      if (raw && typeof raw === 'string') {
+        const decoded = decodeBase64Utf8(raw);
+        return JSON.parse(decoded);
+      }
+    }
+  } catch(e) {}
+
+  return null;
+}
+
+async function saveRemoteSigned(budgetId, record) {
+  if (!budgetId) return;
+  const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
+  try {
+    const key = `signed_${cleanId}`;
+    const raw = JSON.stringify(record);
+    const b64 = btoa(unescape(encodeURIComponent(raw))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    await fetch(`https://keyvalue.immanuel.co/api/KeyVal/UpdateValue/${KEYVALUE_APP}/${encodeURIComponent(key)}/${b64}`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(3000)
+    });
+  } catch(e) {
+    console.error('Error guardando firma remota:', e);
+  }
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
   const params = new URLSearchParams(window.location.search);
   const data = params.get('data');
   if (!data) { showState('error'); return; }
+
   try {
     budget = JSON.parse(decodeBase64Utf8(data));
   } catch(e) {
@@ -122,94 +323,257 @@ window.addEventListener('DOMContentLoaded', () => {
     showState('error');
     return;
   }
+
+  const storageKey = getStorageKey(budget.id);
+
+  // 1. Verificación inmediata en LocalStorage (mismo dispositivo/navegador)
+  const localRecordStr = localStorage.getItem(storageKey);
+  if (localRecordStr) {
+    try {
+      const localRec = JSON.parse(localRecordStr);
+      renderFlatSigned(localRec, false);
+      return;
+    } catch(e) {}
+  }
+
+  // 2. Verificación si el presupuesto venía ya con estado ACEPTADO en los datos
+  if (budget.status === 'ACEPTADO' || budget.status === 'FIRMADO') {
+    renderFlatSigned({
+      signedAt: budget.updatedAt || budget.createdAt || new Date().toISOString(),
+      clientEmail: budget.client?.email || 'Registrado en el sistema'
+    }, false);
+    return;
+  }
+
+  // 3. Si aún no está firmado localmente, renderizar formulario interactivo
   renderSummary();
   initCanvas('canvasPro');
   initCanvas('canvasClient');
   showState('main');
+
+  // 4. En segundo plano, verificar si ya fue firmado desde otro móvil o navegador
+  checkRemoteSigned(budget.id).then(remoteRec => {
+    if (remoteRec && remoteRec.signed) {
+      localStorage.setItem(storageKey, JSON.stringify(remoteRec));
+      renderFlatSigned(remoteRec, false);
+    }
+  });
 });
 
 function showState(s) {
-  document.getElementById('errorState').classList.toggle('hidden',   s!=='error');
-  document.getElementById('successState').classList.toggle('hidden', s!=='success');
-  document.getElementById('mainContent').classList.toggle('hidden',  s!=='main');
+  document.getElementById('errorState').classList.toggle('hidden', s !== 'error');
+  document.getElementById('flatSignedState').classList.toggle('hidden', s !== 'flat');
+  document.getElementById('mainContent').classList.toggle('hidden', s !== 'main');
+  
+  if (s === 'flat') {
+    document.getElementById('headerStatusBadge').classList.remove('hidden');
+    document.getElementById('headerSubtitle').textContent = 'Documento Formalizado (Modo Consulta)';
+  }
+}
+
+function renderFlatSigned(record, justSigned = false) {
+  showState('flat');
+
+  const fin = budget.financials || {}, cli = budget.client || {}, comp = budget.company || {};
+  document.getElementById('flatBudgetId').textContent = budget.id || 'PRE-2026';
+  
+  const signedDate = record.signedAt ? new Date(record.signedAt).toLocaleString('es-ES', {
+    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
+  }) : new Date().toLocaleString('es-ES');
+  
+  document.getElementById('flatSignedDate').textContent = signedDate;
+  document.getElementById('flatSignedEmail').textContent = record.clientEmail || cli.email || 'Remitida por email';
+  
+  document.getElementById('flatCompanyName').textContent = comp.name || 'Empresa Instaladora';
+  document.getElementById('flatCompanyCif').textContent = 'CIF: ' + (comp.cif || 'No especificado');
+  
+  document.getElementById('flatClientName').textContent = cli.name || 'Cliente Particular';
+  document.getElementById('flatClientAddress').textContent = cli.address || 'Ubicación según visita';
+
+  const total = fin.totalAmount ?? 0;
+  document.getElementById('flatBudgetTotal').textContent = total.toLocaleString('es-ES', { minimumFractionDigits: 2 }) + ' €';
+
+  // Desglose de partidas
+  const container = document.getElementById('flatItemsList');
+  container.innerHTML = '';
+  (budget.items || []).forEach((item, i) => {
+    const pending = item.isPricePending || item.unitPrice === 0;
+    const totalStr = pending ? 'A valorar' : (item.total || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 }) + ' €';
+    const row = `
+      <div class="flex justify-between items-start py-1.5 border-b border-gray-100 last:border-0 text-xs">
+        <div class="flex-1 pr-2">
+          <span class="font-medium text-gray-800">${i + 1}. ${item.description}</span>
+          <div class="text-[11px] text-gray-400">${item.qty || 1} ${item.unit || 'pa'} ${item.unitPrice ? '· ' + item.unitPrice.toFixed(2) + ' €/ud' : ''}</div>
+        </div>
+        <span class="font-semibold text-gray-900 whitespace-nowrap">${totalStr}</span>
+      </div>
+    `;
+    container.insertAdjacentHTML('beforeend', row);
+  });
+
+  // Totales
+  document.getElementById('flatSubtotal').textContent = (fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 }) + ' €';
+  document.getElementById('flatTaxAmount').textContent = (fin.taxAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 }) + ' € (' + (fin.taxRatePercentage || 10) + '%)';
+  document.getElementById('flatTotalFinal').textContent = total.toLocaleString('es-ES', { minimumFractionDigits: 2 }) + ' €';
+
+  // Anticipo
+  const advancePct = fin.advancePercentage || 30;
+  const advanceAmt = fin.advanceAmount || (total * advancePct / 100);
+  document.getElementById('flatAdvanceText').textContent = `• Anticipo acordado a la firma: ${advancePct}% (${advanceAmt.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €).`;
+
+  // Firma del cliente (imagen si existe o sello certificado)
+  const clientSigImg = document.getElementById('flatClientSigImg');
+  const clientSigPlaceholder = document.getElementById('flatClientSigPlaceholder');
+  if (record.clientSignature && record.clientSignature.startsWith('data:image')) {
+    clientSigImg.src = record.clientSignature;
+    clientSigImg.classList.remove('hidden');
+    clientSigPlaceholder.classList.add('hidden');
+  } else {
+    clientSigImg.classList.add('hidden');
+    clientSigPlaceholder.classList.remove('hidden');
+  }
+
+  // Notificación si acaba de pulsar en firmar
+  const justSignedEl = document.getElementById('flatJustSignedAlert');
+  if (justSigned) {
+    justSignedEl.classList.remove('hidden');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } else {
+    justSignedEl.classList.add('hidden');
+  }
 }
 
 function renderSummary() {
-  const fin=budget.financials||{}, cli=budget.client||{}, comp=budget.company||{};
-  document.getElementById('budgetId').textContent    = budget.id||'PRE-2026';
-  document.getElementById('clientName').textContent  = cli.name||'Cliente Particular';
-  document.getElementById('clientAddress').textContent = cli.address||'';
-  document.getElementById('companyNameLabel').textContent = comp.name||'Empresa Instaladora';
-  document.getElementById('clientNameLabel').textContent  = (cli.name||'Cliente')+' — pasa el móvil';
-  const total = fin.totalAmount??0;
-  document.getElementById('budgetTotal').textContent = total.toLocaleString('es-ES',{minimumFractionDigits:2})+' €';
+  const fin = budget.financials || {}, cli = budget.client || {}, comp = budget.company || {};
+  document.getElementById('budgetId').textContent = budget.id || 'PRE-2026';
+  document.getElementById('clientName').textContent = cli.name || 'Cliente Particular';
+  document.getElementById('clientAddress').textContent = cli.address || '';
+  document.getElementById('companyNameLabel').textContent = comp.name || 'Empresa Instaladora';
+  document.getElementById('clientNameLabel').textContent = (cli.name || 'Cliente') + ' — firma aquí con el dedo';
+  
+  const total = fin.totalAmount ?? 0;
+  document.getElementById('budgetTotal').textContent = total.toLocaleString('es-ES', { minimumFractionDigits: 2 }) + ' €';
+  
   const container = document.getElementById('itemsList');
-  (budget.items||[]).forEach((item,i)=>{
-    const pending = item.isPricePending||item.unitPrice===0;
+  container.innerHTML = '';
+  (budget.items || []).forEach((item, i) => {
+    const pending = item.isPricePending || item.unitPrice === 0;
     const totalStr = pending
       ? '<span class="text-amber-600 font-medium">A valorar</span>'
-      : '<span class="font-semibold text-gray-800">'+((item.total||0).toLocaleString('es-ES',{minimumFractionDigits:2}))+' €</span>';
-    container.insertAdjacentHTML('beforeend','<div class="flex justify-between items-start gap-2"><span class="text-xs text-gray-600 flex-1">'+(i+1)+'. '+item.description+'</span><span class="text-xs whitespace-nowrap">'+totalStr+'</span></div>');
+      : '<span class="font-semibold text-gray-800">' + ((item.total || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })) + ' €</span>';
+    container.insertAdjacentHTML('beforeend', '<div class="flex justify-between items-start gap-2"><span class="text-xs text-gray-600 flex-1">' + (i + 1) + '. ' + item.description + '</span><span class="text-xs whitespace-nowrap">' + totalStr + '</span></div>');
   });
 }
 
 function initCanvas(id) {
   const canvas = document.getElementById(id);
+  if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  const dpr = window.devicePixelRatio||1;
-  canvas.width  = (canvas.offsetWidth||320)*dpr;
-  canvas.height = 130*dpr;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = (canvas.offsetWidth || 320) * dpr;
+  canvas.height = 130 * dpr;
   canvas.style.height = '130px';
-  ctx.scale(dpr,dpr);
-  ctx.strokeStyle='#0f172a'; ctx.lineWidth=2.5; ctx.lineCap='round'; ctx.lineJoin='round';
-  let drawing=false, lastX=0, lastY=0;
-  const getPos=e=>{ const r=canvas.getBoundingClientRect(); return e.touches ? {x:e.touches[0].clientX-r.left,y:e.touches[0].clientY-r.top} : {x:e.clientX-r.left,y:e.clientY-r.top}; };
-  const start=e=>{ e.preventDefault(); drawing=true; const p=getPos(e); lastX=p.x; lastY=p.y; ctx.beginPath(); ctx.arc(lastX,lastY,1.2,0,Math.PI*2); ctx.fill(); };
-  const draw=e=>{ if(!drawing) return; e.preventDefault(); const p=getPos(e); ctx.beginPath(); ctx.moveTo(lastX,lastY); ctx.lineTo(p.x,p.y); ctx.stroke(); lastX=p.x; lastY=p.y; if(!sigStates[id]){sigStates[id]=true;canvas.classList.add('signed');} };
-  const stop=()=>{ drawing=false; };
-  canvas.addEventListener('mousedown',start); canvas.addEventListener('mousemove',draw); canvas.addEventListener('mouseup',stop); canvas.addEventListener('mouseleave',stop);
-  canvas.addEventListener('touchstart',start,{passive:false}); canvas.addEventListener('touchmove',draw,{passive:false}); canvas.addEventListener('touchend',stop);
+  ctx.scale(dpr, dpr);
+  ctx.strokeStyle = '#0f172a'; ctx.lineWidth = 2.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  let drawing = false, lastX = 0, lastY = 0;
+  const getPos = e => { const r = canvas.getBoundingClientRect(); return e.touches ? { x: e.touches[0].clientX - r.left, y: e.touches[0].clientY - r.top } : { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  const start = e => { e.preventDefault(); drawing = true; const p = getPos(e); lastX = p.x; lastY = p.y; ctx.beginPath(); ctx.arc(lastX, lastY, 1.2, 0, Math.PI * 2); ctx.fill(); };
+  const draw = e => { if (!drawing) return; e.preventDefault(); const p = getPos(e); ctx.beginPath(); ctx.moveTo(lastX, lastY); ctx.lineTo(p.x, p.y); ctx.stroke(); lastX = p.x; lastY = p.y; if (!sigStates[id]) { sigStates[id] = true; canvas.classList.add('signed'); } };
+  const stop = () => { drawing = false; };
+  canvas.addEventListener('mousedown', start); canvas.addEventListener('mousemove', draw); canvas.addEventListener('mouseup', stop); canvas.addEventListener('mouseleave', stop);
+  canvas.addEventListener('touchstart', start, { passive: false }); canvas.addEventListener('touchmove', draw, { passive: false }); canvas.addEventListener('touchend', stop);
 }
 
-window.clearCanvas=function(id){
-  const canvas=document.getElementById(id); const ctx=canvas.getContext('2d');
-  ctx.clearRect(0,0,canvas.width,canvas.height); sigStates[id]=false; canvas.classList.remove('signed');
+window.clearCanvas = function(id) {
+  const canvas = document.getElementById(id);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  sigStates[id] = false;
+  canvas.classList.remove('signed');
 };
 
-window.submitSignatures=async function(){
-  const errorEl=document.getElementById('formError'); errorEl.classList.add('hidden');
-  if(!sigStates.canvasClient && !sigStates.canvasPro){
+window.submitSignatures = async function() {
+  const errorEl = document.getElementById('formError');
+  errorEl.classList.add('hidden');
+
+  const storageKey = getStorageKey(budget.id);
+
+  // Pre-verificación local
+  if (localStorage.getItem(storageKey)) {
+    showError('Este presupuesto ya ha sido firmado previamente. No admite nuevas firmas.');
+    return;
+  }
+
+  if (!sigStates.canvasClient && !sigStates.canvasPro) {
     showError('Por favor, estampa tu firma en el recuadro para aceptar el presupuesto.');
     return;
   }
-  const email=document.getElementById('clientEmail').value.trim();
-  if(!email||!email.includes('@')){
+
+  const email = document.getElementById('clientEmail').value.trim();
+  if (!email || !email.includes('@')) {
     showError('Introduce un email válido para recibir la copia del contrato firmado.');
     return;
   }
-  const btn=document.getElementById('btnSign');
-  btn.disabled=true;
-  btn.innerHTML='<svg class="w-5 h-5 spinner" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="white" stroke-width="4"/><path class="opacity-75" fill="white" d="M4 12a8 8 0 018-8v8H4z"/></svg>Sellando contrato...';
+
+  const btn = document.getElementById('btnSign');
+  btn.disabled = true;
+  btn.innerHTML = '<svg class="w-5 h-5 spinner" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="white" stroke-width="4"/><path class="opacity-75" fill="white" d="M4 12a8 8 0 018-8v8H4z"/></svg>Sellando contrato...';
+
   try {
-    const sigPro=sigStates.canvasPro ? document.getElementById('canvasPro').toDataURL('image/png') : null;
-    const sigClient=sigStates.canvasClient ? document.getElementById('canvasClient').toDataURL('image/png') : null;
-    const res=await fetch(SIGN_ENDPOINT,{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({budget,signaturePro:sigPro,signatureClient:sigClient,clientEmail:email})
+    const sigPro = sigStates.canvasPro ? document.getElementById('canvasPro').toDataURL('image/png') : null;
+    const sigClient = sigStates.canvasClient ? document.getElementById('canvasClient').toDataURL('image/png') : null;
+    
+    const res = await fetch(SIGN_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ budget, signaturePro: sigPro, signatureClient: sigClient, clientEmail: email })
     });
-    const data=await res.json().catch(()=>({}));
-    if(!res.ok||!data.ok) throw new Error(data.error||'Error del servidor ('+res.status+')');
-    document.getElementById('successEmail').textContent=email;
-    showState('success');
+
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || !data.ok) {
+      if (data.alreadySigned) {
+        // Ya estaba firmado remotamente
+        const remoteRec = data.details || { signedAt: new Date().toISOString(), clientEmail: email };
+        localStorage.setItem(storageKey, JSON.stringify(remoteRec));
+        renderFlatSigned(remoteRec, false);
+        return;
+      }
+      throw new Error(data.error || 'Error del servidor (' + res.status + ')');
+    }
+
+    const record = {
+      signed: true,
+      budgetId: budget.id,
+      signedAt: data.signedAt || new Date().toISOString(),
+      clientEmail: email,
+      clientSignature: sigClient,
+      proSignature: sigPro
+    };
+
+    // 1. Guardar en el almacenamiento del navegador
+    localStorage.setItem(storageKey, JSON.stringify(record));
+
+    // 2. Guardar en la nube para sincronizar otros dispositivos
+    saveRemoteSigned(budget.id, record);
+
+    // 3. Cambiar de inmediato a la Vista Plana con aviso de éxito
+    renderFlatSigned(record, true);
+
   } catch(err) {
-    showError('Error al firmar: '+err.message+'. Inténtalo de nuevo.');
-    btn.disabled=false;
-    btn.innerHTML='<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>Aceptar y Firmar Presupuesto';
+    showError('Error al firmar: ' + err.message + '. Inténtalo de nuevo.');
+    btn.disabled = false;
+    btn.innerHTML = '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>Aceptar y Firmar Presupuesto';
   }
 };
 
-function showError(msg){const el=document.getElementById('formError');el.textContent=msg;el.classList.remove('hidden');el.scrollIntoView({behavior:'smooth',block:'center'});}
+function showError(msg) {
+  const el = document.getElementById('formError');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
 </script>
 </body>
 </html>
