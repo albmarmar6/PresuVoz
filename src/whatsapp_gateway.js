@@ -1638,10 +1638,8 @@ async function startWhatsAppGateway() {
 
             const compressed = zlib.deflateRawSync(Buffer.from(JSON.stringify(compactBudget), 'utf-8'));
             const budgetZ = compressed.toString('base64url');
-            const longSigningUrl = `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z=${budgetZ}`;
-
-            // Acortar el enlace para que sea súper limpio y corto en WhatsApp
-            const signingUrl = await shortenUrl(longSigningUrl);
+            // Enlace directo oficial de GitHub Pages (100% fiable, sin intermediarios ni acortadores externos)
+            const signingUrl = `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z=${budgetZ}`;
 
             const sentSig = await sock.sendMessage(remoteJid, {
               text: `✍️ *Enlace de Aceptación y Firma Digital:*\n${signingUrl}\n\n📲 _Puedes abrirlo tú o enviárselo a tu cliente para que firme cómodamente desde su móvil o desde su casa. Al firmar, el presupuesto pasa a estado *Aceptado* y el cliente recibe su copia sellada por email._`
