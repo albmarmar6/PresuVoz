@@ -315,6 +315,66 @@ async function shortenUrl(longUrl) {
   return longUrl;
 }
 
+function generateSigningUrl(budget, company, cleanPhone) {
+  const compactBudget = {
+    i: budget.id,
+    c: {
+      n: company?.name || budget.company?.name || 'Carpintería y Reformas Manolo S.L.',
+      f: company?.cif || budget.company?.cif || 'B-41987654',
+      p: company?.phone || cleanPhone,
+      e: company?.email || 'presupuestos@presuvoz.app'
+    },
+    k: {
+      n: budget.client?.name || 'Cliente Particular',
+      a: budget.client?.address || 'Ubicación según visita'
+    },
+    t: (budget.items || []).map(it => [it.description, it.qty, it.unitPrice, it.total]),
+    f: {
+      b: budget.financials?.subtotal || 0,
+      r: budget.financials?.taxRatePercentage || 10,
+      x: budget.financials?.taxAmount || 0,
+      t: budget.financials?.totalAmount || 0
+    },
+    terms: budget.terms
+  };
+
+  const compressed = zlib.deflateRawSync(Buffer.from(JSON.stringify(compactBudget), 'utf-8'));
+  const budgetZ = compressed.toString('base64url');
+  return `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z=${budgetZ}`;
+}
+
+function detectBudgetListIntent(text) {
+  if (!text || typeof text !== 'string') return null;
+  const t = text.trim().toLowerCase();
+
+  // Excluir intenciones explícitas de otro tipo
+  if (/nuevo\s+presupuesto|presupuesto\s+nuevo|factura|cobro|pago|anticipo|cu[aá]nto\s+me\s+debe/i.test(t)) {
+    return null;
+  }
+
+  // Tiene que referirse a presupuestos o borradores o ser comando clave
+  if (!/(?:presupuesto|borrador|sin\s+firmar|por\s+firmar)/i.test(t)) {
+    if (!/^(?:1|lista)$/i.test(t)) return null;
+  }
+
+  const isListQuery = /^(?:1|lista|mis\s+presupuestos|ver\s+presupuestos)$/i.test(t) ||
+    /(?:list(?:ar?|ame|a)?|ver|dime|cu[aá]les|qu[eé]|mostrar|enseñar|consultar|sacar)/i.test(t) ||
+    /^(?:presupuestos|borradores)/i.test(t);
+
+  if (!isListQuery) return null;
+
+  if (/pendiente|sin\s+firmar|por\s+firmar|falta(?:n)?\s+por\s+firmar/i.test(t)) {
+    return 'pending_signature';
+  }
+  if (/aceptad|firmad/i.test(t)) {
+    return 'accepted';
+  }
+  if (/borrador/i.test(t)) {
+    return 'draft';
+  }
+  return 'all';
+}
+
 async function startWhatsAppGateway() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
   const { version } = await fetchLatestBaileysVersion();
@@ -443,30 +503,30 @@ async function startWhatsAppGateway() {
   function getUserSession(remoteJid, senderNumber) {
     const cleanPhone = senderNumber || String(remoteJid).replace(/\D/g, '');
     if (!userSessions.has(remoteJid)) {
-      const company = getCompany(cleanPhone);
-      const budgetsMap = new Map();
-      const dbBudgets = listBudgets(cleanPhone, 50);
-      for (const b of dbBudgets) {
-        if (b && b.id) budgetsMap.set(b.id, b);
-      }
-      const invoicesMap = new Map();
-      const dbInvoices = listInvoices(cleanPhone, 50);
-      for (const inv of dbInvoices) {
-        if (inv && inv.id) invoicesMap.set(inv.id, inv);
-      }
-      const activeId = budgetsMap.size > 0 ? Array.from(budgetsMap.keys())[0] : null;
-
       userSessions.set(remoteJid, {
         phone: cleanPhone,
-        company,
-        activeBudgetId: activeId,
-        budgets: budgetsMap,
-        invoices: invoicesMap
+        company: getCompany(cleanPhone),
+        activeBudgetId: null,
+        budgets: new Map(),
+        invoices: new Map()
       });
-      console.log(`📦 Sesión cargada desde SQLite para ${cleanPhone}: ${budgetsMap.size} presupuestos, ${invoicesMap.size} facturas.`);
+      console.log(`📦 Sesión inicializada para ${cleanPhone}`);
     }
     const session = userSessions.get(remoteJid);
     session.company = getCompany(cleanPhone);
+
+    // Refrescar siempre desde SQLite para reflejar cambios en tiempo real (firmas web, cobros, etc.)
+    const dbBudgets = listBudgets(cleanPhone, 100);
+    for (const b of dbBudgets) {
+      if (b && b.id) session.budgets.set(b.id, b);
+    }
+    const dbInvoices = listInvoices(cleanPhone, 100);
+    for (const inv of dbInvoices) {
+      if (inv && inv.id) session.invoices.set(inv.id, inv);
+    }
+    if (!session.activeBudgetId && session.budgets.size > 0) {
+      session.activeBudgetId = Array.from(session.budgets.keys())[0];
+    }
     return session;
   }
 
@@ -1149,6 +1209,158 @@ async function startWhatsAppGateway() {
     }
   }
 
+  function formatBudgetsListForWhatsApp(budgets, filter = 'all', company = null, invoices = null) {
+    if (!budgets || budgets.length === 0) {
+      if (filter === 'pending_signature') {
+        return '⏳ *NO TIENES PRESUPUESTOS PENDIENTES DE FIRMA*\n\nTodos tus presupuestos creados ya han sido firmados por los clientes o aceptados.';
+      }
+      if (filter === 'accepted') {
+        return '🟢 *NO TIENES PRESUPUESTOS ACEPTADOS*\n\nTodavía no hay presupuestos aceptados o firmados.';
+      }
+      if (filter === 'draft') {
+        return '📝 *NO TIENES BORRADORES PENDIENTES*\n\nTodas las partidas de tus presupuestos tienen precio asignado.';
+      }
+      return '📂 *NO TIENES PRESUPUESTOS GUARDADOS TODAVÍA*\n\nEnvíame un audio o mensaje describiendo una obra para generar el primero.';
+    }
+
+    let title = '📂 *TUS DOCUMENTOS GUARDADOS:*';
+    if (filter === 'pending_signature') {
+      title = '⏳ *PRESUPUESTOS PENDIENTES DE FIRMA:*';
+    } else if (filter === 'accepted') {
+      title = '🟢 *PRESUPUESTOS ACEPTADOS / FIRMADOS:*';
+    } else if (filter === 'draft') {
+      title = '📝 *BORRADORES PENDIENTES DE VALORACIÓN:*';
+    }
+
+    let text = `${title}\n━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    let totalSum = 0;
+
+    budgets.forEach((b, idx) => {
+      const isAccepted = b.status === 'ACEPTADO' || b.status === 'FIRMADO';
+      const isDraft = b.isDraft || b.status === 'BORRADOR_MEDICION';
+      const statusLabel = isAccepted
+        ? '🟢 *Aceptado*'
+        : (isDraft ? '📝 *Borrador*' : '⏳ *Pendiente de firma*');
+
+      const clientName = b.client?.name || 'Cliente Particular';
+      const address = b.client?.address || 'Ubicación según visita';
+      const totalAmount = b.financials?.totalAmount || 0;
+      totalSum += totalAmount;
+      const formattedTotal = totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+
+      const paid = b.paymentSummary?.totalPaid || 0;
+      const remaining = b.paymentSummary?.remainingBalance !== undefined ? b.paymentSummary.remainingBalance : totalAmount;
+      const payBadge = b.paymentSummary?.status === 'LIQUIDADO'
+        ? ' | 🟢 *Cobrado*'
+        : (paid > 0 ? ` | ⏳ *Pdte. cobro:* ${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '');
+
+      text += `\n${idx + 1}️⃣ *Presupuesto ${b.id}*\n`;
+      text += `   👤 *Cliente:* ${clientName}\n`;
+      text += `   📍 *Dirección:* ${address}\n`;
+      text += `   💰 *Total:* *${formattedTotal}* · ${statusLabel}${payBadge}\n`;
+    });
+
+    if (filter === 'all' && invoices && invoices.size > 0) {
+      text += '\n🧾 *FACTURAS OFICIALES EMITIDAS:*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+      let invIdx = 1;
+      for (const [invId, inv] of invoices.entries()) {
+        const clientName = inv.client?.name || 'Cliente';
+        const total = inv.financials?.totalAmount ? `${inv.financials.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '';
+        const status = inv.status === 'PAGADA' ? '✅ Pagada' : '⏳ Pendiente de cobro';
+        text += `\n${invIdx}️⃣ *${invId}* (Ref: ${inv.budgetId})\n   👤 ${clientName}\n   💰 Total: *${total}* (${status})\n`;
+        invIdx++;
+      }
+    }
+
+    text += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+    const filterLabel = filter === 'pending_signature' ? 'pendientes de firma' : (filter === 'accepted' ? 'aceptados' : 'registrados');
+    text += `📊 *Total:* ${budgets.length} presupuesto${budgets.length === 1 ? '' : 's'} ${filterLabel} por valor de *${totalSum.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €*.\n`;
+    text += '━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+    text += '💡 _Para reenviar el enlace de firma di: "Enlace [Nombre o ID]"_\n';
+    text += '💡 _Para marcarlo como aceptado di: "El cliente ha firmado el de [Nombre]"_\n';
+    text += '💡 _Para registrar cobro/anticipo di: "Cobro [Cantidad] [Nombre]"_\n';
+    text += '💡 _Para emitir factura di: "Facturar [Nombre]"_\n';
+    text += '💡 _Para crear una obra nueva di: "Presupuesto nuevo..."_';
+
+    return text;
+  }
+
+  async function handleListBudgets(sock, remoteJid, session, filter = 'all') {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const dbBudgets = listBudgets(cleanPhone, 100);
+      for (const b of dbBudgets) {
+        if (b && b.id) session.budgets.set(b.id, b);
+      }
+
+      const allBudgets = Array.from(session.budgets.values());
+      let filtered = allBudgets;
+
+      if (filter === 'pending_signature') {
+        filtered = allBudgets.filter(b => {
+          const isAccepted = b.status === 'ACEPTADO' || b.status === 'FIRMADO';
+          return !isAccepted && !b.isDraft;
+        });
+      } else if (filter === 'accepted') {
+        filtered = allBudgets.filter(b => b.status === 'ACEPTADO' || b.status === 'FIRMADO');
+      } else if (filter === 'draft') {
+        filtered = allBudgets.filter(b => b.isDraft || b.status === 'BORRADOR_MEDICION');
+      }
+
+      const text = formatBudgetsListForWhatsApp(filtered, filter, session.company, session.invoices);
+      const sent = await sock.sendMessage(remoteJid, { text });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    } catch (err) {
+      console.error('❌ Error listando presupuestos:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error consultando los presupuestos:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
+  async function handleSendSigningLink(sock, remoteJid, session, query = '') {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const dbBudgets = listBudgets(cleanPhone, 100);
+      for (const b of dbBudgets) {
+        if (b && b.id) session.budgets.set(b.id, b);
+      }
+
+      let target = null;
+      if (query && query.trim() !== '') {
+        target = findBudgetInSession(session, query);
+      }
+      if (!target && session.activeBudgetId) {
+        target = session.budgets.get(session.activeBudgetId);
+      }
+      if (!target && session.budgets.size > 0) {
+        target = Array.from(session.budgets.values())[session.budgets.size - 1];
+      }
+
+      if (!target) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ *No se encontró el presupuesto solicitado.*\n\nIndica el nombre del cliente o número (ej: *"enlace de Alberto"* o *"enlace PRE-2026-6136"*).'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+        return;
+      }
+
+      const signingUrl = generateSigningUrl(target, session.company, cleanPhone);
+      const isAccepted = target.status === 'ACEPTADO' || target.status === 'FIRMADO';
+      const statusNote = isAccepted
+        ? 'ℹ️ _Nota: Este presupuesto ya figura como ACEPTADO/FIRMADO en el sistema._'
+        : '📲 _Puedes abrir el enlace tú mismo o reenviárselo al cliente para que firme desde su móvil o PC._';
+
+      const sentSig = await sock.sendMessage(remoteJid, {
+        text: `✍️ *Enlace de Firma Digital — Presupuesto ${target.id}*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Cliente:* ${target.client?.name || 'Cliente Particular'}\n💰 *Importe:* ${(target.financials?.totalAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €\n📍 *Ubicación:* ${target.client?.address || 'Ubicación según visita'}\n\n🔗 *Enlace:* ${signingUrl}\n\n${statusNote}`
+      });
+      if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
+    } catch (err) {
+      console.error('❌ Error generando enlace de firma:', err.message);
+    }
+  }
+
   async function handleAiProcessing(sock, remoteJid, session, taskData, isRetry = false) {
     await sock.sendPresenceUpdate('composing', remoteJid);
 
@@ -1212,6 +1424,12 @@ async function startWhatsAppGateway() {
         text: '🎉 *¡Tu petición guardada en stand-by ha sido procesada con éxito!*\nAquí tienes el documento generado:'
       });
       if (sentRetryNote?.key?.id) botSentMessageIds.add(sentRetryNote.key.id);
+    }
+
+    // 0. Listar o consultar presupuestos
+    if (aiResult?.action === 'list_budgets') {
+      await handleListBudgets(sock, remoteJid, session, aiResult.budgetFilter || 'all');
+      return;
     }
 
     // 1. Factura de anticipo
@@ -1424,31 +1642,7 @@ async function startWhatsAppGateway() {
       console.log(`✅ Archivo PDF (${pdfBuffer.length} bytes) enviado con éxito por WhatsApp.`);
 
       try {
-        const compactBudget = {
-          i: engineResult.budget.id,
-          c: {
-            n: session.company?.name || engineResult.budget.company?.name || 'Carpintería y Reformas Manolo S.L.',
-            f: session.company?.cif || engineResult.budget.company?.cif || 'B-41987654',
-            p: session.company?.phone || cleanPhone,
-            e: session.company?.email || 'presupuestos@presuvoz.app'
-          },
-          k: {
-            n: engineResult.budget.client?.name || 'Cliente Particular',
-            a: engineResult.budget.client?.address || 'Ubicación según visita'
-          },
-          t: (engineResult.budget.items || []).map(it => [it.description, it.qty, it.unitPrice, it.total]),
-          f: {
-            b: engineResult.budget.financials?.subtotal || 0,
-            r: engineResult.budget.financials?.taxRatePercentage || 10,
-            x: engineResult.budget.financials?.taxAmount || 0,
-            t: engineResult.budget.financials?.totalAmount || 0
-          },
-          terms: engineResult.budget.terms
-        };
-
-        const compressed = zlib.deflateRawSync(Buffer.from(JSON.stringify(compactBudget), 'utf-8'));
-        const budgetZ = compressed.toString('base64url');
-        const signingUrl = `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z=${budgetZ}`;
+        const signingUrl = generateSigningUrl(engineResult.budget, session.company, cleanPhone);
 
         const sentSig = await sock.sendMessage(remoteJid, {
           text: `✍️ *Enlace de Aceptación y Firma Digital:*\n${signingUrl}\n\n📲 _Puedes abrirlo tú o enviárselo a tu cliente para que firme cómodamente desde su móvil o desde su casa. Al firmar, el presupuesto pasa a estado *Aceptado* y el cliente recibe su copia sellada por email._`
@@ -1731,50 +1925,17 @@ async function startWhatsAppGateway() {
         continue;
       }
 
-      // Opción 1: Ver lista de presupuestos guardados
-      if (/^(1|presupuestos|mis presupuestos|ver presupuestos|lista)$/i.test(rawUserText)) {
-        if (session.budgets.size === 0) {
-          const sentEmpty = await sock.sendMessage(remoteJid, {
-            text: '📂 *No tienes presupuestos guardados todavía.*\n\nEnvíame un audio describiendo una obra para generar el primero.'
-          });
-          if (sentEmpty?.key?.id) botSentMessageIds.add(sentEmpty.key.id);
-          continue;
-        }
+      // Comando directo para listar o consultar presupuestos (todos, pendientes de firma, aceptados, borradores)
+      const budgetListFilter = detectBudgetListIntent(rawUserText);
+      if (budgetListFilter) {
+        await handleListBudgets(sock, remoteJid, session, budgetListFilter);
+        continue;
+      }
 
-        let listText = '📂 *TUS DOCUMENTOS GUARDADOS:*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        let idx = 1;
-        for (const [id, b] of session.budgets.entries()) {
-          const isActive = id === session.activeBudgetId ? ' 🟢 *(ACTIVO)*' : '';
-          const clientName = b.client?.name || 'Cliente Particular';
-          const address = b.client?.address || 'Ubicación según visita';
-          const status = b.status === 'ACEPTADO' ? '🟢 Aceptado' : (b.isDraft ? '📝 Borrador' : '⏳ Pendiente de aceptación');
-
-          const paid = b.paymentSummary?.totalPaid || 0;
-          const remaining = b.paymentSummary?.remainingBalance !== undefined ? b.paymentSummary.remainingBalance : (b.financials?.totalAmount || 0);
-          const payBadge = b.paymentSummary?.status === 'LIQUIDADO'
-            ? ' | 🟢 *COBRADO*'
-            : (paid > 0 ? ` | ⏳ *Pendiente:* ${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '');
-
-          listText += `\n${idx}️⃣ *Presupuesto ${id}*${isActive}\n   👤 ${clientName} (${address})\n   💰 Total: *${total}* · ${status}${payBadge}\n`;
-          idx++;
-        }
-
-        if (session.invoices && session.invoices.size > 0) {
-          listText += '\n🧾 *FACTURAS OFICIALES EMITIDAS:*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-          let invIdx = 1;
-          for (const [invId, inv] of session.invoices.entries()) {
-            const clientName = inv.client?.name || 'Cliente';
-            const total = inv.financials?.totalAmount ? `${inv.financials.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '';
-            const status = inv.status === 'PAGADA' ? '✅ Pagada' : '⏳ Pendiente de cobro';
-            listText += `\n${invIdx}️⃣ *${invId}* (Ref: ${inv.budgetId})\n   👤 ${clientName}\n   💰 Total: *${total}* (${status})\n`;
-            invIdx++;
-          }
-        }
-
-        listText += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para agendar visita di: "Apunta visita con Juan el jueves a las 11:00 en Calle Mayor 14 para ver la caldera"_\n💡 _Para consultar tus visitas escribe: "agenda" o "visitas"_\n💡 _Para registrar un cobro di: "Apunta 1.500€ de José Luis por Bizum"_\n💡 _Para consultar deuda di: "¿Cuánto me debe José Luis?"_\n💡 _Para facturar di: "Facturar el de José Luis"_\n💡 _Para exportar el trimestre a tu gestor di: "Gestoría" o "3T"_\n💡 _Para ver o modificar tus datos de empresa y logo di: "Mi empresa"_\n💡 _Para crear uno nuevo di: "Presupuesto nuevo..."_';
-
-        const sentList = await sock.sendMessage(remoteJid, { text: listText });
-        if (sentList?.key?.id) botSentMessageIds.add(sentList.key.id);
+      // Comando directo para obtener el enlace de firma digital de un presupuesto: ej. "enlace alberto", "enlace PRE-2026-6136", "link"
+      const signingLinkMatch = rawUserText.match(/^(?:enlace|link|url|firma|firmar)(?:\s+(?:de|del)?\s*(.+))?$/i);
+      if (signingLinkMatch && !/^(?:firmar|firma)\s+(?:presupuesto|obra)$/i.test(rawUserText)) {
+        await handleSendSigningLink(sock, remoteJid, session, signingLinkMatch[1] || '');
         continue;
       }
 

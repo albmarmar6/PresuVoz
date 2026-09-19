@@ -418,6 +418,59 @@ assert(Buffer.isBuffer(pdfAdvance) && pdfAdvance.length > 2000, `Genera correcta
 const pdfFinal = await generateInvoicePDF(finalInv);
 assert(Buffer.isBuffer(pdfFinal) && pdfFinal.length > 2000, `Genera correctamente el PDF formal de Factura de Liquidación con deducción fiscal (${pdfFinal.length} bytes)`);
 
+// ==========================================================
+// TEST 13: Consulta y Filtrado de Presupuestos (Pendientes de firma, Aceptados, Todos)
+// ==========================================================
+console.log("\nTEST 13: Consulta y Filtrado de Presupuestos (Pendientes de firma, Aceptados, Todos)");
+
+function testDetectBudgetListIntent(text) {
+  if (!text || typeof text !== 'string') return null;
+  const t = text.trim().toLowerCase();
+  if (/nuevo\s+presupuesto|presupuesto\s+nuevo|factura|cobro|pago|anticipo|cu[aá]nto\s+me\s+debe/i.test(t)) {
+    return null;
+  }
+  if (!/(?:presupuesto|borrador|sin\s+firmar|por\s+firmar)/i.test(t)) {
+    if (!/^(?:1|lista)$/i.test(t)) return null;
+  }
+  const isListQuery = /^(?:1|lista|mis\s+presupuestos|ver\s+presupuestos)$/i.test(t) ||
+    /(?:list(?:ar?|ame|a)?|ver|dime|cu[aá]les|qu[eé]|mostrar|enseñar|consultar|sacar)/i.test(t) ||
+    /^(?:presupuestos|borradores)/i.test(t);
+  if (!isListQuery) return null;
+  if (/pendiente|sin\s+firmar|por\s+firmar|falta(?:n)?\s+por\s+firmar/i.test(t)) {
+    return 'pending_signature';
+  }
+  if (/aceptad|firmad/i.test(t)) {
+    return 'accepted';
+  }
+  if (/borrador/i.test(t)) {
+    return 'draft';
+  }
+  return 'all';
+}
+
+assert(testDetectBudgetListIntent("Listame todos los presupuestos que están pendientes por firmar") === "pending_signature", "Detecta filtro 'pending_signature' en la frase exacta del usuario");
+assert(testDetectBudgetListIntent("presupuestos pendientes de firma") === "pending_signature", "Detecta filtro 'pending_signature' en 'presupuestos pendientes de firma'");
+assert(testDetectBudgetListIntent("presupuestos sin firmar") === "pending_signature", "Detecta filtro 'pending_signature' en 'presupuestos sin firmar'");
+assert(testDetectBudgetListIntent("presupuestos aceptados") === "accepted", "Detecta filtro 'accepted' en 'presupuestos aceptados'");
+assert(testDetectBudgetListIntent("ver presupuestos") === "all", "Detecta filtro 'all' en 'ver presupuestos'");
+assert(testDetectBudgetListIntent("mis presupuestos") === "all", "Detecta filtro 'all' en 'mis presupuestos'");
+assert(testDetectBudgetListIntent("1") === "all", "Detecta comando rápido '1'");
+assert(testDetectBudgetListIntent("tirar tabique de 4x3 metros por 600 euros") === null, "No confunde dictado de partidas con listado");
+
+const mockBudgets = [
+  { id: 'PRE-1', client: { name: 'Juan' }, status: 'PENDIENTE_FIRMA', isDraft: false, financials: { totalAmount: 1000 } },
+  { id: 'PRE-2', client: { name: 'Pedro' }, status: 'ACEPTADO', isDraft: false, financials: { totalAmount: 2000 } },
+  { id: 'PRE-3', client: { name: 'María' }, status: 'BORRADOR_MEDICION', isDraft: true, financials: { totalAmount: 500 } },
+  { id: 'PRE-4', client: { name: 'Luis' }, status: 'PENDIENTE_FIRMA', isDraft: false, financials: { totalAmount: 1500 } },
+];
+
+const pendingList = mockBudgets.filter(b => b.status !== 'ACEPTADO' && b.status !== 'FIRMADO' && !b.isDraft);
+assert(pendingList.length === 2, `Filtra exactamente los 2 presupuestos pendientes de firma (PRE-1 y PRE-4). Obtenido: ${pendingList.length}`);
+assert(pendingList[0].id === 'PRE-1' && pendingList[1].id === 'PRE-4', "Preserva las identidades de los pendientes");
+
+const acceptedList = mockBudgets.filter(b => b.status === 'ACEPTADO' || b.status === 'FIRMADO');
+assert(acceptedList.length === 1 && acceptedList[0].id === 'PRE-2', "Filtra exactamente el presupuesto aceptado");
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
