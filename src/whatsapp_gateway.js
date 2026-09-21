@@ -324,22 +324,39 @@ function generateSigningUrl(budget, company, cleanPhone) {
     i: budget.id,
     c: {
       n: company?.name || budget.company?.name || 'Carpintería y Reformas Manolo S.L.',
+      c: company?.cif || budget.company?.cif || 'B-41987654',
       f: company?.cif || budget.company?.cif || 'B-41987654',
       p: company?.phone || cleanPhone,
-      e: company?.email || 'presupuestos@presuvoz.app'
+      e: company?.email || 'presupuestos@presuvoz.app',
+      a: company?.address || budget.company?.address || 'Pol. Ind. El Pino, Nave 4 - Sevilla'
     },
     k: {
       n: budget.client?.name || 'Cliente Particular',
-      a: budget.client?.address || 'Ubicación según visita'
+      a: budget.client?.address || 'Ubicación según visita',
+      p: budget.client?.phone || '',
+      e: budget.client?.email || ''
     },
-    t: (budget.items || []).map(it => [it.description, it.qty, it.unitPrice, it.total]),
+    t: (budget.items || []).map(it => ({
+      d: it.description || '',
+      q: it.qty ?? 1,
+      u: it.unit || 'pa',
+      p: it.unitPrice ?? 0,
+      t: it.total ?? ((it.qty ?? 1) * (it.unitPrice ?? 0)),
+      pen: Boolean(it.isPricePending)
+    })),
     f: {
-      b: budget.financials?.subtotal || 0,
-      r: budget.financials?.taxRatePercentage || 10,
-      x: budget.financials?.taxAmount || 0,
-      t: budget.financials?.totalAmount || 0
+      b: budget.financials?.taxableBase ?? budget.financials?.subtotal ?? 0,
+      r: budget.financials?.taxRatePercentage ?? 10,
+      x: budget.financials?.taxAmount ?? 0,
+      a: budget.financials?.taxAmount ?? 0,
+      t: budget.financials?.totalAmount ?? 0,
+      ap: budget.financials?.advancePercentage ?? 30,
+      aa: budget.financials?.advanceAmount ?? 0,
+      dp: budget.financials?.discountPercentage ?? 0,
+      da: budget.financials?.discountAmount ?? 0
     },
-    terms: budget.terms
+    terms: budget.terms,
+    status: budget.status || 'PENDIENTE_ACEPTACION'
   };
 
   const compressed = zlib.deflateRawSync(Buffer.from(JSON.stringify(compactBudget), 'utf-8'));
