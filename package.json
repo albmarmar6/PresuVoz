@@ -10,7 +10,8 @@
     "simulador": "node src/interactive_cli.js",
     "whatsapp": "node src/whatsapp_gateway.js",
     "visor": "node src/db_viewer.js",
-    "db": "node src/db_viewer.js"
+    "db": "node src/db_viewer.js",
+    "db:reset": "node src/reset_db.js"
   },
   "keywords": [
     "presupuestos",

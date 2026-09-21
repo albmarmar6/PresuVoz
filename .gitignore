@@ -37,5 +37,6 @@ payload.json
 # SQLite Database & User Logos
 data/*.db
 data/*.db-journal
+data/backups/
 data/logos/*
 !data/logos/.gitkeep
