@@ -213,8 +213,15 @@ export default async function handler(req, res) {
 
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  // Endpoint de comprobación: GET /api/sign?id=PRE-2026-XXXX
+  // Endpoint de comprobación: GET /api/sign?id=PRE-2026-XXXX o GET /api/sign?all=1
   if (req.method === 'GET') {
+    if (req.query.all) {
+      return res.status(200).json({
+        ok: true,
+        signed: Array.from(inMemorySigned.values())
+      });
+    }
+
     const budgetId = req.query.id || req.query.check;
     if (!budgetId) {
       return res.status(400).json({ ok: false, error: 'Falta parámetro id o check.' });

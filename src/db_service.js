@@ -241,22 +241,42 @@ export async function syncPendingSignaturesFromCloud() {
 
     const newlyAccepted = [];
 
-    for (const row of rows) {
+    await Promise.all(rows.map(async (row) => {
       try {
         const budgetId = row.id;
         const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
-        const url = `https://keyvalue.immanuel.co/api/KeyVal/GetValue/presuvoz2026/signed_${encodeURIComponent(cleanId)}`;
-        const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
-        if (!res.ok) continue;
-        const raw = await res.json();
-        if (!raw || typeof raw !== 'string') continue;
+        let signInfo = null;
 
-        const normalized = raw.replace(/-/g, '+').replace(/_/g, '/');
-        const padded = normalized.padEnd(normalized.length + (4 - normalized.length % 4) % 4, '=');
-        const decoded = Buffer.from(padded, 'base64').toString('utf-8');
-        const signInfo = JSON.parse(decoded);
+        // 1. Consultar el backend oficial de PresuVoz (Vercel)
+        try {
+          const vUrl = `https://presuvoz.vercel.app/api/sign?check=${encodeURIComponent(cleanId)}`;
+          const vRes = await fetch(vUrl, { signal: AbortSignal.timeout(3500) });
+          if (vRes.ok) {
+            const vData = await vRes.json();
+            if (vData && vData.alreadySigned && vData.details) {
+              signInfo = vData.details;
+            }
+          }
+        } catch (eVercel) {}
 
-        if (signInfo && signInfo.signed) {
+        // 2. Fallback a nube secundaria de sincronización
+        if (!signInfo) {
+          try {
+            const url = `https://keyvalue.immanuel.co/api/KeyVal/GetValue/presuvoz2026/signed_${encodeURIComponent(cleanId)}`;
+            const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
+            if (res.ok) {
+              const raw = await res.json();
+              if (raw && typeof raw === 'string') {
+                const normalized = raw.replace(/-/g, '+').replace(/_/g, '/');
+                const padded = normalized.padEnd(normalized.length + (4 - normalized.length % 4) % 4, '=');
+                const decoded = Buffer.from(padded, 'base64').toString('utf-8');
+                signInfo = JSON.parse(decoded);
+              }
+            }
+          } catch (eKv) {}
+        }
+
+        if (signInfo && (signInfo.signed || signInfo.signedAt)) {
           let budgetObj = null;
           try { budgetObj = JSON.parse(row.data_json); } catch(e) {}
           if (budgetObj) {
@@ -282,10 +302,10 @@ export async function syncPendingSignaturesFromCloud() {
             signedAt: signInfo.signedAt
           });
         }
-      } catch(err) {
+      } catch (err) {
         // Ignorar fallos de red en sondeos individuales
       }
-    }
+    }));
 
     return newlyAccepted;
   } catch (e) {
