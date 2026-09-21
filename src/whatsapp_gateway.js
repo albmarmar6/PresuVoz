@@ -837,13 +837,26 @@ async function startWhatsAppGateway() {
       return;
     }
 
-    const amount = Number(paymentInfo.amount);
+    const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+    let amount = Number(paymentInfo.amount);
+
+    const remainingBalance = targetBudget.paymentSummary?.remainingBalance !== undefined
+      ? targetBudget.paymentSummary.remainingBalance
+      : (targetBudget.financials?.totalAmount || 0);
+
+    // Si no se detectó un importe explícito (ej: el usuario dijo "pago recibido", "pago completo", "factura pagada", etc.)
     if (!amount || isNaN(amount) || amount <= 0) {
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: '⚠️ *Importe de cobro no detectado o inválido.*\n\nPor favor, especifica la cantidad que te han pagado (ej: *"José Luis me ha pagado 1.500€ por Bizum"*).'
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-      return;
+      if (remainingBalance > 0) {
+        amount = remainingBalance;
+        paymentInfo.amount = remainingBalance;
+        paymentInfo.concept = paymentInfo.concept || 'Liquidación final de obra y factura';
+      } else {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ *Importe de cobro no detectado o el presupuesto ya está liquidado.*\n\nPor favor, especifica la cantidad que te han pagado (ej: *"Alberto me ha pagado 1.500€"*).'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+        return;
+      }
     }
 
     try {
@@ -852,9 +865,24 @@ async function startWhatsAppGateway() {
 
       // Persistir cobro y asegurar que el presupuesto pasa a estado ACEPTADO
       targetBudget.status = 'ACEPTADO';
-      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
       savePayment(cleanPhone, receipt);
       saveBudget(cleanPhone, targetBudget);
+
+      // Si la obra queda liquidada o se cubre el saldo, actualizar las facturas pendientes a 'PAGADA'
+      if (receipt.remainingBalance <= 0) {
+        const allInvoices = listInvoices(cleanPhone, 50);
+        for (const inv of allInvoices) {
+          if (inv.budgetId === targetBudget.id && inv.status !== 'PAGADA') {
+            inv.status = 'PAGADA';
+            inv.paidAt = new Date().toISOString();
+            saveInvoice(cleanPhone, inv);
+            if (session.invoices && session.invoices.has(inv.id)) {
+              session.invoices.set(inv.id, inv);
+            }
+            console.log(`✅ Factura ${inv.id} actualizada automáticamente a estado 'PAGADA' en SQLite y sesión.`);
+          }
+        }
+      }
 
       // Generar PDF formal del recibo
       const receiptPdfBuffer = await generateReceiptPDF(receipt);
@@ -1538,8 +1566,13 @@ async function startWhatsAppGateway() {
         || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
         || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
 
-      // Si además de cobro pidió factura (ej: "hazme una factura ya que me ha hecho transferencia...")
-      if (/factura/i.test(taskData.rawUserText || '')) {
+      // Si además de cobro pidió expresamente emitir factura de anticipo (ej: "hazme la factura de anticipo de Juan")
+      // y NO es simplemente una notificación de que una factura ha sido pagada (ej: "factura pagada", "pago recibido de la factura")
+      const rawText = taskData.rawUserText || '';
+      const isExplicitInvoiceRequest = /(?:hacer|hazme|emite|emitir|saca|sacarme|generar|crear|pásame).*(?:factura)/i.test(rawText) || /factura.*(?:anticipo|adelanto)/i.test(rawText);
+      const isPaymentNotice = /(?:pagad|recibid|cobrad|abonad|ingresad|transferid|liquidada?)/i.test(rawText);
+
+      if (isExplicitInvoiceRequest && !isPaymentNotice) {
         await handleAdvanceInvoice(
           sock,
           remoteJid,
@@ -1547,7 +1580,7 @@ async function startWhatsAppGateway() {
           target,
           aiResult.clientNif,
           aiResult.paymentInfo,
-          Boolean(aiResult.sendSigningLink || /firm|enlace/i.test(taskData.rawUserText || ''))
+          Boolean(aiResult.sendSigningLink || /firm|enlace/i.test(rawText))
         );
         return;
       }
