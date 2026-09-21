@@ -83,7 +83,6 @@ const GEMINI_MODELS = [
   'gemini-3.8-flash',
   'gemini-3.7-flash',
   'gemini-3.6-flash',
-  'gemini-3.5-flash',
   'gemini-2.5-flash'
 ];
 
@@ -501,6 +500,9 @@ async function startWhatsAppGateway() {
   });
 
   const botSentMessageIds = new Set();
+  const processedIncomingMsgIds = new Set();
+  const recentMessageTexts = new Map();
+  const activeProcessingJids = new Set();
   
   // Memoria multi-presupuesto y facturas por chat conectada a SQLite
   const userSessions = new Map();
@@ -680,7 +682,7 @@ async function startWhatsAppGateway() {
     }
   }
 
-  async function handleAdvanceInvoice(sock, remoteJid, session, targetBudget, clientNif = null) {
+  async function handleAdvanceInvoice(sock, remoteJid, session, targetBudget, clientNif = null, explicitPaymentInfo = null, sendSigningLink = false) {
     if (!targetBudget) {
       const sentErr = await sock.sendMessage(remoteJid, {
         text: '⚠️ *No se encontró el presupuesto para emitir la factura de anticipo.*\n\nPor favor, indica el nombre del cliente o número de obra (ej: *"factura de anticipo de Juan"*).'
@@ -692,14 +694,29 @@ async function startWhatsAppGateway() {
     try {
       const fin = targetBudget.financials || {};
       const paidSoFar = targetBudget.paymentSummary?.totalPaid || 0;
-      const advanceAmount = paidSoFar > 0 ? paidSoFar : (fin.advanceAmount || (fin.totalAmount ? Number((fin.totalAmount * 0.3).toFixed(2)) : 300));
+      const customAmount = explicitPaymentInfo?.amount;
+      const advanceAmount = (customAmount && customAmount > 0)
+        ? customAmount
+        : (paidSoFar > 0 ? paidSoFar : (fin.advanceAmount || (fin.totalAmount ? Number((fin.totalAmount * 0.3).toFixed(2)) : 300)));
+      
       const payments = targetBudget.payments || [];
-      const lastMethod = payments.length > 0 ? payments[payments.length - 1].method : 'Transferencia bancaria / Bizum';
-      const lastDate = payments.length > 0 ? payments[payments.length - 1].date : new Date().toLocaleDateString('es-ES');
+      const lastMethod = explicitPaymentInfo?.method || (payments.length > 0 ? payments[payments.length - 1].method : 'Transferencia bancaria / Bizum');
+      const lastDate = explicitPaymentInfo?.date || (payments.length > 0 ? payments[payments.length - 1].date : new Date().toLocaleDateString('es-ES'));
 
       console.log(`🧾 Emitiendo Factura Legal de Anticipo (${advanceAmount} €) para ${targetBudget.id}...`);
 
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+
+      // Registrar también el cobro en el presupuesto si se indicó un importe explícito
+      if (customAmount && customAmount > 0) {
+        engine.registerPayment(targetBudget, {
+          amount: advanceAmount,
+          method: lastMethod,
+          date: lastDate,
+          concept: 'Anticipo para inicio de obra'
+        });
+      }
+
       const advanceInvoice = engine.createAdvanceInvoice(targetBudget, {
         amount: advanceAmount,
         method: lastMethod,
@@ -744,6 +761,15 @@ async function startWhatsAppGateway() {
       if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
 
       console.log(`✅ Factura de anticipo ${advanceInvoice.id} enviada por WhatsApp.`);
+
+      // Si además se solicitó el enlace para firmar
+      if (sendSigningLink) {
+        const signingUrl = generateSigningUrl(targetBudget, session.company, cleanPhone);
+        const sentSig = await sock.sendMessage(remoteJid, {
+          text: `✍️ *Enlace para firma del cliente — Presupuesto ${targetBudget.id}:*\n${signingUrl}\n\n📲 _Puedes reenviárselo a ${targetBudget.client?.name || 'tu cliente'} para que lo firme y acepte las condiciones de la obra._`
+        });
+        if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
+      }
 
       const followUpText = [
         '👉 *Opciones disponibles:*',
@@ -1444,7 +1470,15 @@ async function startWhatsAppGateway() {
         || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
         || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
 
-      await handleAdvanceInvoice(sock, remoteJid, session, target, aiResult.clientNif);
+      await handleAdvanceInvoice(
+        sock,
+        remoteJid,
+        session,
+        target,
+        aiResult.clientNif,
+        aiResult.paymentInfo,
+        Boolean(aiResult.sendSigningLink || /firm|enlace/i.test(taskData.rawUserText || ''))
+      );
       return;
     }
 
@@ -1465,6 +1499,20 @@ async function startWhatsAppGateway() {
         || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
         || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
         || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
+
+      // Si además de cobro pidió factura (ej: "hazme una factura ya que me ha hecho transferencia...")
+      if (/factura/i.test(taskData.rawUserText || '')) {
+        await handleAdvanceInvoice(
+          sock,
+          remoteJid,
+          session,
+          target,
+          aiResult.clientNif,
+          aiResult.paymentInfo,
+          Boolean(aiResult.sendSigningLink || /firm|enlace/i.test(taskData.rawUserText || ''))
+        );
+        return;
+      }
 
       await handlePaymentRegistration(sock, remoteJid, session, target, aiResult.paymentInfo || {});
       return;
@@ -1682,15 +1730,25 @@ async function startWhatsAppGateway() {
       const now = Date.now();
       for (let i = 0; i < aiStandbyQueue.length; i++) {
         const item = aiStandbyQueue[i];
-        if (now < item.nextRetryAt) continue;
+        if (now < item.nextRetryAt || item.processing) continue;
+
+        // Evitar procesar si ya hay una petición activa para este JID
+        if (activeProcessingJids.has(item.remoteJid)) {
+          continue;
+        }
+
+        // Extraer de la cola antes de ejecutar para evitar reintentos concurrentes
+        aiStandbyQueue.splice(i, 1);
+        i--;
+        item.processing = true;
 
         console.log(`⏳ Reintentando tarea en stand-by para ${item.remoteJid} (intento ${item.attempts + 1})...`);
         try {
+          activeProcessingJids.add(item.remoteJid);
           await handleAiProcessing(sock, item.remoteJid, item.session, item.taskData, true);
-          aiStandbyQueue.splice(i, 1);
-          i--;
           console.log(`✅ Tarea en cola completada con éxito para ${item.remoteJid}.`);
         } catch (queueErr) {
+          item.processing = false;
           item.attempts += 1;
           const isOverload = /429|503|quota|exhausted|overload|demand|busy|unavailable|high demand|saturad/i.test(queueErr.message || '');
           if (item.attempts >= 12 || !isOverload) {
@@ -1700,13 +1758,14 @@ async function startWhatsAppGateway() {
                 text: `⚠️ *No se pudo procesar tu mensaje tras varios intentos en cola*\n\nLos servidores de IA continúan saturados (${queueErr.message.substring(0, 80)}...). Por favor, reenvía tu solicitud en unos minutos.`
               });
             } catch(e) {}
-            aiStandbyQueue.splice(i, 1);
-            i--;
           } else {
             const delay = Math.min(60000, 5000 * Math.pow(1.35, item.attempts));
             item.nextRetryAt = Date.now() + delay;
             console.log(`⏳ Próximo reintento para ${item.remoteJid} en ${Math.round(delay / 1000)}s.`);
+            aiStandbyQueue.push(item);
           }
+        } finally {
+          activeProcessingJids.delete(item.remoteJid);
         }
       }
     } finally {
@@ -1723,11 +1782,18 @@ async function startWhatsAppGateway() {
 
       if (msg.key?.id) {
         storeMessage(msg.key.id, msg.message);
-      }
-
-      // Evitar procesar mensajes que el propio bot acaba de enviar
-      if (msg.key?.id && botSentMessageIds.has(msg.key.id)) {
-        continue;
+        if (botSentMessageIds.has(msg.key.id)) {
+          continue;
+        }
+        if (processedIncomingMsgIds.has(msg.key.id)) {
+          console.log(`   ⏭️ Ignorado mensaje duplicado por ID [id: ${msg.key.id}]`);
+          continue;
+        }
+        processedIncomingMsgIds.add(msg.key.id);
+        if (processedIncomingMsgIds.size > 5000) {
+          const oldest = processedIncomingMsgIds.values().next().value;
+          processedIncomingMsgIds.delete(oldest);
+        }
       }
 
       const remoteJid = msg.key.remoteJid;
@@ -2089,6 +2155,31 @@ async function startWhatsAppGateway() {
         }
       }
 
+      // Debounce anti-duplicados por contenido idéntico en <5s (evita dobles envíos por sincronización Baileys/WhatsApp)
+      const contentKey = isAudio 
+        ? `audio_${audioBuffer?.length || ''}`
+        : `text_${rawUserText.trim().toLowerCase()}`;
+      
+      if (contentKey && contentKey !== 'text_') {
+        const lastMsg = recentMessageTexts.get(remoteJid);
+        const nowMs = Date.now();
+        if (lastMsg && lastMsg.key === contentKey && (nowMs - lastMsg.time) < 5000) {
+          console.log(`   ⏭️ Mensaje con contenido idéntico en <5s para ${remoteJid} ignorado (debounce anti-duplicados).`);
+          continue;
+        }
+        recentMessageTexts.set(remoteJid, { key: contentKey, time: nowMs });
+        if (recentMessageTexts.size > 2000) {
+          const oldestKey = recentMessageTexts.keys().next().value;
+          recentMessageTexts.delete(oldestKey);
+        }
+      }
+
+      // Evitar procesamientos paralelos concurrentes para el mismo chat (bloqueo por JID)
+      if (activeProcessingJids.has(remoteJid)) {
+        console.log(`   ⏳ Ya hay un procesamiento de IA en curso para ${remoteJid}. Omitiendo evento concurrente.`);
+        continue;
+      }
+
       const taskData = {
         isAudio,
         audioBuffer,
@@ -2098,17 +2189,28 @@ async function startWhatsAppGateway() {
       };
 
       try {
+        activeProcessingJids.add(remoteJid);
         await handleAiProcessing(sock, remoteJid, session, taskData, false);
       } catch (err) {
         console.error('❌ Error procesando mensaje de WhatsApp:', err.message);
         const isOverload = /429|503|quota|exhausted|overload|demand|busy|unavailable|high demand|saturad/i.test(err.message || '');
         if (isOverload) {
+          const alreadyQueued = aiStandbyQueue.some(item =>
+            item.remoteJid === remoteJid &&
+            ((taskData.rawUserText && item.taskData.rawUserText === taskData.rawUserText) ||
+             (taskData.isAudio && item.taskData.isAudio && item.taskData.audioBuffer?.length === taskData.audioBuffer?.length))
+          );
+          if (alreadyQueued) {
+            console.log(`⏳ Petición idéntica ya en cola stand-by para ${remoteJid}. No se duplica.`);
+            return;
+          }
           aiStandbyQueue.push({
             id: Date.now(),
             remoteJid,
             session,
             taskData,
             attempts: 0,
+            processing: false,
             nextRetryAt: Date.now() + 5000
           });
           console.log(`⏳ Petición guardada en cola stand-by para ${remoteJid} por alta demanda de Gemini.`);
@@ -2123,6 +2225,7 @@ async function startWhatsAppGateway() {
           if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
         }
       } finally {
+        activeProcessingJids.delete(remoteJid);
         await sock.sendPresenceUpdate('paused', remoteJid);
       }
     }

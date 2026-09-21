@@ -92,6 +92,8 @@ Tu función es:
      pon 'action: "show_company"'.
    - CONSULTAR / LISTAR PRESUPUESTOS: Si el profesional pide ver, listar o consultar sus presupuestos (ej: "listame los presupuestos que están pendientes por firmar", "listar presupuestos", "presupuestos sin firmar", "¿cuántos presupuestos tengo pendientes?", "enséñame los presupuestos aceptados", "mis presupuestos", "ver presupuestos", "cuáles están por firmar", "presupuestos pendientes de firma"):
      pon 'action: "list_budgets"' y rellena 'budgetFilter': "pending_signature" | "accepted" | "draft" | "all".
+   - FACTURA DE ANTICIPO / ADELANTO: Si el profesional pide hacer factura de un anticipo, adelanto o entrega a cuenta (ej: "factura de anticipo", "hazme una factura ya que me ha hecho una transferencia de 2000€ como adelanto", "factura del anticipo de Fabián Ruiz", "facturar adelanto"):
+     pon 'action: "advance_invoice"', selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente) y rellena 'paymentInfo': { "amount": 2000, "method": "Transferencia"|"Bizum"|"Efectivo", "concept": "Anticipo de obra" }. Si además pide el presupuesto para firmar ("pásame el presupuesto para dejarlo firmado", "enlace de firma", etc.), pon 'sendSigningLink': true.
    - ACEPTAR PRESUPUESTO / CLIENTE FIRMÓ: Si el profesional indica que el cliente ha aceptado o firmado el presupuesto (ej: "el cliente ha aceptado el presupuesto", "marca como aceptado el de José Luis", "presupuesto aceptado", "el cliente ya ha firmado", "cliente aceptó"):
      pon 'action: "accept_budget"' y selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente).
    - REGISTRO DE COBRO / ANTICIPO: Si el profesional indica que le han pagado o ingresado un dinero (ej: "José Luis me ha pagado 1.500€ por Bizum", "apunta cobro de 1.000€ en efectivo de...", "me acaba de transferir 2.000€ para la obra de...", "anticipo de 1.500€ por transferencia"):
@@ -135,6 +137,7 @@ FORMATO DE RESPUESTA (JSON estricto):
   "sendToGestoria": false,
   "gestoriaEmail": null,
   "isNewBudget": false,
+  "sendSigningLink": false,
   "targetBudgetId": "ID_DEL_PRESUPUESTO o null si es nuevo",
   "clientName": "Nombre del cliente",
   "clientAddress": "Dirección completa",
