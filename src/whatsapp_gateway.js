@@ -866,8 +866,8 @@ async function startWhatsAppGateway() {
       console.log(`💰 Registrando cobro de ${amount} € para el presupuesto ${targetBudget.id}...`);
       const { receipt } = engine.registerPayment(targetBudget, paymentInfo);
 
-      // Persistir cobro y asegurar que el presupuesto pasa a estado ACEPTADO
-      targetBudget.status = 'ACEPTADO';
+      // Persistir cobro y asegurar que el presupuesto pasa a estado FINALIZADO (si saldo es 0) o ACEPTADO
+      targetBudget.status = receipt.remainingBalance <= 0 ? 'FINALIZADO' : 'ACEPTADO';
       savePayment(cleanPhone, receipt);
       saveBudget(cleanPhone, targetBudget);
 
@@ -1336,11 +1336,12 @@ async function startWhatsAppGateway() {
     let totalSum = 0;
 
     budgets.forEach((b, idx) => {
+      const isFinalized = b.status === 'FINALIZADO' || b.paymentSummary?.status === 'LIQUIDADO';
       const isAccepted = b.status === 'ACEPTADO' || b.status === 'FIRMADO';
       const isDraft = b.isDraft || b.status === 'BORRADOR_MEDICION';
-      const statusLabel = isAccepted
-        ? '🟢 *Aceptado*'
-        : (isDraft ? '📝 *Borrador*' : '⏳ *Pendiente de firma*');
+      const statusLabel = isFinalized
+        ? '🏁 *Finalizado*'
+        : (isAccepted ? '🟢 *Aceptado*' : (isDraft ? '📝 *Borrador*' : '⏳ *Pendiente de firma*'));
 
       const clientName = b.client?.name || 'Cliente Particular';
       const address = b.client?.address || 'Ubicación según visita';
@@ -1350,8 +1351,8 @@ async function startWhatsAppGateway() {
 
       const paid = b.paymentSummary?.totalPaid || 0;
       const remaining = b.paymentSummary?.remainingBalance !== undefined ? b.paymentSummary.remainingBalance : totalAmount;
-      const payBadge = b.paymentSummary?.status === 'LIQUIDADO'
-        ? ' | 🟢 *Cobrado*'
+      const payBadge = isFinalized
+        ? ' | 🟢 *Cobrado 100%*'
         : (paid > 0 ? ` | ⏳ *Pdte. cobro:* ${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '');
 
       text += `\n${idx + 1}️⃣ *Presupuesto ${b.id}*\n`;
@@ -1373,7 +1374,7 @@ async function startWhatsAppGateway() {
     }
 
     text += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-    const filterLabel = filter === 'pending_signature' ? 'pendientes de firma' : (filter === 'accepted' ? 'aceptados' : 'registrados');
+    const filterLabel = filter === 'pending_signature' ? 'pendientes de firma' : (filter === 'accepted' ? 'aceptados/finalizados' : 'registrados');
     text += `📊 *Total:* ${budgets.length} presupuesto${budgets.length === 1 ? '' : 's'} ${filterLabel} por valor de *${totalSum.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €*.\n`;
     text += '━━━━━━━━━━━━━━━━━━━━━━━━━\n';
     text += '💡 _Para reenviar el enlace de firma di: "Enlace [Nombre o ID]"_\n';
@@ -1398,11 +1399,13 @@ async function startWhatsAppGateway() {
 
       if (filter === 'pending_signature') {
         filtered = allBudgets.filter(b => {
-          const isAccepted = b.status === 'ACEPTADO' || b.status === 'FIRMADO';
-          return !isAccepted && !b.isDraft;
+          const isDone = b.status === 'ACEPTADO' || b.status === 'FIRMADO' || b.status === 'FINALIZADO';
+          return !isDone && !b.isDraft;
         });
       } else if (filter === 'accepted') {
-        filtered = allBudgets.filter(b => b.status === 'ACEPTADO' || b.status === 'FIRMADO');
+        filtered = allBudgets.filter(b => b.status === 'ACEPTADO' || b.status === 'FIRMADO' || b.status === 'FINALIZADO');
+      } else if (filter === 'finalized') {
+        filtered = allBudgets.filter(b => b.status === 'FINALIZADO' || b.paymentSummary?.status === 'LIQUIDADO');
       } else if (filter === 'draft') {
         filtered = allBudgets.filter(b => b.isDraft || b.status === 'BORRADOR_MEDICION');
       }

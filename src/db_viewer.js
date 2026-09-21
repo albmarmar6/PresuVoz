@@ -143,7 +143,10 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     function renderBadge(status) {
       if (!status) return '<span class="px-2 py-0.5 rounded text-xs bg-slate-800 text-slate-400 font-mono">-</span>';
       const s = String(status).toUpperCase();
-      if (s === 'ACEPTADO' || s === 'PAGADA' || s === 'LIQUIDADO' || s === 'CONFIRMADA') {
+      if (s === 'FINALIZADO') {
+        return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">🏁 FINALIZADO</span>';
+      }
+      if (s === 'ACEPTADO' || s === 'PAGADA' || s === 'LIQUIDADO' || s === 'CONFIRMADA' || s === 'FIRMADO') {
         return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">🟢 ' + status + '</span>';
       }
       if (s.includes('PENDIENTE')) {

@@ -580,6 +580,10 @@ export class PresuVozEngine {
       status: newStatus
     };
 
+    if (newRemaining <= 0) {
+      budget.status = 'FINALIZADO';
+    }
+
     return { receipt, budget };
   }
 
