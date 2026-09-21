@@ -577,9 +577,11 @@ async function startWhatsAppGateway() {
 
   function formatCompanyForWhatsApp(company) {
     const hasLogo = Boolean(company.logoPath && fs.existsSync(company.logoPath));
+    const isConf = company.isConfigured !== false;
     return [
       '🏢 *PERFIL DE TU EMPRESA / NEGOCIO:*',
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `🛠️ *Oficio / Especialidad:* *${company.trade || 'Reformas y Construcción'}*`,
       `📛 *Nombre / Razón Social:* ${company.name}`,
       `🆔 *CIF / NIF:* ${company.cif}`,
       `📍 *Dirección Fiscal:* ${company.address}`,
@@ -589,8 +591,9 @@ async function startWhatsAppGateway() {
       `📱 *Bizum profesional:* ${company.bizum}`,
       `📧 *Email de tu Gestoría:* ${company.gestoriaEmail ? `*${company.gestoriaEmail}*` : '❌ _No configurado_'}`,
       `🖼️ *Logotipo:* ${hasLogo ? '✅ Configurado (se incluye en tus PDFs)' : '❌ Sin logotipo (envía una foto con el texto "logo")'}`,
+      `📌 *Estado de perfil:* ${isConf ? '🟢 Personalizado' : '🟡 Datos demo (pendiente de configurar)'}`,
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      '💡 _Para modificar datos di: "Configurar empresa Nombre..., CIF..., IBAN..."_\n💡 _Para guardar email de tu gestor di: "Mi gestoría es info@asesoria.com"_\n💡 _Para exportar el trimestre di: "Gestoría" o "Exportar 3T"_\n💡 _Para poner tu logo, envía una foto con el texto "logo"._'
+      '💡 _Para cambiar de oficio di: "Soy electricista", "Soy fontanero", "Soy albañil", etc._\n💡 _Para modificar datos di: "Configurar empresa Nombre..., CIF..., IBAN..."_\n💡 _Para guardar email de tu gestor di: "Mi gestoría es info@asesoria.com"_\n💡 _Para poner tu logo, envía una foto con el texto "logo"._'
     ].join('\n');
   }
 
@@ -1484,6 +1487,7 @@ async function startWhatsAppGateway() {
     const companyContext = {
       name: session.company?.name,
       cif: session.company?.cif,
+      trade: session.company?.trade || 'Reformas y Construcción',
       address: session.company?.address,
       phone: session.company?.phone,
       email: session.company?.email,
@@ -1624,6 +1628,7 @@ async function startWhatsAppGateway() {
       const confText = [
         '✅ *¡Datos de tu empresa actualizados con éxito!*',
         '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `🛠️ *Oficio / Especialidad:* ${updated.trade}`,
         `📛 *Empresa:* ${updated.name}`,
         `🆔 *CIF:* ${updated.cif}`,
         `📍 *Dirección:* ${updated.address}`,
@@ -1632,7 +1637,7 @@ async function startWhatsAppGateway() {
         `📞 *Teléfono:* ${updated.phone}`,
         `✉️ *Email:* ${updated.email}`,
         '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        '📄 _Tus nuevos presupuestos, facturas y recibos oficiales se emitirán con estos datos fiscales._'
+        '📄 _Tus nuevos presupuestos, facturas y recibos oficiales se emitirán con estos datos fiscales y terminología especializada._'
       ].join('\n');
 
       const sentConf = await sock.sendMessage(remoteJid, { text: confText });
@@ -1781,13 +1786,21 @@ async function startWhatsAppGateway() {
       console.error('⚠️ No se pudo generar o enviar el PDF:', pdfErr.message);
     }
 
-    const optionsText = [
+    const optionsLines = [
       '👉 *Opciones disponibles:*',
       '• Si quieres ver todos tus presupuestos, facturas y saldos responde *1*.',
       '• Para *registrar un cobro/anticipo* di: *"José Luis me ha pagado 1.500€ por Bizum"*.',
       '• Para *emitir la factura oficial* di: *"facturar"*.',
       '• Si quieres uno nuevo manda un audio o texto comentando *presupuesto nuevo*.'
-    ].join('\n');
+    ];
+
+    if (session.company?.isConfigured === false && !session.onboardingPrompted) {
+      session.onboardingPrompted = true;
+      optionsLines.push('');
+      optionsLines.push('💡 *Consejo:* Para que tus próximos presupuestos y facturas salgan con tu nombre legal y oficio en lugar de datos demo, di por ejemplo: *"Soy electricista"* o *"Configurar empresa..."*.');
+    }
+
+    const optionsText = optionsLines.join('\n');
 
     const sentOptions = await sock.sendMessage(remoteJid, { text: optionsText });
     if (sentOptions?.key?.id) botSentMessageIds.add(sentOptions.key.id);
@@ -1977,6 +1990,72 @@ async function startWhatsAppGateway() {
         }
       }
 
+      // 1. Detección de saludo inicial / Onboarding para profesionales no configurados
+      const isGreeting = /^(?:hola|buenas|buenos\s+d[ií]as|buenas\s+tardes|buenas\s+noches|hey|qu[eé]\s+tal|empezar|inicio|ayuda)$/i.test(rawUserText);
+      if (isGreeting && session.company && session.company.isConfigured === false && !session.onboardingPrompted) {
+        session.onboardingPrompted = true;
+        const welcomeLines = [
+          '👋 *¡Hola! Te damos la bienvenida a PresuVoz* 🚀',
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          'Tu asistente inteligente por WhatsApp para crear presupuestos de obra, facturas oficiales y enlaces de firma digital al instante.',
+          '',
+          '🛠️ *Para que tus documentos lleven tu nombre real, tu oficio y validez legal:*',
+          '1️⃣ *Dime tu oficio o gremio* (ej: _"Soy electricista"_, _"Soy albañil"_, _"Fontanero"_, _"Carpintero"_...)',
+          '2️⃣ *Tus datos fiscales* (ej: _"Configurar empresa Reformas Pérez, CIF B12345678, Sevilla"_)',
+          '3️⃣ *Tu Bizum o IBAN* para que tus clientes te paguen',
+          '',
+          '💡 _(O si tienes prisa, mándame directamente una nota de voz o texto contándome una obra y te creo el primer presupuesto al vuelo)._'
+        ];
+        const sentWelcome = await sock.sendMessage(remoteJid, { text: welcomeLines.join('\n') });
+        if (sentWelcome?.key?.id) botSentMessageIds.add(sentWelcome.key.id);
+        continue;
+      }
+
+      // 2. Comando directo para configurar oficio o especialidad
+      const tradeDirectMatch = rawUserText.match(/^(?:soy|mi oficio es|mi gremio es|somos|oficio|gremio|cambiar oficio a|cambiar gremio a)\s+([a-záéíóúñ\s/]+)$/i);
+      if (tradeDirectMatch) {
+        const rawTrade = tradeDirectMatch[1].trim().toLowerCase();
+        let normalizedTrade = 'Reformas y Construcción';
+        let defaultTax = 10;
+
+        if (/electri/i.test(rawTrade)) {
+          normalizedTrade = 'Electricidad y Telecomunicaciones';
+          defaultTax = 21;
+        } else if (/fontan|plomer/i.test(rawTrade)) {
+          normalizedTrade = 'Fontanería y Saneamiento';
+          defaultTax = 21;
+        } else if (/albañil|obra|construc|reforma/i.test(rawTrade)) {
+          normalizedTrade = 'Albañilería y Reformas';
+          defaultTax = 10;
+        } else if (/carpinter/i.test(rawTrade)) {
+          normalizedTrade = 'Carpintería y Madera';
+          defaultTax = 21;
+        } else if (/clima|aire|calefac/i.test(rawTrade)) {
+          normalizedTrade = 'Climatización y Calefacción';
+          defaultTax = 21;
+        } else if (/pint/i.test(rawTrade)) {
+          normalizedTrade = 'Pintura y Revestimientos';
+          defaultTax = 21;
+        } else if (/cerraj/i.test(rawTrade)) {
+          normalizedTrade = 'Cerrajería y C. Metálica';
+          defaultTax = 21;
+        } else {
+          normalizedTrade = rawTrade.charAt(0).toUpperCase() + rawTrade.slice(1);
+        }
+
+        const updated = saveCompany(senderNumber, { trade: normalizedTrade, defaultTaxRate: defaultTax });
+        session.company = updated;
+
+        const sentTrade = await sock.sendMessage(remoteJid, {
+          text: `🛠️ *¡Oficio configurado con éxito: ${normalizedTrade}!* 🎉\n━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `• A partir de ahora, la IA adaptará las mediciones, capítulos y terminología técnica oficial a tu sector (*${normalizedTrade}*).\n` +
+            `• Tipo de IVA por defecto: *${defaultTax}%* (modificable en cualquier presupuesto).\n\n` +
+            `💡 _Para completar tus datos fiscales (Nombre, CIF, IBAN) di: "Configurar empresa Nombre..., CIF..." o consúltalos con "mi empresa"._`
+        });
+        if (sentTrade?.key?.id) botSentMessageIds.add(sentTrade.key.id);
+        continue;
+      }
+
       // Comando directo para consultar ficha y datos fiscales de la empresa
       if (/^(?:mi empresa|mis datos|datos empresa|perfil|datos fiscales)$/i.test(rawUserText)) {
         const companyText = formatCompanyForWhatsApp(session.company);
@@ -2009,6 +2088,9 @@ async function startWhatsAppGateway() {
         const dirMatch = configText.match(/(?:direcci[oó]n|calle|ubicaci[oó]n)[:\s]+([^,;\n]+)/i);
         if (dirMatch) newCompanyData.address = dirMatch[1].trim();
 
+        const tradeMatch = configText.match(/(?:oficio|gremio|especialidad|profesi[oó]n)[:\s]+([^,;\n]+)/i);
+        if (tradeMatch) newCompanyData.trade = tradeMatch[1].trim();
+
         if (!newCompanyData.name && !cifMatch && !ibanMatch) {
           newCompanyData.name = configText.trim();
         }
@@ -2019,6 +2101,7 @@ async function startWhatsAppGateway() {
         const confText = [
           '✅ *¡Datos de tu empresa actualizados con éxito!*',
           '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          `🛠️ *Oficio / Especialidad:* ${updated.trade}`,
           `📛 *Empresa:* ${updated.name}`,
           `🆔 *CIF:* ${updated.cif}`,
           `📍 *Dirección:* ${updated.address}`,

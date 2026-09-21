@@ -285,10 +285,11 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
         let html = '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">';
         items.forEach(c => {
-          html += '<div class="bg-slate-800/60 border border-slate-700/60 rounded-xl p-5 space-y-3">';
-          html += '<div class="flex items-start justify-between"><h3 class="font-bold text-white text-base">' + (c.name || 'Empresa') + '</h3><span class="font-mono text-xs px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700">CIF: ' + (c.cif || '-') + '</span></div>';
+          const tradeBadge = c.trade ? '<span class="text-xs px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">🛠️ ' + c.trade + '</span>' : '';
+          html += '<div class="flex items-start justify-between"><div><h3 class="font-bold text-white text-base">' + (c.name || 'Empresa') + '</h3><div class="mt-1">' + tradeBadge + '</div></div><span class="font-mono text-xs px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700">CIF: ' + (c.cif || '-') + '</span></div>';
           html += '<div class="text-xs space-y-1 text-slate-300">';
           html += '<div>📱 <b>Teléfono bot:</b> <span class="font-mono">' + c.phone + '</span></div>';
+          html += '<div>🛠️ <b>Especialidad:</b> <span class="text-emerald-400 font-semibold">' + (c.trade || 'Reformas y Construcción') + '</span></div>';
           html += '<div>📍 <b>Dirección:</b> ' + (c.address || '-') + '</div>';
           html += '<div>🏦 <b>IBAN:</b> <span class="font-mono">' + (c.iban || '-') + '</span></div>';
           html += '<div>📲 <b>Bizum:</b> <span class="font-mono">' + (c.bizum || '-') + '</span></div>';

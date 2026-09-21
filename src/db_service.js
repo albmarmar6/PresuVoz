@@ -26,6 +26,7 @@ db.exec(`
     email TEXT,
     iban TEXT,
     bizum TEXT,
+    trade TEXT,
     logo_path TEXT,
     gestoria_email TEXT,
     default_tax_rate INTEGER DEFAULT 10,
@@ -38,6 +39,11 @@ db.exec(`
 // Migración para bases de datos SQLite ya creadas
 try {
   db.exec('ALTER TABLE companies ADD COLUMN gestoria_email TEXT;');
+} catch (e) {
+  // Ignorar si la columna ya existe
+}
+try {
+  db.exec('ALTER TABLE companies ADD COLUMN trade TEXT;');
 } catch (e) {
   // Ignorar si la columna ya existe
 }
@@ -97,6 +103,7 @@ db.exec(`
 export const DEFAULT_COMPANY = {
   name: 'Carpintería y Reformas Manolo S.L.',
   cif: 'B-41987654',
+  trade: 'Reformas y Construcción',
   address: 'Pol. Ind. El Pino, Nave 4 - Sevilla',
   phone: '601 02 23 67',
   email: 'presupuestos@presuvoz.app',
@@ -111,17 +118,18 @@ export const DEFAULT_COMPANY = {
 // ─── Métodos de Empresa ───────────────────────────────────────────────────────
 
 export function getCompany(phone) {
-  if (!phone) return { ...DEFAULT_COMPANY };
+  if (!phone) return { ...DEFAULT_COMPANY, isConfigured: false };
   const cleanPhone = String(phone).replace(/\D/g, '');
   const stmt = db.prepare('SELECT * FROM companies WHERE phone = ?');
   const row = stmt.get(cleanPhone);
   if (!row) {
-    return { ...DEFAULT_COMPANY, phone: cleanPhone };
+    return { ...DEFAULT_COMPANY, phone: cleanPhone, isConfigured: false };
   }
   return {
     phone: row.phone,
     name: row.name || DEFAULT_COMPANY.name,
     cif: row.cif || DEFAULT_COMPANY.cif,
+    trade: row.trade || DEFAULT_COMPANY.trade,
     address: row.address || DEFAULT_COMPANY.address,
     phone: row.phone_contact || cleanPhone || DEFAULT_COMPANY.phone,
     email: row.email || DEFAULT_COMPANY.email,
@@ -131,7 +139,7 @@ export function getCompany(phone) {
     gestoriaEmail: row.gestoria_email || null,
     defaultTaxRate: row.default_tax_rate || 10,
     defaultAdvance: row.default_advance || 30,
-    isConfigured: Boolean(row.name && row.cif)
+    isConfigured: Boolean(row.name && row.cif && row.name !== DEFAULT_COMPANY.name)
   };
 }
 
@@ -142,6 +150,7 @@ export function saveCompany(phone, data = {}) {
 
   const name = data.name || existing.name;
   const cif = data.cif || existing.cif;
+  const trade = data.trade || existing.trade || DEFAULT_COMPANY.trade;
   const address = data.address || existing.address;
   const phoneContact = data.phone || existing.phone || cleanPhone;
   const email = data.email || existing.email;
@@ -153,11 +162,12 @@ export function saveCompany(phone, data = {}) {
   const defaultAdvance = data.defaultAdvance || existing.defaultAdvance || 30;
 
   const stmt = db.prepare(`
-    INSERT INTO companies (phone, name, cif, address, phone_contact, email, iban, bizum, logo_path, gestoria_email, default_tax_rate, default_advance, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO companies (phone, name, cif, trade, address, phone_contact, email, iban, bizum, logo_path, gestoria_email, default_tax_rate, default_advance, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(phone) DO UPDATE SET
       name = excluded.name,
       cif = excluded.cif,
+      trade = excluded.trade,
       address = excluded.address,
       phone_contact = excluded.phone_contact,
       email = excluded.email,
@@ -170,7 +180,7 @@ export function saveCompany(phone, data = {}) {
       updated_at = excluded.updated_at
   `);
 
-  stmt.run(cleanPhone, name, cif, address, phoneContact, email, iban, bizum, logoPath, gestoriaEmail, defaultTaxRate, defaultAdvance, now, now);
+  stmt.run(cleanPhone, name, cif, trade, address, phoneContact, email, iban, bizum, logoPath, gestoriaEmail, defaultTaxRate, defaultAdvance, now, now);
   return getCompany(cleanPhone);
 }
 

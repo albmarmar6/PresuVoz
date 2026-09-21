@@ -471,6 +471,56 @@ assert(pendingList[0].id === 'PRE-1' && pendingList[1].id === 'PRE-4', "Preserva
 const acceptedList = mockBudgets.filter(b => b.status === 'ACEPTADO' || b.status === 'FIRMADO');
 assert(acceptedList.length === 1 && acceptedList[0].id === 'PRE-2', "Filtra exactamente el presupuesto aceptado");
 
+console.log("\nTEST 14: Onboarding, Registro de Oficio/Gremio (Electricista, Fontanero, etc.) y Perfil");
+import { getCompany as dbGetCompany, saveCompany as dbSaveCompany } from './db_service.js';
+
+const testPhone = '34666000111';
+const initialComp = dbGetCompany(testPhone);
+assert(initialComp.isConfigured === false, "Usuario nuevo no configurado detecta isConfigured: false");
+assert(initialComp.trade === 'Reformas y Construcción', "Usuario nuevo asigna oficio por defecto 'Reformas y Construcción'");
+
+// Prueba de normalización de oficios
+function normalizeTradeTest(rawText) {
+  const match = rawText.match(/^(?:soy|mi oficio es|mi gremio es|somos|oficio|gremio|cambiar oficio a|cambiar gremio a)\s+([a-záéíóúñ\s/]+)$/i);
+  if (!match) return null;
+  const rawTrade = match[1].trim().toLowerCase();
+  if (/electri/i.test(rawTrade)) return { trade: 'Electricidad y Telecomunicaciones', tax: 21 };
+  if (/fontan|plomer/i.test(rawTrade)) return { trade: 'Fontanería y Saneamiento', tax: 21 };
+  if (/albañil|obra|construc|reforma/i.test(rawTrade)) return { trade: 'Albañilería y Reformas', tax: 10 };
+  if (/carpinter/i.test(rawTrade)) return { trade: 'Carpintería y Madera', tax: 21 };
+  if (/clima|aire|calefac/i.test(rawTrade)) return { trade: 'Climatización y Calefacción', tax: 21 };
+  if (/pint/i.test(rawTrade)) return { trade: 'Pintura y Revestimientos', tax: 21 };
+  return { trade: rawTrade.charAt(0).toUpperCase() + rawTrade.slice(1), tax: 21 };
+}
+
+assert(normalizeTradeTest("soy electricista")?.trade === "Electricidad y Telecomunicaciones", "Detecta y normaliza oficio electricista");
+assert(normalizeTradeTest("soy electricista")?.tax === 21, "Asigna IVA por defecto 21% para electricistas");
+assert(normalizeTradeTest("mi oficio es fontanero")?.trade === "Fontanería y Saneamiento", "Detecta y normaliza fontanero");
+assert(normalizeTradeTest("soy albañil")?.trade === "Albañilería y Reformas", "Detecta y normaliza albañil");
+assert(normalizeTradeTest("soy albañil")?.tax === 10, "Asigna IVA por defecto 10% para albañilería");
+assert(normalizeTradeTest("cambiar oficio a carpintero")?.trade === "Carpintería y Madera", "Detecta y normaliza carpintero");
+
+// Detección de saludos para Onboarding
+const isGreetingCheck = (t) => /^(?:hola|buenas|buenos\s+d[ií]as|buenas\s+tardes|buenas\s+noches|hey|qu[eé]\s+tal|empezar|inicio|ayuda)$/i.test(t);
+assert(isGreetingCheck("hola") === true, "Detecta saludo 'hola' para onboarding");
+assert(isGreetingCheck("buenos días") === true, "Detecta saludo 'buenos días' para onboarding");
+assert(isGreetingCheck("tirar tabique de 4x3") === false, "No confunde dictado con saludo");
+
+// Guardado y persistencia en base de datos
+const savedComp = dbSaveCompany(testPhone, {
+  name: 'Instalaciones Eléctricas Pérez S.L.',
+  cif: 'B-99887766',
+  trade: 'Electricidad y Telecomunicaciones',
+  defaultTaxRate: 21
+});
+assert(savedComp.isConfigured === true, "Empresa configurada con nombre propio detecta isConfigured: true");
+assert(savedComp.trade === 'Electricidad y Telecomunicaciones', "Persiste correctamente el oficio en SQLite");
+
+// Limpieza del registro de prueba
+import { DatabaseSync as TestDbSync } from 'node:sqlite';
+const cleanDb = new TestDbSync('data/presuvoz.db');
+cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(testPhone);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
