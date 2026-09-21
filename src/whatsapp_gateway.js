@@ -83,7 +83,7 @@ const GEMINI_MODELS = [
   'gemini-3.8-flash',
   'gemini-3.7-flash',
   'gemini-3.6-flash',
-  'gemini-2.5-flash'
+  'gemini-3.5-flash-lite'
 ];
 
 // Almacén en memoria de mensajes de WhatsApp para responder a solicitudes 'retry' (evita 'Esperando mensaje')
@@ -111,7 +111,8 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
       body: JSON.stringify({
         userPrompt: payload,
         systemInstruction: systemInstruction
-      })
+      }),
+      signal: AbortSignal.timeout(15000)
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) {
@@ -157,7 +158,8 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
             temperature: 0.1,
             maxOutputTokens: 2048
           }
-        })
+        }),
+        signal: AbortSignal.timeout(12000)
       });
 
       const data = await response.json().catch(() => ({}));
@@ -181,9 +183,15 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
       cachedWorkingModel = model;
       return JSON.parse(jsonText);
     } catch (e) {
-      console.warn(`PresuVoz ⚠ Error con modelo "${model}":`, e.message);
-      if (!lastError || !/demand|quota|busy|exhausted|429|503/i.test(lastError.message)) {
-        lastError = e;
+      const isTimeout = e.name === 'TimeoutError' || /timeout|aborted/i.test(e.message || '');
+      if (isTimeout) {
+        console.warn(`PresuVoz ⚠ Modelo "${model}" agotó tiempo de espera (12s sin respuesta)`);
+        lastError = new Error('Servidores de Gemini saturados (timeout: modelo no respondió en 12s)');
+      } else {
+        console.warn(`PresuVoz ⚠ Error con modelo "${model}":`, e.message);
+        if (!lastError || !/demand|quota|busy|exhausted|429|503/i.test(lastError.message)) {
+          lastError = e;
+        }
       }
     }
   }
@@ -425,17 +433,30 @@ async function startWhatsAppGateway() {
     }
   });
 
-  // Interceptar todos los envíos para alimentar el almacén de reintentos criptográficos y evitar bucles
+  // Interceptar todos los envíos para alimentar el almacén de reintentos criptográficos y tolerar caídas transitorias de socket
   const _rawSendMessage = sock.sendMessage.bind(sock);
   sock.sendMessage = async (...args) => {
-    const sentMsg = await _rawSendMessage(...args);
-    if (sentMsg?.key?.id) {
-      botSentMessageIds.add(sentMsg.key.id);
-      if (sentMsg.message) {
-        storeMessage(sentMsg.key.id, sentMsg.message);
+    let attempts = 0;
+    while (attempts < 2) {
+      try {
+        const sentMsg = await _rawSendMessage(...args);
+        if (sentMsg?.key?.id) {
+          botSentMessageIds.add(sentMsg.key.id);
+          if (sentMsg.message) {
+            storeMessage(sentMsg.key.id, sentMsg.message);
+          }
+        }
+        return sentMsg;
+      } catch (err) {
+        attempts++;
+        if (attempts < 2 && /connection closed|socket|econnreset|etimedout/i.test(err.message || '')) {
+          console.warn(`⚠️ Error transitorio de socket WhatsApp (${err.message}). Reintentando envío en 1.5s...`);
+          await new Promise(r => setTimeout(r, 1500));
+        } else {
+          throw err;
+        }
       }
     }
-    return sentMsg;
   };
 
   sock.ev.on('creds.update', saveCreds);
@@ -1767,12 +1788,12 @@ async function startWhatsAppGateway() {
         } catch (queueErr) {
           item.processing = false;
           item.attempts += 1;
-          const isOverload = /429|503|quota|exhausted|overload|demand|busy|unavailable|high demand|saturad/i.test(queueErr.message || '');
-          if (item.attempts >= 12 || !isOverload) {
+          const isRetryable = /429|503|quota|exhausted|overload|demand|busy|unavailable|high demand|saturad|connection closed|econnreset|etimedout|socket|abort|timeout/i.test(queueErr.message || '');
+          if (item.attempts >= 12 || !isRetryable) {
             console.warn(`❌ Tarea en stand-by cancelada tras ${item.attempts} intentos:`, queueErr.message);
             try {
               await sock.sendMessage(item.remoteJid, {
-                text: `⚠️ *No se pudo procesar tu mensaje tras varios intentos en cola*\n\nLos servidores de IA continúan saturados (${queueErr.message.substring(0, 80)}...). Por favor, reenvía tu solicitud en unos minutos.`
+                text: `⚠️ *No se pudo procesar tu mensaje tras varios intentos en cola*\n\nHa habido una incidencia temporal (${queueErr.message.substring(0, 80)}...). Por favor, reenvía tu solicitud en unos minutos.`
               });
             } catch(e) {}
           } else {

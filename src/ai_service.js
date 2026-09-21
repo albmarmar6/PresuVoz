@@ -92,16 +92,16 @@ Tu función es:
      pon 'action: "show_company"'.
    - CONSULTAR / LISTAR PRESUPUESTOS: Si el profesional pide ver, listar o consultar sus presupuestos (ej: "listame los presupuestos que están pendientes por firmar", "listar presupuestos", "presupuestos sin firmar", "¿cuántos presupuestos tengo pendientes?", "enséñame los presupuestos aceptados", "mis presupuestos", "ver presupuestos", "cuáles están por firmar", "presupuestos pendientes de firma"):
      pon 'action: "list_budgets"' y rellena 'budgetFilter': "pending_signature" | "accepted" | "draft" | "all".
-   - FACTURA DE ANTICIPO / ADELANTO: Si el profesional pide hacer factura de un anticipo, adelanto o entrega a cuenta (ej: "factura de anticipo", "hazme una factura ya que me ha hecho una transferencia de 2000€ como adelanto", "factura del anticipo de Fabián Ruiz", "facturar adelanto"):
-     pon 'action: "advance_invoice"', selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente) y rellena 'paymentInfo': { "amount": 2000, "method": "Transferencia"|"Bizum"|"Efectivo", "concept": "Anticipo de obra" }. Si además pide el presupuesto para firmar ("pásame el presupuesto para dejarlo firmado", "enlace de firma", etc.), pon 'sendSigningLink': true.
-   - ACEPTAR PRESUPUESTO / CLIENTE FIRMÓ: Si el profesional indica que el cliente ha aceptado o firmado el presupuesto (ej: "el cliente ha aceptado el presupuesto", "marca como aceptado el de José Luis", "presupuesto aceptado", "el cliente ya ha firmado", "cliente aceptó"):
-     pon 'action: "accept_budget"' y selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente).
-   - REGISTRO DE COBRO / ANTICIPO: Si el profesional indica que le han pagado o ingresado un dinero (ej: "José Luis me ha pagado 1.500€ por Bizum", "apunta cobro de 1.000€ en efectivo de...", "me acaba de transferir 2.000€ para la obra de...", "anticipo de 1.500€ por transferencia"):
-     pon 'action: "payment"', selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente) y rellena 'paymentInfo': { "amount": 1500, "method": "Bizum"|"Transferencia"|"Efectivo", "concept": "Anticipo"|"Entrega a cuenta" }.
-   - CONSULTA DE DEUDA / SALDO: Si el profesional pregunta cuánto le deben o el estado de pagos (ej: "¿cuánto me debe José Luis?", "¿cómo va la cuenta de...?", "deuda de..."):
-     pon 'action: "query_balance"' y selecciona el presupuesto en 'targetBudgetId'.
-   - FACTURACIÓN: Si el profesional pide emitir, sacar o generar la factura (ej: "sácame la factura", "factura la obra de José Luis", "emite factura de...", "pasa a factura"):
-     pon 'action: "invoice"' y selecciona el presupuesto correspondiente en 'targetBudgetId'.
+    - FACTURA DE ANTICIPO / ADELANTO: ÚNICA Y EXCLUSIVAMENTE si el profesional pide factura de un anticipo, adelanto o entrega a cuenta explícita (ej: "factura de anticipo", "hazme una factura ya que me ha hecho una transferencia de 2000€ como adelanto", "factura del anticipo de Fabián Ruiz", "facturar adelanto"):
+      pon 'action: "advance_invoice"', selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente) y rellena 'paymentInfo': { "amount": 2000, "method": "Transferencia"|"Bizum"|"Efectivo", "concept": "Anticipo de obra" }. Si además pide el presupuesto para firmar ("pásame el presupuesto para dejarlo firmado", "enlace de firma", etc.), pon 'sendSigningLink': true.
+    - ACEPTAR PRESUPUESTO / CLIENTE FIRMÓ: Si el profesional indica que el cliente ha aceptado o firmado el presupuesto (ej: "el cliente ha aceptado el presupuesto", "marca como aceptado el de José Luis", "presupuesto aceptado", "el cliente ya ha firmado", "cliente aceptó"):
+      pon 'action: "accept_budget"' y selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente).
+    - REGISTRO DE COBRO / ANTICIPO: Si el profesional indica que le han pagado o ingresado un dinero (ej: "José Luis me ha pagado 1.500€ por Bizum", "apunta cobro de 1.000€ en efectivo de...", "me acaba de transferir 2.000€ para la obra de...", "anticipo de 1.500€ por transferencia"):
+      pon 'action: "payment"', selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente) y rellena 'paymentInfo': { "amount": 1500, "method": "Bizum"|"Transferencia"|"Efectivo", "concept": "Anticipo"|"Entrega a cuenta" }.
+    - CONSULTA DE DEUDA / SALDO: Si el profesional pregunta cuánto le deben o el estado de pagos (ej: "¿cuánto me debe José Luis?", "¿cómo va la cuenta de...?", "deuda de..."):
+      pon 'action: "query_balance"' y selecciona el presupuesto en 'targetBudgetId'.
+    - FACTURACIÓN (COMPLETA O FINAL DE LIQUIDACIÓN): Si el profesional pide emitir, sacar o generar la factura del presupuesto o por finalización de obra (ej: "sácame la factura", "emíteme la factura del presupuesto de Alberto", "factura la obra de José Luis", "emite factura de...", "pasa a factura", "factura por finalización"):
+      pon 'action: "invoice"' y selecciona el presupuesto correspondiente en 'targetBudgetId'.
    - Si el profesional menciona un cliente o número concreto para modificar un presupuesto (ej: "en el de José Luis...", "en el 8629..."):
      pon 'action: "budget"' y selecciona ese presupuesto como 'targetBudgetId'.
    - Si no especifica cliente y da órdenes de retoque o precios ("la primera son 500€", "cambia la calle a..."):
@@ -200,7 +200,8 @@ export async function callGeminiAPI(userPrompt, systemInstruction, apiKey) {
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(12000)
   });
 
   if (!response.ok) {
