@@ -521,6 +521,80 @@ import { DatabaseSync as TestDbSync } from 'node:sqlite';
 const cleanDb = new TestDbSync('data/presuvoz.db');
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(testPhone);
 
+console.log("\nTEST 15: Secretario Digital Proactivo y Matriz de Permisos (Niveles A, B y C)");
+import {
+  classifyActionPermission,
+  createProposedAction,
+  evaluateConfirmationResponse,
+  generateDailyBriefing,
+  generateEveningReminder,
+  buildBudgetFollowUpProposal,
+  buildInvoiceFollowUpProposal
+} from './secretary_service.js';
+
+// 1. Clasificación estricta de permisos
+assert(classifyActionPermission('query_info') === 'A', "Clasifica 'query_info' como Nivel A (Automático)");
+assert(classifyActionPermission('list_appointments') === 'A', "Clasifica 'list_appointments' como Nivel A (Automático)");
+assert(classifyActionPermission('create_note') === 'A', "Clasifica 'create_note' como Nivel A (Automático)");
+assert(classifyActionPermission('draft_budget') === 'A', "Clasifica 'draft_budget' como Nivel A (Automático)");
+
+assert(classifyActionPermission('send_client_reminder') === 'B', "Clasifica 'send_client_reminder' como Nivel B (Confirmación simple)");
+assert(classifyActionPermission('send_budget') === 'B', "Clasifica 'send_budget' como Nivel B (Confirmación simple)");
+assert(classifyActionPermission('send_invoice') === 'B', "Clasifica 'send_invoice' como Nivel B (Confirmación simple)");
+assert(classifyActionPermission('schedule_appointment') === 'B', "Clasifica 'schedule_appointment' como Nivel B (Confirmación simple)");
+
+assert(classifyActionPermission('cancel_appointment') === 'C', "Clasifica 'cancel_appointment' como Nivel C (Confirmación fuerte)");
+assert(classifyActionPermission('modify_invoice') === 'C', "Clasifica 'modify_invoice' como Nivel C (Confirmación fuerte)");
+assert(classifyActionPermission('register_payment_manual') === 'C', "Clasifica 'register_payment_manual' como Nivel C (Confirmación fuerte)");
+assert(classifyActionPermission('delete_data') === 'C', "Clasifica 'delete_data' como Nivel C (Confirmación fuerte)");
+
+// 2. Evaluación de confirmaciones Nivel B
+const propB = createProposedAction('B', 'send_client_reminder', { client: 'Juan' });
+assert(evaluateConfirmationResponse(propB, "sí")?.status === 'APPROVED', "Nivel B aprueba con 'sí'");
+assert(evaluateConfirmationResponse(propB, "adelante")?.status === 'APPROVED', "Nivel B aprueba con 'adelante'");
+assert(evaluateConfirmationResponse(propB, "mándaselo")?.status === 'APPROVED', "Nivel B aprueba con 'mándaselo'");
+assert(evaluateConfirmationResponse(propB, "no")?.status === 'REJECTED', "Nivel B rechaza con 'no'");
+assert(evaluateConfirmationResponse(propB, "cancela")?.status === 'REJECTED', "Nivel B rechaza con 'cancela'");
+assert(evaluateConfirmationResponse(propB, "tengo una duda")?.status === 'IGNORED', "Nivel B ignora conversación no relacionada");
+
+// 3. Evaluación de confirmaciones Nivel C (Seguridad fuerte)
+const propC = createProposedAction('C', 'cancel_appointment', { query: 'Juan' });
+assert(evaluateConfirmationResponse(propC, "ok")?.status === 'NEED_STRONG_CONFIRMATION', "Nivel C exige confirmación fuerte ante un simple 'ok'");
+assert(evaluateConfirmationResponse(propC, "sí")?.status === 'NEED_STRONG_CONFIRMATION', "Nivel C exige confirmación fuerte ante un simple 'sí'");
+assert(evaluateConfirmationResponse(propC, "CONFIRMAR")?.status === 'APPROVED', "Nivel C aprueba con 'CONFIRMAR'");
+assert(evaluateConfirmationResponse(propC, "sí, cancelar")?.status === 'APPROVED', "Nivel C aprueba con 'sí, cancelar'");
+assert(evaluateConfirmationResponse(propC, "no")?.status === 'REJECTED', "Nivel C rechaza con 'no'");
+
+// 4. Propuestas de seguimiento y enlaces wa.me
+const budgetFollowUp = {
+  id: 'PRE-100',
+  clientName: 'María García',
+  clientPhone: '612345678',
+  totalAmount: 4500,
+  daysWaiting: 5
+};
+const budgetProposal = buildBudgetFollowUpProposal(budgetFollowUp);
+assert(budgetProposal.promptMessage.includes("María García"), "Propuesta de presupuesto incluye nombre del cliente");
+assert(budgetProposal.promptMessage.includes("4.500"), "Propuesta incluye importe formateado");
+assert(budgetProposal.clientMessage.includes("Hola María"), "Mensaje de cortesía saluda por el nombre de pila");
+assert(budgetProposal.directWaUrl?.includes("https://wa.me/34612345678"), "Genera enlace directo de 1 toque de WhatsApp con número internacional");
+
+const invoiceFollowUp = {
+  id: 'FAC-2026-0001',
+  clientName: 'Pedro López',
+  clientPhone: '699887766',
+  totalAmount: 3400,
+  daysPending: 8
+};
+const invoiceProposal = buildInvoiceFollowUpProposal(invoiceFollowUp, { iban: 'ES11 2222' });
+assert(invoiceProposal.promptMessage.includes("8 días"), "Propuesta de factura incluye días de retraso");
+assert(invoiceProposal.clientMessage.includes("ES11 2222"), "Mensaje de cobro incluye datos bancarios configurados");
+
+// 5. Briefing matinal
+const briefing = generateDailyBriefing('34600112233');
+assert(briefing.includes("Buenos días"), "Briefing incluye saludo matinal");
+assert(briefing.includes("¿Quieres que haga algo por ti?"), "Briefing incluye cierre servicial");
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

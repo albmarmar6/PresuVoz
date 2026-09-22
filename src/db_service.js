@@ -809,3 +809,54 @@ export function cancelAppointment(phone, query) {
   };
 }
 
+// ─── Métodos del Secretario Digital (Briefing y Seguimiento) ──────────────────
+
+export function getUnpaidInvoices(phone) {
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const stmt = db.prepare("SELECT id, budget_id, client_name, total_amount, status, created_at, data_json FROM invoices WHERE company_phone = ? AND status != 'PAGADA' ORDER BY created_at ASC");
+  const rows = stmt.all(cleanPhone);
+  const now = Date.now();
+  return rows.map(r => {
+    let parsed = null;
+    try { parsed = JSON.parse(r.data_json); } catch(e) {}
+    const createdAt = r.created_at ? new Date(r.created_at).getTime() : now;
+    const daysPending = Math.max(0, Math.floor((now - createdAt) / (1000 * 60 * 60 * 24)));
+    return {
+      id: r.id,
+      budgetId: r.budget_id,
+      clientName: r.client_name || parsed?.client?.name || 'Cliente Particular',
+      clientPhone: parsed?.client?.phone || null,
+      totalAmount: r.total_amount || parsed?.financials?.totalAmount || 0,
+      status: r.status,
+      createdAt: r.created_at,
+      daysPending,
+      invoice: parsed
+    };
+  });
+}
+
+export function getBudgetsPendingFollowUp(phone) {
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const stmt = db.prepare("SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets WHERE company_phone = ? AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO') ORDER BY created_at ASC");
+  const rows = stmt.all(cleanPhone);
+  const now = Date.now();
+  return rows.map(r => {
+    let parsed = null;
+    try { parsed = JSON.parse(r.data_json); } catch(e) {}
+    if (parsed?.isDraft) return null; // Ignorar borradores incompletos de medición
+    const createdAt = r.created_at ? new Date(r.created_at).getTime() : now;
+    const daysWaiting = Math.max(0, Math.floor((now - createdAt) / (1000 * 60 * 60 * 24)));
+    return {
+      id: r.id,
+      clientName: r.client_name || parsed?.client?.name || 'Cliente Particular',
+      clientPhone: r.client_phone || parsed?.client?.phone || null,
+      totalAmount: r.total_amount || parsed?.financials?.totalAmount || 0,
+      status: r.status,
+      createdAt: r.created_at,
+      daysWaiting,
+      budget: parsed
+    };
+  }).filter(Boolean);
+}
+
+

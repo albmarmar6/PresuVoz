@@ -45,8 +45,20 @@ import {
   updateAppointmentStatus,
   cancelAppointment,
   updateBudgetStatus,
-  syncPendingSignaturesFromCloud
+  syncPendingSignaturesFromCloud,
+  getUnpaidInvoices,
+  getBudgetsPendingFollowUp
 } from './db_service.js';
+import {
+  PERMISSION_LEVELS,
+  classifyActionPermission,
+  createProposedAction,
+  evaluateConfirmationResponse,
+  generateDailyBriefing,
+  generateEveningReminder,
+  buildBudgetFollowUpProposal,
+  buildInvoiceFollowUpProposal
+} from './secretary_service.js';
 
 dotenv.config();
 
@@ -534,6 +546,50 @@ async function startWhatsAppGateway() {
           await processAiStandbyQueue(sock);
         } catch (e) {}
       }, 4000);
+
+      // Cron del Secretario Digital: Briefing matinal (08:00 AM) y recordatorio de víspera (20:00 PM)
+      setInterval(async () => {
+        try {
+          const now = new Date();
+          const madridDateStr = now.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid' });
+          const madridHourStr = now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Europe/Madrid' });
+          const [hour, minute] = madridHourStr.split(':').map(Number);
+
+          // 1. Briefing matinal a las 08:00 AM
+          if (hour === 8 && minute === 0) {
+            for (const [jid, session] of userSessions.entries()) {
+              if (session.lastBriefingDate !== madridDateStr && !jid.includes('@g.us') && !jid.includes('broadcast')) {
+                session.lastBriefingDate = madridDateStr;
+                const cleanPhone = session.phone || String(jid).replace(/\D/g, '');
+                const briefing = generateDailyBriefing(cleanPhone);
+                try {
+                  const sent = await sock.sendMessage(jid, { text: briefing });
+                  if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+                  console.log(`☀️ Briefing matinal del Secretario enviado a ${jid}`);
+                } catch (err) {}
+              }
+            }
+          }
+
+          // 2. Recordatorio de víspera a las 20:00 PM
+          if (hour === 20 && minute === 0) {
+            for (const [jid, session] of userSessions.entries()) {
+              if (session.lastEveningReminderDate !== madridDateStr && !jid.includes('@g.us') && !jid.includes('broadcast')) {
+                session.lastEveningReminderDate = madridDateStr;
+                const cleanPhone = session.phone || String(jid).replace(/\D/g, '');
+                const eveningReminder = generateEveningReminder(cleanPhone);
+                if (eveningReminder) {
+                  try {
+                    const sent = await sock.sendMessage(jid, { text: eveningReminder });
+                    if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+                    console.log(`📋 Recordatorio de víspera del Secretario enviado a ${jid}`);
+                  } catch (err) {}
+                }
+              }
+            }
+          }
+        } catch (cronErr) {}
+      }, 60000);
     }
   });
 
@@ -553,7 +609,10 @@ async function startWhatsAppGateway() {
         company: getCompany(cleanPhone),
         activeBudgetId: null,
         budgets: new Map(),
-        invoices: new Map()
+        invoices: new Map(),
+        pendingAction: null,
+        lastBriefingDate: null,
+        lastEveningReminderDate: null
       });
       console.log(`📦 Sesión inicializada para ${cleanPhone}`);
     }
@@ -1668,21 +1727,53 @@ async function startWhatsAppGateway() {
       return;
     }
 
-    // 9. Agendar cita
+    // 9. Agendar cita (Nivel B: Confirmación simple)
     if (aiResult?.action === 'schedule_appointment') {
-      await handleScheduleAppointment(sock, remoteJid, session, aiResult.appointmentInfo || {});
+      const appInfo = aiResult.appointmentInfo || {};
+      session.pendingAction = createProposedAction('B', 'schedule_appointment', { appointmentInfo: appInfo });
+
+      const dateParts = (appInfo.date || '').split('-');
+      const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : appInfo.date;
+
+      const lines = [
+        '📅 *PROPUESTA DE VISITA TÉCNICA (Nivel B)*',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `👤 *Cliente:* ${appInfo.clientName || 'Cliente Particular'}`,
+        appInfo.clientPhone ? `📞 *Teléfono:* ${appInfo.clientPhone}` : null,
+        `📍 *Dirección:* ${appInfo.clientAddress || 'Por concretar'}`,
+        `🗓️ *Fecha:* ${formattedDate}`,
+        `⏰ *Hora:* ${appInfo.time || '10:00'} h`,
+        `📝 *Motivo:* ${appInfo.notes || 'Visita técnica y toma de medidas'}`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        '¿Quieres que la guarde en tu agenda? Responde *"Sí"* para confirmar o *"No"* para descartar.'
+      ].filter(Boolean);
+
+      const sentProp = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sentProp?.key?.id) botSentMessageIds.add(sentProp.key.id);
       return;
     }
 
-    // 10. Listar citas
+    // 10. Listar citas (Nivel A: Automático)
     if (aiResult?.action === 'list_appointments') {
       await handleListAppointments(sock, remoteJid, session, aiResult.appointmentFilter || 'upcoming');
       return;
     }
 
-    // 11. Cancelar cita
+    // 11. Cancelar cita (Nivel C: Confirmación fuerte requerida)
     if (aiResult?.action === 'cancel_appointment') {
-      await handleCancelAppointment(sock, remoteJid, session, aiResult.appointmentQuery || aiResult.clientName || '');
+      const query = (aiResult.appointmentQuery || aiResult.clientName || '').trim();
+      session.pendingAction = createProposedAction('C', 'cancel_appointment', { query });
+
+      const lines = [
+        '⚠️ *CONFIRMACIÓN REQUERIDA (Nivel C)*',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `¿Estás seguro de que deseas anular la cita técnica con *${query}*?`,
+        '',
+        '🔒 _Por seguridad de tu agenda, responde exactamente *"CONFIRMAR"* para cancelarla definitivamente o *"No"* para mantenerla._'
+      ];
+
+      const sentWarn = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sentWarn?.key?.id) botSentMessageIds.add(sentWarn.key.id);
       return;
     }
 
@@ -1991,6 +2082,104 @@ async function startWhatsAppGateway() {
           }
           continue;
         }
+      }
+
+      // 0. Interceptor de Permisos y Confirmaciones (Nivel B y C)
+      if (isText && session.pendingAction) {
+        const evalResult = evaluateConfirmationResponse(session.pendingAction, rawUserText);
+
+        if (evalResult.status === 'APPROVED') {
+          const act = session.pendingAction;
+          session.pendingAction = null;
+
+          if (act.type === 'remind_budget' || act.type === 'remind_invoice') {
+            const clientName = act.data.clientName || 'el cliente';
+            const lines = [
+              `✅ *¡Recordatorio preparado con éxito para ${clientName}!*`,
+              '━━━━━━━━━━━━━━━━━━━━━━━━━',
+              '📲 *Mensaje redactado listo para enviar:*',
+              `_"${act.data.clientMessage}"_`
+            ];
+
+            if (act.data.directWaUrl) {
+              lines.push('');
+              lines.push('👉 *Abrir chat de WhatsApp con el mensaje preparado (1 clic):*');
+              lines.push(act.data.directWaUrl);
+            } else {
+              lines.push('');
+              lines.push('💡 _Copia el texto superior y envíaselo por WhatsApp a tu cliente._');
+            }
+
+            const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+            if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+            continue;
+          }
+
+          if (act.type === 'schedule_appointment') {
+            await handleScheduleAppointment(sock, remoteJid, session, act.data.appointmentInfo || {});
+            continue;
+          }
+
+          if (act.type === 'cancel_appointment') {
+            await handleCancelAppointment(sock, remoteJid, session, act.data.query);
+            continue;
+          }
+        } else if (evalResult.status === 'REJECTED') {
+          session.pendingAction = null;
+          const sentRej = await sock.sendMessage(remoteJid, {
+            text: '👍 *Acción descartada.* No se ha enviado ningún mensaje ni se han modificado datos.'
+          });
+          if (sentRej?.key?.id) botSentMessageIds.add(sentRej.key.id);
+          continue;
+        } else if (evalResult.status === 'NEED_STRONG_CONFIRMATION') {
+          const sentReq = await sock.sendMessage(remoteJid, {
+            text: '🔒 *Confirmación de seguridad requerida (Nivel C):*\n\nEsta acción modificará tu agenda o datos financieros. Por favor, responde exactamente *"CONFIRMAR"* para proceder o *"CANCELAR"* para descartar.'
+          });
+          if (sentReq?.key?.id) botSentMessageIds.add(sentReq.key.id);
+          continue;
+        }
+      }
+
+      // Comando directo para invocar al Secretario Digital / Resumen del día
+      if (/^(?:secretario|briefing|resumen(?:\s+(?:del?\s+)?d[ií]a)?|agenda\s+de\s+hoy|mi\s+d[ií]a)$/i.test(rawUserText)) {
+        const briefingText = generateDailyBriefing(senderNumber);
+
+        // Comprobar si hay presupuestos fríos (>= 2 días) o facturas pendientes (>= 7 días) para sugerir acción (Nivel B)
+        const pendingBudgets = getBudgetsPendingFollowUp(senderNumber);
+        const urgentBudget = pendingBudgets.find(b => b.daysWaiting >= 2);
+
+        let extraText = '';
+        if (urgentBudget) {
+          const proposal = buildBudgetFollowUpProposal(urgentBudget);
+          session.pendingAction = createProposedAction('B', 'remind_budget', {
+            clientName: urgentBudget.clientName,
+            clientPhone: urgentBudget.clientPhone,
+            totalAmount: urgentBudget.totalAmount,
+            clientMessage: proposal.clientMessage,
+            directWaUrl: proposal.directWaUrl
+          }, proposal.promptMessage);
+
+          extraText = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n👉 *Sugerencia del Secretario (Nivel B):*\n${proposal.promptMessage}\n\n_(Responde *"Sí"* para preparar el recordatorio o *"No"* para descartar)_`;
+        } else {
+          const unpaidInvoices = getUnpaidInvoices(senderNumber);
+          const urgentInv = unpaidInvoices.find(i => i.daysPending >= 7);
+          if (urgentInv) {
+            const proposal = buildInvoiceFollowUpProposal(urgentInv, session.company);
+            session.pendingAction = createProposedAction('B', 'remind_invoice', {
+              clientName: urgentInv.clientName,
+              clientPhone: urgentInv.clientPhone,
+              totalAmount: urgentInv.totalAmount,
+              clientMessage: proposal.clientMessage,
+              directWaUrl: proposal.directWaUrl
+            }, proposal.promptMessage);
+
+            extraText = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n👉 *Sugerencia del Secretario (Nivel B):*\n${proposal.promptMessage}\n\n_(Responde *"Sí"* para preparar el mensaje de cobro o *"No"* para descartar)_`;
+          }
+        }
+
+        const sentBriefing = await sock.sendMessage(remoteJid, { text: briefingText + extraText });
+        if (sentBriefing?.key?.id) botSentMessageIds.add(sentBriefing.key.id);
+        continue;
       }
 
       // 1. Detección de saludo inicial / Onboarding para profesionales no configurados
