@@ -595,6 +595,65 @@ const briefing = generateDailyBriefing('34600112233');
 assert(briefing.includes("Buenos días"), "Briefing incluye saludo matinal");
 assert(briefing.includes("¿Quieres que haga algo por ti?"), "Briefing incluye cierre servicial");
 
+console.log("\nTEST 16: Lista de Compras y Materiales Pendientes (Voz/Texto, SQLite y Secretario)");
+import {
+  addShoppingItems,
+  listShoppingItems,
+  markShoppingItemBought,
+  clearShoppingList
+} from './db_service.js';
+
+const shoppingPhone = '34699001122';
+cleanDb.prepare('DELETE FROM shopping_items WHERE company_phone = ?').run(shoppingPhone);
+
+// 1. Inserción de materiales dictados
+const rawDictatedItems = [
+  { description: 'azulejo gris', qty: 14, unit: 'm²' },
+  { description: 'cemento cola flexible', qty: 2, unit: 'sacos' },
+  { description: 'Junta antracita', qty: 1, unit: 'ud' }
+];
+const insertedItems = addShoppingItems(shoppingPhone, rawDictatedItems);
+assert(insertedItems.length === 3, "Inserta los 3 materiales en la lista de compras");
+assert(insertedItems[0].qty === 14 && insertedItems[0].unit === 'm²', "Registra correctamente 14 m² de azulejo");
+assert(insertedItems[1].qty === 2 && insertedItems[1].unit === 'sacos', "Registra correctamente 2 sacos de cemento cola");
+assert(insertedItems[2].description === 'Junta antracita', "Registra descripción exacta del tercer material");
+
+// 2. Consulta de lista de compras en base de datos
+const pendingShoppingList = listShoppingItems(shoppingPhone, 'pending');
+assert(pendingShoppingList.length === 3, "Consulta los 3 materiales pendientes en SQLite");
+assert(pendingShoppingList[0].status === 'PENDING', "El estado inicial es 'PENDING'");
+
+// 3. Marcar material como comprado (tachar)
+const boughtResult = markShoppingItemBought(shoppingPhone, 'cemento cola');
+assert(boughtResult.length === 1, "Encuentra y tacha el material por coincidencia de texto");
+assert(boughtResult[0].status === 'BOUGHT', "El estado pasa a 'BOUGHT'");
+assert(Boolean(boughtResult[0].boughtAt), "Registra timestamp de compra");
+
+const remainingPending = listShoppingItems(shoppingPhone, 'pending');
+assert(remainingPending.length === 2, "Quedan 2 materiales pendientes tras tachar el cemento cola");
+
+// 4. Integración con el Briefing Matinal del Secretario Digital
+const morningBriefing = generateDailyBriefing(shoppingPhone);
+assert(morningBriefing.includes("Materiales pendientes de compra (2):"), "El briefing incluye el bloque de materiales pendientes con su contador");
+assert(morningBriefing.includes("azulejo gris"), "El briefing muestra el azulejo pendiente");
+assert(morningBriefing.includes("Junta antracita"), "El briefing muestra la junta pendiente");
+assert(!morningBriefing.includes("cemento cola"), "El briefing NO muestra materiales ya comprados en los pendientes");
+
+// 5. Matriz de permisos para gestión de materiales
+assert(classifyActionPermission('add_shopping_items') === 'A', "Clasifica 'add_shopping_items' como Nivel A (Automático)");
+assert(classifyActionPermission('list_shopping_items') === 'A', "Clasifica 'list_shopping_items' como Nivel A (Automático)");
+assert(classifyActionPermission('mark_shopping_items') === 'A', "Clasifica 'mark_shopping_items' como Nivel A (Automático)");
+assert(classifyActionPermission('clear_shopping_list') === 'B', "Clasifica 'clear_shopping_list' como Nivel B (Confirmación simple)");
+
+// 6. Vaciado / Limpieza de la lista de compras
+const clearResult = clearShoppingList(shoppingPhone);
+assert(clearResult.deletedCount >= 3, "Elimina todos los materiales al vaciar la lista");
+const emptyList = listShoppingItems(shoppingPhone, 'all');
+assert(emptyList.length === 0, "La lista queda completamente vacía tras limpiarla");
+
+// Limpieza final
+cleanDb.prepare('DELETE FROM shopping_items WHERE company_phone = ?').run(shoppingPhone);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

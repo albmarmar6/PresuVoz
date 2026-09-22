@@ -98,6 +98,18 @@ db.exec(`
     created_at TEXT,
     updated_at TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS shopping_items (
+    id TEXT PRIMARY KEY,
+    company_phone TEXT,
+    description TEXT,
+    qty REAL,
+    unit TEXT,
+    status TEXT DEFAULT 'PENDING',
+    notes TEXT,
+    created_at TEXT,
+    bought_at TEXT
+  );
 `);
 
 export const DEFAULT_COMPANY = {
@@ -858,5 +870,123 @@ export function getBudgetsPendingFollowUp(phone) {
     };
   }).filter(Boolean);
 }
+
+// ─── Métodos de Lista de Compras y Materiales ────────────────────────────────
+
+export function addShoppingItems(phone, items) {
+  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  if (!items) return [];
+  const itemsList = Array.isArray(items) ? items : [items];
+  const now = new Date().toISOString();
+  const inserted = [];
+
+  const stmt = db.prepare(`
+    INSERT INTO shopping_items (id, company_phone, description, qty, unit, status, notes, created_at)
+    VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)
+  `);
+
+  for (const item of itemsList) {
+    if (!item) continue;
+    let description = '';
+    let qty = 1;
+    let unit = 'ud';
+    let notes = null;
+
+    if (typeof item === 'string') {
+      description = item.trim();
+    } else {
+      description = (item.description || item.itemText || item.name || '').trim();
+      qty = item.qty !== undefined && item.qty !== null ? Number(item.qty) : 1;
+      unit = item.unit || 'ud';
+      notes = item.notes || null;
+    }
+
+    if (!description) continue;
+
+    const id = `MAT-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    stmt.run(id, cleanPhone, description, qty, unit, notes, now);
+    inserted.push({
+      id,
+      companyPhone: cleanPhone,
+      description,
+      qty,
+      unit,
+      status: 'PENDING',
+      notes,
+      createdAt: now
+    });
+  }
+
+  return inserted;
+}
+
+export function listShoppingItems(phone, filter = 'pending') {
+  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  let query = 'SELECT * FROM shopping_items WHERE company_phone = ?';
+  if (filter === 'pending') {
+    query += " AND status = 'PENDING'";
+  } else if (filter === 'bought') {
+    query += " AND status = 'BOUGHT'";
+  }
+  query += " ORDER BY status ASC, created_at DESC";
+
+  const rows = db.prepare(query).all(cleanPhone);
+  return rows.map(r => ({
+    id: r.id,
+    companyPhone: r.company_phone,
+    description: r.description,
+    qty: r.qty,
+    unit: r.unit,
+    status: r.status,
+    notes: r.notes,
+    createdAt: r.created_at,
+    boughtAt: r.bought_at
+  }));
+}
+
+export function markShoppingItemBought(phone, queryOrId) {
+  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  if (!queryOrId) return [];
+  const cleanQuery = String(queryOrId).trim().toLowerCase();
+  const now = new Date().toISOString();
+
+  // Buscar coincidencia por ID exacto o por texto en descripción
+  const selectStmt = db.prepare(`
+    SELECT * FROM shopping_items
+    WHERE company_phone = ? AND status = 'PENDING'
+      AND (id = ? OR LOWER(description) LIKE ?)
+  `);
+  const rows = selectStmt.all(cleanPhone, queryOrId, `%${cleanQuery}%`);
+  if (rows.length === 0) return [];
+
+  const updateStmt = db.prepare(`
+    UPDATE shopping_items
+    SET status = 'BOUGHT', bought_at = ?
+    WHERE id = ?
+  `);
+
+  const updated = [];
+  for (const r of rows) {
+    updateStmt.run(now, r.id);
+    updated.push({
+      id: r.id,
+      companyPhone: r.company_phone,
+      description: r.description,
+      qty: r.qty,
+      unit: r.unit,
+      status: 'BOUGHT',
+      boughtAt: now
+    });
+  }
+  return updated;
+}
+
+export function clearShoppingList(phone) {
+  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  const stmt = db.prepare("DELETE FROM shopping_items WHERE company_phone = ?");
+  const result = stmt.run(cleanPhone);
+  return { deletedCount: result.changes || 0 };
+}
+
 
 

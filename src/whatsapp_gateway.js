@@ -47,7 +47,11 @@ import {
   updateBudgetStatus,
   syncPendingSignaturesFromCloud,
   getUnpaidInvoices,
-  getBudgetsPendingFollowUp
+  getBudgetsPendingFollowUp,
+  addShoppingItems,
+  listShoppingItems,
+  markShoppingItemBought,
+  clearShoppingList
 } from './db_service.js';
 import {
   PERMISSION_LEVELS,
@@ -1368,6 +1372,127 @@ async function startWhatsAppGateway() {
     }
   }
 
+  function formatShoppingListForWhatsApp(items) {
+    if (!items || items.length === 0) {
+      return '🛒 *Tu lista de la compra está vacía.*\n\nNo tienes materiales pendientes por comprar.\n\n💡 Para añadir materiales, di: _"comprar 2 sacos de cemento cola y 14 m² de azulejo"_ o mándame una nota de voz.';
+    }
+    const pending = items.filter(i => i.status === 'PENDING');
+    const bought = items.filter(i => i.status === 'BOUGHT');
+
+    const lines = [
+      '🛒 *LISTA DE COMPRAS Y MATERIALES*',
+      '━━━━━━━━━━━━━━━━━━━━━━━━━'
+    ];
+
+    if (pending.length > 0) {
+      lines.push(`📋 *Pendientes de comprar (${pending.length}):*`);
+      pending.forEach((it, idx) => {
+        const qtyUnit = it.qty && it.unit ? `*${it.qty} ${it.unit}* ` : '';
+        lines.push(`${idx + 1}️⃣ ${qtyUnit}${it.description}`);
+      });
+    } else {
+      lines.push('✅ _¡No tienes ningún material pendiente de compra!_');
+    }
+
+    if (bought.length > 0) {
+      lines.push('');
+      lines.push(`✔️ *Comprados / Tachados recientemente (${bought.length}):*`);
+      bought.slice(0, 5).forEach(it => {
+        lines.push(`   ~${it.description}~`);
+      });
+    }
+
+    lines.push('');
+    lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+    lines.push('💡 _Para tachar: "ya compré el cemento" o "tachar azulejo". Para vaciar: "vaciar lista de compras"._');
+    return lines.join('\n');
+  }
+
+  async function handleAddShoppingItems(sock, remoteJid, session, items) {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const added = addShoppingItems(cleanPhone, items);
+      if (added.length === 0) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ No he podido identificar los materiales a comprar. Prueba diciendo: _"necesito comprar 14 m² azulejo gris y 2 sacos cemento cola"_.'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+        return;
+      }
+
+      const lines = [
+        `🛒 *¡${added.length === 1 ? 'Material añadido' : `${added.length} materiales añadidos`} a tu lista de compra!* ✅`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━'
+      ];
+      added.forEach(it => {
+        const qtyUnit = it.qty && it.unit ? `*${it.qty} ${it.unit}* ` : '';
+        lines.push(`• ${qtyUnit}${it.description}`);
+      });
+      lines.push('');
+      lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+      lines.push('💡 _Queda guardado en tu historial. Te lo recordaré en tu briefing matinal o cuando digas "lista de la compra"._');
+
+      const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    } catch (err) {
+      console.error('❌ Error añadiendo materiales a la compra:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error guardando materiales:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
+  async function handleListShoppingItems(sock, remoteJid, session) {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const items = listShoppingItems(cleanPhone, 'all');
+      const text = formatShoppingListForWhatsApp(items);
+      const sent = await sock.sendMessage(remoteJid, { text });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    } catch (err) {
+      console.error('❌ Error listando compras:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error consultando la lista de compras:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
+  async function handleMarkShoppingItemBought(sock, remoteJid, session, query) {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const updated = markShoppingItemBought(cleanPhone, query);
+      if (updated.length === 0) {
+        const sentNotFound = await sock.sendMessage(remoteJid, {
+          text: `ℹ️ No he encontrado ningún material pendiente que coincida con *"${query}"*.\n\nEscribe *"lista de la compra"* para ver tus materiales pendientes.`
+        });
+        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+        return;
+      }
+
+      const names = updated.map(u => `*${u.description}*`).join(', ');
+      const sentOk = await sock.sendMessage(remoteJid, {
+        text: `✔️ *¡Tachado de la lista:* ${names}! ✅\n\nMarcado como comprado en tu historial.`
+      });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    } catch (err) {
+      console.error('❌ Error marcando material comprado:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error actualizando material:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
+  async function handleClearShoppingList(sock, remoteJid, session) {
+    session.pendingAction = createProposedAction('B', 'clear_shopping_list', {}, 'Vaciar lista de compras');
+    const sentReq = await sock.sendMessage(remoteJid, {
+      text: '🗑️ *¿Deseas vaciar todos los materiales de tu lista de la compra?*\n\nResponde *"Sí"* para confirmar o *"No"* para cancelarlo.'
+    });
+    if (sentReq?.key?.id) botSentMessageIds.add(sentReq.key.id);
+  }
+
   function formatBudgetsListForWhatsApp(budgets, filter = 'all', company = null, invoices = null) {
     if (!budgets || budgets.length === 0) {
       if (filter === 'pending_signature') {
@@ -1788,6 +1913,30 @@ async function startWhatsAppGateway() {
       return;
     }
 
+    // 13. Añadir materiales a la lista de compra (Nivel A: Automático)
+    if (aiResult?.action === 'add_shopping_items') {
+      await handleAddShoppingItems(sock, remoteJid, session, aiResult.shoppingItems || []);
+      return;
+    }
+
+    // 14. Consultar lista de materiales a comprar (Nivel A: Automático)
+    if (aiResult?.action === 'list_shopping_items') {
+      await handleListShoppingItems(sock, remoteJid, session);
+      return;
+    }
+
+    // 15. Marcar materiales como comprados (Nivel A: Automático)
+    if (aiResult?.action === 'mark_shopping_items') {
+      await handleMarkShoppingItemBought(sock, remoteJid, session, aiResult.shoppingQuery || '');
+      return;
+    }
+
+    // 16. Vaciar lista de compras (Nivel B: Confirmación simple)
+    if (aiResult?.action === 'clear_shopping_list') {
+      await handleClearShoppingList(sock, remoteJid, session);
+      return;
+    }
+
     if (!aiResult || !aiResult.items || aiResult.items.length === 0) {
       const sentHelp = await sock.sendMessage(remoteJid, {
         text: `🤖 *PresuVoz Bot*\n\nNo he detectado partidas técnicas en el mensaje. Puedes dictarme los trabajos de obra (ej: _"tirar tabique de 4x3 metros y mover 2 enchufes por 600 euros"_).`
@@ -2122,6 +2271,16 @@ async function startWhatsAppGateway() {
 
           if (act.type === 'cancel_appointment') {
             await handleCancelAppointment(sock, remoteJid, session, act.data.query);
+            continue;
+          }
+
+          if (act.type === 'clear_shopping_list') {
+            const phone = session.phone || String(remoteJid).replace(/\D/g, '');
+            const res = clearShoppingList(phone);
+            const sentClr = await sock.sendMessage(remoteJid, {
+              text: `🗑️ *Lista de compras vaciada con éxito.* Se han eliminado ${res.deletedCount} materiales de tu lista.`
+            });
+            if (sentClr?.key?.id) botSentMessageIds.add(sentClr.key.id);
             continue;
           }
         } else if (evalResult.status === 'REJECTED') {
@@ -2477,6 +2636,25 @@ async function startWhatsAppGateway() {
         } else {
           await handleCancelAppointment(sock, remoteJid, session, query);
         }
+        continue;
+      }
+
+      // Comando directo para consultar lista de compras / materiales: ej. "lista de la compra", "materiales", "¿qué tengo que comprar?"
+      if (/^(?:lista\s+de\s+(?:la\s+)?compras?|materiales\s+pendientes|qu[eé]\s+(?:tengo\s+que|hay\s+que)\s+comprar|ver\s+compras?|mis\s+compras|materiales)$/i.test(rawUserText)) {
+        await handleListShoppingItems(sock, remoteJid, session);
+        continue;
+      }
+
+      // Comando directo para marcar material como comprado: ej. "ya compré el cemento", "comprado azulejo", "tachar cable"
+      const boughtCmdMatch = rawUserText.match(/^(?:ya\s+compr[eé]|comprad[oa]s?|tachad[oa]s?|tachar)\s+(.+)$/i);
+      if (boughtCmdMatch) {
+        await handleMarkShoppingItemBought(sock, remoteJid, session, boughtCmdMatch[1].trim());
+        continue;
+      }
+
+      // Comando directo para vaciar o borrar la lista de compras: ej. "vaciar lista de compras", "borrar lista de la compra"
+      if (/^(?:borrar|vaciar|limpiar)\s+(?:la\s+)?lista\s+de\s+(?:la\s+)?compras?$/i.test(rawUserText)) {
+        await handleClearShoppingList(sock, remoteJid, session);
         continue;
       }
 

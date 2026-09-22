@@ -7,7 +7,8 @@ import {
   listAppointments,
   getUnpaidInvoices,
   getBudgetsPendingFollowUp,
-  getCompany
+  getCompany,
+  listShoppingItems
 } from './db_service.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -48,6 +49,9 @@ export function classifyActionPermission(actionType) {
     case 'create_note':
     case 'draft_budget':
     case 'daily_briefing':
+    case 'add_shopping_items':
+    case 'list_shopping_items':
+    case 'mark_shopping_items':
       return 'A';
 
     // Nivel B — Pedir confirmación simple
@@ -57,6 +61,7 @@ export function classifyActionPermission(actionType) {
     case 'send_signing_link':
     case 'schedule_appointment':
     case 'export_quarter_email':
+    case 'clear_shopping_list':
       return 'B';
 
     // Nivel C — Confirmación fuerte
@@ -196,6 +201,20 @@ export function generateDailyBriefing(phone) {
     const mostUrgent = coldBudgets[0];
     const client = mostUrgent.clientName.split(' ')[0];
     lines.push(`⚠️ El presupuesto de *${client}* lleva *${mostUrgent.daysWaiting} días* sin respuesta.`);
+  }
+
+  // Bloque de materiales pendientes de compra
+  const pendingShopping = listShoppingItems(phone, 'pending');
+  if (pendingShopping.length > 0) {
+    lines.push('');
+    lines.push(`🛒 *Materiales pendientes de compra (${pendingShopping.length}):*`);
+    pendingShopping.slice(0, 5).forEach(item => {
+      const qtyUnit = item.qty && item.unit ? `${item.qty} ${item.unit} ` : '';
+      lines.push(`   • ${qtyUnit}${item.description}`);
+    });
+    if (pendingShopping.length > 5) {
+      lines.push(`   • _...y ${pendingShopping.length - 5} materiales más (di "lista de la compra")_`);
+    }
   }
 
   lines.push('');
