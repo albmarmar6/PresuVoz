@@ -31,22 +31,47 @@ db.exec(`
     gestoria_email TEXT,
     default_tax_rate INTEGER DEFAULT 10,
     default_advance INTEGER DEFAULT 30,
+    owner_name TEXT,
+    city TEXT,
+    working_hours TEXT,
+    payment_terms TEXT,
+    quote_validity_days INTEGER DEFAULT 15,
+    entity_type TEXT,
+    fiscal_name TEXT,
+    irpf_rate REAL DEFAULT 0,
+    invoice_series TEXT DEFAULT '2026-',
+    onboarding_step TEXT,
+    onboarding_data_json TEXT,
     created_at TEXT,
     updated_at TEXT
   );
 `);
 
 // Migración para bases de datos SQLite ya creadas
-try {
-  db.exec('ALTER TABLE companies ADD COLUMN gestoria_email TEXT;');
-} catch (e) {
-  // Ignorar si la columna ya existe
+const newCols = [
+  'gestoria_email TEXT',
+  'trade TEXT',
+  'owner_name TEXT',
+  'city TEXT',
+  'working_hours TEXT',
+  'payment_terms TEXT',
+  'quote_validity_days INTEGER DEFAULT 15',
+  'entity_type TEXT',
+  'fiscal_name TEXT',
+  'irpf_rate REAL DEFAULT 0',
+  'invoice_series TEXT DEFAULT "2026-"',
+  'onboarding_step TEXT',
+  'onboarding_data_json TEXT'
+];
+
+for (const colDef of newCols) {
+  try {
+    db.exec(`ALTER TABLE companies ADD COLUMN ${colDef};`);
+  } catch (e) {
+    // Ignorar si la columna ya existe
+  }
 }
-try {
-  db.exec('ALTER TABLE companies ADD COLUMN trade TEXT;');
-} catch (e) {
-  // Ignorar si la columna ya existe
-}
+
 try {
   db.exec('ALTER TABLE shopping_items ADD COLUMN client_name TEXT;');
 } catch (e) {
@@ -126,9 +151,18 @@ db.exec(`
 
 export const DEFAULT_COMPANY = {
   name: 'Carpintería y Reformas Manolo S.L.',
+  fiscalName: 'Carpintería y Reformas Manolo S.L.',
+  ownerName: 'Manolo',
   cif: 'B-41987654',
   trade: 'Reformas y Construcción',
   address: 'Pol. Ind. El Pino, Nave 4 - Sevilla',
+  city: 'Sevilla',
+  workingHours: 'Lunes a Viernes de 8:00 a 18:00',
+  paymentTerms: '50% al empezar y 50% al acabar',
+  quoteValidityDays: 15,
+  entityType: 'empresa',
+  irpfRate: 0,
+  invoiceSeries: '2026-',
   phone: '601 02 23 67',
   email: 'presupuestos@presuvoz.app',
   iban: 'ES91 2100 0418 4502 0005 1332',
@@ -136,7 +170,9 @@ export const DEFAULT_COMPANY = {
   logoPath: null,
   gestoriaEmail: null,
   defaultTaxRate: 10,
-  defaultAdvance: 30
+  defaultAdvance: 30,
+  onboardingStep: null,
+  onboardingDataJson: null
 };
 
 // ─── Métodos de Empresa ───────────────────────────────────────────────────────
@@ -152,9 +188,18 @@ export function getCompany(phone) {
   return {
     phone: row.phone,
     name: row.name || DEFAULT_COMPANY.name,
+    fiscalName: row.fiscal_name || row.name || DEFAULT_COMPANY.fiscalName,
+    ownerName: row.owner_name || DEFAULT_COMPANY.ownerName,
     cif: row.cif || DEFAULT_COMPANY.cif,
     trade: row.trade || DEFAULT_COMPANY.trade,
     address: row.address || DEFAULT_COMPANY.address,
+    city: row.city || DEFAULT_COMPANY.city,
+    workingHours: row.working_hours || DEFAULT_COMPANY.workingHours,
+    paymentTerms: row.payment_terms || DEFAULT_COMPANY.paymentTerms,
+    quoteValidityDays: row.quote_validity_days !== null && row.quote_validity_days !== undefined ? row.quote_validity_days : DEFAULT_COMPANY.quoteValidityDays,
+    entityType: row.entity_type || DEFAULT_COMPANY.entityType,
+    irpfRate: row.irpf_rate !== null && row.irpf_rate !== undefined ? row.irpf_rate : DEFAULT_COMPANY.irpfRate,
+    invoiceSeries: row.invoice_series || DEFAULT_COMPANY.invoiceSeries,
     phone: row.phone_contact || cleanPhone || DEFAULT_COMPANY.phone,
     email: row.email || DEFAULT_COMPANY.email,
     iban: row.iban || DEFAULT_COMPANY.iban,
@@ -163,7 +208,9 @@ export function getCompany(phone) {
     gestoriaEmail: row.gestoria_email || null,
     defaultTaxRate: row.default_tax_rate || 10,
     defaultAdvance: row.default_advance || 30,
-    isConfigured: Boolean(row.name && row.cif && row.name !== DEFAULT_COMPANY.name)
+    onboardingStep: row.onboarding_step || null,
+    onboardingDataJson: row.onboarding_data_json || null,
+    isConfigured: Boolean(row.name && row.cif && row.name !== DEFAULT_COMPANY.name && !row.onboarding_step)
   };
 }
 
@@ -172,27 +219,52 @@ export function saveCompany(phone, data = {}) {
   const existing = getCompany(cleanPhone);
   const now = new Date().toISOString();
 
-  const name = data.name || existing.name;
-  const cif = data.cif || existing.cif;
-  const trade = data.trade || existing.trade || DEFAULT_COMPANY.trade;
-  const address = data.address || existing.address;
-  const phoneContact = data.phone || existing.phone || cleanPhone;
-  const email = data.email || existing.email;
-  const iban = data.iban || existing.iban;
-  const bizum = data.bizum || existing.bizum || cleanPhone;
+  const name = data.name !== undefined ? data.name : existing.name;
+  const fiscalName = data.fiscalName !== undefined ? data.fiscalName : existing.fiscalName;
+  const ownerName = data.ownerName !== undefined ? data.ownerName : existing.ownerName;
+  const cif = data.cif !== undefined ? data.cif : existing.cif;
+  const trade = data.trade !== undefined ? data.trade : (existing.trade || DEFAULT_COMPANY.trade);
+  const address = data.address !== undefined ? data.address : existing.address;
+  const city = data.city !== undefined ? data.city : existing.city;
+  const workingHours = data.workingHours !== undefined ? data.workingHours : existing.workingHours;
+  const paymentTerms = data.paymentTerms !== undefined ? data.paymentTerms : existing.paymentTerms;
+  const quoteValidityDays = data.quoteValidityDays !== undefined ? data.quoteValidityDays : existing.quoteValidityDays;
+  const entityType = data.entityType !== undefined ? data.entityType : existing.entityType;
+  const irpfRate = data.irpfRate !== undefined ? data.irpfRate : existing.irpfRate;
+  const invoiceSeries = data.invoiceSeries !== undefined ? data.invoiceSeries : existing.invoiceSeries;
+  const phoneContact = data.phone !== undefined ? data.phone : (existing.phone || cleanPhone);
+  const email = data.email !== undefined ? data.email : existing.email;
+  const iban = data.iban !== undefined ? data.iban : existing.iban;
+  const bizum = data.bizum !== undefined ? data.bizum : (existing.bizum || cleanPhone);
   const logoPath = data.logoPath !== undefined ? data.logoPath : existing.logoPath;
   const gestoriaEmail = data.gestoriaEmail !== undefined ? data.gestoriaEmail : existing.gestoriaEmail;
-  const defaultTaxRate = data.defaultTaxRate || existing.defaultTaxRate || 10;
-  const defaultAdvance = data.defaultAdvance || existing.defaultAdvance || 30;
+  const defaultTaxRate = data.defaultTaxRate !== undefined ? data.defaultTaxRate : existing.defaultTaxRate;
+  const defaultAdvance = data.defaultAdvance !== undefined ? data.defaultAdvance : existing.defaultAdvance;
+  const onboardingStep = data.onboardingStep !== undefined ? data.onboardingStep : existing.onboardingStep;
+  const onboardingDataJson = data.onboardingDataJson !== undefined ? data.onboardingDataJson : existing.onboardingDataJson;
 
   const stmt = db.prepare(`
-    INSERT INTO companies (phone, name, cif, trade, address, phone_contact, email, iban, bizum, logo_path, gestoria_email, default_tax_rate, default_advance, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO companies (
+      phone, name, fiscal_name, owner_name, cif, trade, address, city, working_hours,
+      payment_terms, quote_validity_days, entity_type, irpf_rate, invoice_series,
+      phone_contact, email, iban, bizum, logo_path, gestoria_email, default_tax_rate,
+      default_advance, onboarding_step, onboarding_data_json, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(phone) DO UPDATE SET
       name = excluded.name,
+      fiscal_name = excluded.fiscal_name,
+      owner_name = excluded.owner_name,
       cif = excluded.cif,
       trade = excluded.trade,
       address = excluded.address,
+      city = excluded.city,
+      working_hours = excluded.working_hours,
+      payment_terms = excluded.payment_terms,
+      quote_validity_days = excluded.quote_validity_days,
+      entity_type = excluded.entity_type,
+      irpf_rate = excluded.irpf_rate,
+      invoice_series = excluded.invoice_series,
       phone_contact = excluded.phone_contact,
       email = excluded.email,
       iban = excluded.iban,
@@ -201,10 +273,17 @@ export function saveCompany(phone, data = {}) {
       gestoria_email = excluded.gestoria_email,
       default_tax_rate = excluded.default_tax_rate,
       default_advance = excluded.default_advance,
+      onboarding_step = excluded.onboarding_step,
+      onboarding_data_json = excluded.onboarding_data_json,
       updated_at = excluded.updated_at
   `);
 
-  stmt.run(cleanPhone, name, cif, trade, address, phoneContact, email, iban, bizum, logoPath, gestoriaEmail, defaultTaxRate, defaultAdvance, now, now);
+  stmt.run(
+    cleanPhone, name, fiscalName, ownerName, cif, trade, address, city, workingHours,
+    paymentTerms, quoteValidityDays, entityType, irpfRate, invoiceSeries,
+    phoneContact, email, iban, bizum, logoPath, gestoriaEmail, defaultTaxRate,
+    defaultAdvance, onboardingStep, onboardingDataJson, now, now
+  );
   return getCompany(cleanPhone);
 }
 

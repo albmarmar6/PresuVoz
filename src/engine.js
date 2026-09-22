@@ -423,7 +423,15 @@ export class PresuVozEngine {
 
     const year = new Date().getFullYear();
     const invoiceCounter = options.invoiceNumber || (Math.floor(100 + Math.random() * 900));
-    const invoiceId = `FAC-${year}-${String(invoiceCounter).padStart(4, '0')}`;
+    const comp = options.company || budget.company || this.company || {};
+    let invoiceId;
+    if (comp.invoiceSeries) {
+      const cleanSeries = comp.invoiceSeries.trim();
+      const prefix = cleanSeries.endsWith('-') || cleanSeries.endsWith('/') ? cleanSeries : `${cleanSeries}-`;
+      invoiceId = `${prefix}${String(invoiceCounter).padStart(3, '0')}`;
+    } else {
+      invoiceId = `FAC-${year}-${String(invoiceCounter).padStart(4, '0')}`;
+    }
 
     const today = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
     const operationDate = options.operationDate || today;
@@ -431,6 +439,11 @@ export class PresuVozEngine {
     const fin = budget.financials || {};
     const totalAmount = fin.totalAmount || 0;
     const paidSoFar = budget.paymentSummary?.totalPaid || 0;
+
+    // Retención de IRPF si la empresa/autónomo lo tiene configurado
+    const irpfRate = Number(comp.irpfRate || 0);
+    const irpfAmount = irpfRate > 0 ? Number(((fin.taxableBase || 0) * (irpfRate / 100)).toFixed(2)) : 0;
+    const adjustedTotalAmount = Number((totalAmount - irpfAmount).toFixed(2));
 
     // Verificar si existen facturas de anticipo emitidas formalmente
     const advanceInvoices = options.advanceInvoices || budget.advanceInvoices || [];
@@ -455,17 +468,13 @@ export class PresuVozEngine {
       };
     });
 
-    // Si no hay facturas de anticipo explícitas pero sí hay cobros registrados, usar el importe cobrado
-    const advanceAmount = advanceTotalAmount > 0 
-      ? Number(advanceTotalAmount.toFixed(2))
-      : (options.advanceAmount !== undefined ? options.advanceAmount : (paidSoFar > 0 ? paidSoFar : (fin.advanceAmount || 0)));
-
-    const remainingAmount = Number(Math.max(0, totalAmount - advanceAmount).toFixed(2));
+    const advanceAmount = Number(advanceTotalAmount.toFixed(2));
+    const remainingAmount = Number(Math.max(0, adjustedTotalAmount - advanceAmount).toFixed(2));
 
     const invoice = {
       id: invoiceId,
       type: 'FINAL',
-      budgetId: budget.id || 'PRE-2026',
+      budgetId: budget.id,
       issueDate: today,
       operationDate,
       company: {
@@ -496,7 +505,9 @@ export class PresuVozEngine {
         taxableBase: fin.taxableBase || 0,
         taxRatePercentage: fin.taxRatePercentage || 10,
         taxAmount: fin.taxAmount || 0,
-        totalAmount,
+        irpfRatePercentage: irpfRate,
+        irpfAmount,
+        totalAmount: adjustedTotalAmount,
         advanceTaxableBase: Number(advanceTaxableBase.toFixed(2)),
         advanceTaxAmount: Number(advanceTaxAmount.toFixed(2)),
         advanceAmount,

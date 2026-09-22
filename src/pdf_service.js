@@ -154,10 +154,14 @@ export function generateBudgetPDF(budget) {
       doc.fontSize(8).fillColor(darkColor).font('Helvetica-Bold')
         .text('CONDICIONES GENERALES Y FORMA DE PAGO:', 40, termsY);
 
+      const validityDays = budget.company?.quoteValidityDays || 15;
+      const termsDesc = budget.company?.paymentTerms || '50% al empezar y 50% al acabar';
+      const advPct = fin.advancePercentage || budget.company?.defaultAdvance || 30;
+
       doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
-        .text(`• Anticipo: ${fin.advancePercentage || 30}% a la aceptación del presupuesto (${(fin.advanceAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €).`, 40, termsY + 12)
-        .text(`• Resto: ${100 - (fin.advancePercentage || 30)}% a la finalización y recepción de los trabajos.`, 40, termsY + 22)
-        .text('• Precios válidos durante 15 días desde la fecha de emisión.', 40, termsY + 32)
+        .text(`• Condiciones de cobro: ${termsDesc}.`, 40, termsY + 12)
+        .text(`• Anticipo establecido: ${advPct}% (${(fin.advanceAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €).`, 40, termsY + 22)
+        .text(`• Precios válidos durante ${validityDays} días desde la fecha de emisión.`, 40, termsY + 32)
         .text('• Trabajos con garantía de 2 años según legislación vigente.', 40, termsY + 42);
 
       // 7. Firmas

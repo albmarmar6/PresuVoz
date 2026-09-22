@@ -879,9 +879,168 @@ assert(postRenameGirasol[0].clientName === 'Alberto Martín', "Conserva el nombr
 assert(classifyActionPermission('rename_client') === 'A', "rename_client es Nivel A (Automático)");
 assert(classifyActionPermission('disambiguate_client') === 'A', "disambiguate_client es Nivel A (Automático)");
 
-// Limpieza final
+// Limpieza test 18
 cleanDb.prepare('DELETE FROM budgets WHERE company_phone = ?').run(homonymPhone);
 cleanDb.prepare('DELETE FROM shopping_items WHERE company_phone = ?').run(homonymPhone);
+
+console.log("\nTEST 19: Onboarding Conversacional Cotidiano (15 Preguntas y Persistencia SQLite)");
+import {
+  startOnboarding,
+  processOnboardingStep,
+  getOnboardingState
+} from './onboarding_service.js';
+
+const onboardPhone = '34699887766';
+cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(onboardPhone);
+
+// 1. Iniciar onboarding
+const welcomePrompt = startOnboarding(onboardPhone);
+assert(welcomePrompt.includes('☕'), "El mensaje de bienvenida es cotidiano y amigable");
+let st = getOnboardingState(onboardPhone);
+assert(st.step === 'OWNER_AND_COMPANY', "Inicia en el paso 1 (OWNER_AND_COMPANY)");
+assert(st.isConfigured === false, "El estado inicial es isConfigured: false");
+
+// Paso 1: Nombre propio y empresa
+const r1 = processOnboardingStep(onboardPhone, "Me llamo Carlos y mi empresa es Reformas Integrales Carlos");
+assert(r1.handled === true, "Paso 1 procesado");
+assert(r1.message.includes("Carlos"), "Reconoce el nombre propio Carlos");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'TRADE', "Avanza al paso 2 (TRADE)");
+assert(st.company.ownerName === 'Carlos', "Persiste ownerName en SQLite");
+assert(st.company.name === 'Reformas Integrales Carlos', "Persiste name de la empresa en SQLite");
+
+// Paso 2: Gremio
+const r2 = processOnboardingStep(onboardPhone, "Soy electricista e instalador");
+assert(r2.handled === true, "Paso 2 procesado");
+assert(r2.message.includes("Electricidad"), "Normaliza oficio a Electricidad");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'CITY', "Avanza al paso 3 (CITY)");
+assert(st.company.trade === 'Electricidad y Telecomunicaciones', "Guarda oficio en SQLite");
+assert(st.company.defaultTaxRate === 21, "Asigna IVA sectorial al 21%");
+
+// Paso 3: Ciudad
+const r3 = processOnboardingStep(onboardPhone, "Sevilla capital y provincia");
+assert(r3.handled === true, "Paso 3 procesado");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'WORKING_HOURS', "Avanza al paso 4 (WORKING_HOURS)");
+assert(st.company.city === 'Sevilla capital y provincia', "Guarda ciudad en SQLite");
+
+// Paso 4: Horario de trabajo
+const r4 = processOnboardingStep(onboardPhone, "De 8:00 a 18:00 de lunes a viernes");
+assert(r4.handled === true, "Paso 4 procesado");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'PAYMENT_TERMS', "Avanza al paso 5 (PAYMENT_TERMS)");
+assert(st.company.workingHours === 'De 8:00 a 18:00 de lunes a viernes', "Guarda horario en SQLite");
+
+// Paso 5: Forma de cobro
+const r5 = processOnboardingStep(onboardPhone, "50% al empezar y 50% al acabar");
+assert(r5.handled === true, "Paso 5 procesado");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'ADVANCE', "Avanza al paso 6 (ADVANCE)");
+assert(st.company.paymentTerms.includes("50%"), "Guarda condiciones de cobro");
+
+// Paso 6: Anticipo habitual
+const r6 = processOnboardingStep(onboardPhone, "40%");
+assert(r6.handled === true, "Paso 6 procesado");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'QUOTE_VALIDITY', "Avanza al paso 7 (QUOTE_VALIDITY)");
+assert(st.company.defaultAdvance === 40, "Guarda anticipo del 40% en SQLite");
+
+// Paso 7: Validez presupuestos
+const r7 = processOnboardingStep(onboardPhone, "15 días");
+assert(r7.handled === true, "Paso 7 procesado");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'ENTITY_TYPE', "Avanza al paso 8 (ENTITY_TYPE)");
+assert(st.company.quoteValidityDays === 15, "Guarda validez de 15 días en SQLite");
+
+// Paso 8: Tipo de entidad (Autónomo o empresa)
+const r8 = processOnboardingStep(onboardPhone, "Soy autónomo");
+assert(r8.handled === true, "Paso 8 procesado");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'FISCAL_NAME', "Avanza al paso 9 (FISCAL_NAME)");
+assert(st.company.entityType === 'autonomo', "Registra tipo de entidad como autónomo");
+
+// Paso 9: Nombre fiscal
+const r9 = processOnboardingStep(onboardPhone, "Carlos García Fernández");
+assert(r9.handled === true, "Paso 9 procesado");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'CIF_NIF', "Avanza al paso 10 (CIF_NIF)");
+assert(st.company.fiscalName === 'Carlos García Fernández', "Guarda nombre fiscal");
+
+// Paso 10: CIF / NIF
+const r10 = processOnboardingStep(onboardPhone, "44556677X");
+assert(r10.handled === true, "Paso 10 procesado");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'FISCAL_ADDRESS', "Avanza al paso 11 (FISCAL_ADDRESS)");
+assert(st.company.cif === '44556677X', "Guarda NIF en SQLite");
+
+// Paso 11: Dirección fiscal
+const r11 = processOnboardingStep(onboardPhone, "Av. Constitución 12, 41001 Sevilla");
+assert(r11.handled === true, "Paso 11 procesado");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'TAX_RATE', "Avanza al paso 12 (TAX_RATE)");
+assert(st.company.address.includes("Constitución"), "Guarda dirección fiscal");
+
+// Paso 12: IVA
+const r12 = processOnboardingStep(onboardPhone, "21%");
+assert(r12.handled === true, "Paso 12 procesado");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'IRPF_RATE', "Avanza al paso 13 (IRPF_RATE)");
+assert(st.company.defaultTaxRate === 21, "Guarda IVA del 21%");
+
+// Paso 13: IRPF
+const r13 = processOnboardingStep(onboardPhone, "15% de IRPF");
+assert(r13.handled === true, "Paso 13 procesado");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'INVOICE_SERIES', "Avanza al paso 14 (INVOICE_SERIES)");
+assert(st.company.irpfRate === 15, "Guarda retención de IRPF al 15%");
+
+// Paso 14: Serie facturación
+const r14 = processOnboardingStep(onboardPhone, "2026-001");
+assert(r14.handled === true, "Paso 14 procesado");
+st = getOnboardingState(onboardPhone);
+assert(st.step === 'BANK_ACCOUNT', "Avanza al paso 15 (BANK_ACCOUNT)");
+assert(st.company.invoiceSeries === '2026-001', "Guarda serie de facturas");
+
+// Paso 15: Cuenta bancaria / Bizum (Cierre)
+const r15 = processOnboardingStep(onboardPhone, "Mi cuenta es ES91 2100 0418 4502 0005 1332 y Bizum 601020304");
+assert(r15.handled === true, "Paso 15 procesado");
+assert(r15.completed === true, "Onboarding finalizado con éxito");
+assert(r15.message.includes("¡Enhorabuena"), "Genera tarjeta de resumen y felicitación");
+
+// Verificar persistencia completa y estado isConfigured
+const finalComp = dbGetCompany(onboardPhone);
+assert(finalComp.isConfigured === true, "Tras completar las 15 preguntas, isConfigured es true");
+assert(finalComp.onboardingStep === null, "El estado de onboarding vuelve a null");
+assert(finalComp.ownerName === 'Carlos', "Conserva ownerName");
+assert(finalComp.city === 'Sevilla capital y provincia', "Conserva city");
+assert(finalComp.workingHours === 'De 8:00 a 18:00 de lunes a viernes', "Conserva workingHours");
+assert(finalComp.paymentTerms.includes("50%"), "Conserva paymentTerms");
+assert(finalComp.defaultAdvance === 40, "Conserva defaultAdvance");
+assert(finalComp.quoteValidityDays === 15, "Conserva quoteValidityDays");
+assert(finalComp.entityType === 'autonomo', "Conserva entityType");
+assert(finalComp.fiscalName === 'Carlos García Fernández', "Conserva fiscalName");
+assert(finalComp.cif === '44556677X', "Conserva cif");
+assert(finalComp.irpfRate === 15, "Conserva irpfRate");
+assert(finalComp.invoiceSeries === '2026-001', "Conserva invoiceSeries");
+assert(finalComp.iban.includes("ES91"), "Conserva IBAN formateado");
+assert(finalComp.bizum === '601020304', "Conserva Bizum");
+
+// 16. Verificación de cálculo fiscal en Facturas con la nueva configuración (Serie + IRPF)
+const testBudgetForInvoice = {
+  id: 'PRE-TEST-ONBOARD',
+  client: { name: 'Empresa Cliente S.L.', nif: 'B-99887766', address: 'Calle Industria 1' },
+  items: [{ id: 'ITEM-1', description: 'Instalación cuadro eléctrico', qty: 1, unit: 'ud', unitPrice: 1000, total: 1000 }],
+  financials: { subtotal: 1000, taxableBase: 1000, taxRatePercentage: 21, taxAmount: 210, totalAmount: 1210 }
+};
+const customInv = engine.convertToInvoice(testBudgetForInvoice, { company: finalComp });
+assert(customInv.id.startsWith('2026-001'), "Aplica la serie de facturación personalizada");
+assert(customInv.financials.irpfRatePercentage === 15, "Aplica el 15% de IRPF configurado");
+assert(customInv.financials.irpfAmount === 150, "Calcula 150€ de retención de IRPF (1000 * 15%)");
+assert(customInv.financials.totalAmount === 1060, "Ajusta el total a pagar descontando el IRPF (1210 - 150 = 1060)");
+
+// Limpieza test
+cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(onboardPhone);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

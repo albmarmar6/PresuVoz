@@ -70,6 +70,11 @@ import {
   formatDisambiguationPrompt,
   formatDuplicateClientWarning
 } from './secretary_service.js';
+import {
+  getOnboardingState,
+  startOnboarding,
+  processOnboardingStep
+} from './onboarding_service.js';
 
 dotenv.config();
 
@@ -730,19 +735,32 @@ async function startWhatsAppGateway() {
     return [
       '🏢 *PERFIL DE TU EMPRESA / NEGOCIO:*',
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `👤 *Profesional:* *${company.ownerName || 'No indicado'}*`,
+      `🏢 *Nombre Comercial:* ${company.name}`,
+      `📛 *Razón Social:* ${company.fiscalName || company.name}`,
       `🛠️ *Oficio / Especialidad:* *${company.trade || 'Reformas y Construcción'}*`,
-      `📛 *Nombre / Razón Social:* ${company.name}`,
-      `🆔 *CIF / NIF:* ${company.cif}`,
-      `📍 *Dirección Fiscal:* ${company.address}`,
-      `📞 *Teléfono de contacto:* ${company.phone}`,
-      `✉️ *Email:* ${company.email}`,
-      `🏦 *IBAN para cobros:* ${company.iban}`,
-      `📱 *Bizum profesional:* ${company.bizum}`,
-      `📧 *Email de tu Gestoría:* ${company.gestoriaEmail ? `*${company.gestoriaEmail}*` : '❌ _No configurado_'}`,
-      `🖼️ *Logotipo:* ${hasLogo ? '✅ Configurado (se incluye en tus PDFs)' : '❌ Sin logotipo (envía una foto con el texto "logo")'}`,
-      `📌 *Estado de perfil:* ${isConf ? '🟢 Personalizado' : '🟡 Datos demo (pendiente de configurar)'}`,
+      `📍 *Zona de trabajo:* ${company.city || 'No indicada'}`,
+      `⏰ *Horario habitual:* ${company.workingHours || 'No indicado'}`,
+      `💶 *Condiciones cobro:* ${company.paymentTerms || '50% al empezar y 50% al acabar'}`,
+      `🤝 *Anticipo habitual:* ${company.defaultAdvance || 30}%`,
+      `⏳ *Validez presupuestos:* ${company.quoteValidityDays || 15} días`,
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      '💡 _Para cambiar de oficio di: "Soy electricista", "Soy fontanero", "Soy albañil", etc._\n💡 _Para modificar datos di: "Configurar empresa Nombre..., CIF..., IBAN..."_\n💡 _Para guardar email de tu gestor di: "Mi gestoría es info@asesoria.com"_\n💡 _Para poner tu logo, envía una foto con el texto "logo"._'
+      '📑 *Datos Fiscales para Facturación:*',
+      `• *Tipo:* ${company.entityType === 'autonomo' ? 'Autónomo' : 'Empresa / Sociedad'}`,
+      `• *NIF / CIF:* ${company.cif}`,
+      `• *Dirección Fiscal:* ${company.address}`,
+      `• *IVA por defecto:* ${company.defaultTaxRate}%`,
+      `• *IRPF:* ${company.irpfRate ? company.irpfRate + '%' : '0% (No aplica)'}`,
+      `• *Serie facturas:* ${company.invoiceSeries || '2026-'}`,
+      `• *Teléfono:* ${company.phone}`,
+      `• *Email:* ${company.email}`,
+      `• *IBAN:* ${company.iban || 'No configurado'}`,
+      `• *Bizum profesional:* ${company.bizum || 'No configurado'}`,
+      `• *Email de tu Gestoría:* ${company.gestoriaEmail ? `*${company.gestoriaEmail}*` : '❌ _No configurado_'}`,
+      `🖼️ *Logotipo:* ${hasLogo ? '✅ Configurado (se incluye en tus PDFs)' : '❌ Sin logotipo (envía una foto con el texto "logo")'}`,
+      `📌 *Estado de perfil:* ${isConf ? '🟢 Configurado y activo' : '🟡 Pendiente de completar'}`,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      '💡 _Para reiniciar el cuestionario guiado di: "configurar todo" o "empezar de nuevo"._\n💡 _Para cambiar oficio rápido di: "Soy electricista", "Soy fontanero", etc._'
     ].join('\n');
   }
 
@@ -2798,23 +2816,26 @@ async function startWhatsAppGateway() {
         continue;
       }
 
+      // 0. Si el profesional está en medio del onboarding conversacional guiado
+      const onboardingState = getOnboardingState(senderNumber);
+      if (onboardingState.step) {
+        const stepResult = processOnboardingStep(senderNumber, rawUserText);
+        if (stepResult.handled) {
+          session.company = getCompany(senderNumber);
+          const sentStep = await sock.sendMessage(remoteJid, { text: stepResult.message });
+          if (sentStep?.key?.id) botSentMessageIds.add(sentStep.key.id);
+          continue;
+        }
+      }
+
       // 1. Detección de saludo inicial / Onboarding para profesionales no configurados
       const isGreeting = /^(?:hola|buenas|buenos\s+d[ií]as|buenas\s+tardes|buenas\s+noches|hey|qu[eé]\s+tal|empezar|inicio|ayuda)$/i.test(rawUserText);
-      if (isGreeting && session.company && session.company.isConfigured === false && !session.onboardingPrompted) {
-        session.onboardingPrompted = true;
-        const welcomeLines = [
-          '👋 *¡Hola! Te damos la bienvenida a PresuVoz* 🚀',
-          '━━━━━━━━━━━━━━━━━━━━━━━━━',
-          'Tu asistente inteligente por WhatsApp para crear presupuestos de obra, facturas oficiales y enlaces de firma digital al instante.',
-          '',
-          '🛠️ *Para que tus documentos lleven tu nombre real, tu oficio y validez legal:*',
-          '1️⃣ *Dime tu oficio o gremio* (ej: _"Soy electricista"_, _"Soy albañil"_, _"Fontanero"_, _"Carpintero"_...)',
-          '2️⃣ *Tus datos fiscales* (ej: _"Configurar empresa Reformas Pérez, CIF B12345678, Sevilla"_)',
-          '3️⃣ *Tu Bizum o IBAN* para que tus clientes te paguen',
-          '',
-          '💡 _(O si tienes prisa, mándame directamente una nota de voz o texto contándome una obra y te creo el primer presupuesto al vuelo)._'
-        ];
-        const sentWelcome = await sock.sendMessage(remoteJid, { text: welcomeLines.join('\n') });
+      const isExplicitOnboarding = /^(?:onboarding|configurar todo|configurar perfil|reiniciar onboarding|registro)$/i.test(rawUserText);
+
+      if ((isGreeting && session.company && session.company.isConfigured === false) || isExplicitOnboarding) {
+        const welcomeText = startOnboarding(senderNumber);
+        session.company = getCompany(senderNumber);
+        const sentWelcome = await sock.sendMessage(remoteJid, { text: welcomeText });
         if (sentWelcome?.key?.id) botSentMessageIds.add(sentWelcome.key.id);
         continue;
       }
