@@ -24,7 +24,7 @@ export const PERMISSION_LEVELS = {
   B: {
     id: 'B',
     name: 'Confirmación Simple',
-    description: 'Comunicación con clientes, envío de presupuestos/facturas y citas'
+    description: 'Redacción de propuestas para clientes (para copiar y pegar), exportaciones y compras'
   },
   C: {
     id: 'C',
@@ -277,8 +277,8 @@ export function buildBudgetFollowUpProposal(budgetFollowUpItem) {
 
   const isOld = b.daysWaiting >= 5;
   const promptMessage = isOld
-    ? `⚠️ *${b.clientName}* todavía no ha respondido al presupuesto de *${formattedTotal}* (${b.daysWaiting} días en espera).\n\n¿Quieres que le envíe un mensaje de seguimiento?`
-    : `📋 El presupuesto de *${b.clientName}* por *${formattedTotal}* todavía no ha sido aceptado (${b.daysWaiting} días).\n\n¿Quieres que le envíe un recordatorio?`;
+    ? `⚠️ *${b.clientName}* todavía no ha respondido al presupuesto de *${formattedTotal}* (${b.daysWaiting} días en espera).\n\n¿Quieres que te redacte un mensaje de seguimiento para que solo tengas que copiárselo y pegárselo?`
+    : `📋 El presupuesto de *${b.clientName}* por *${formattedTotal}* todavía no ha sido aceptado (${b.daysWaiting} días).\n\n¿Quieres que te prepare un recordatorio redactado para enviárselo?`;
 
   const clientMessage = `Hola ${clientFirstName}, ¿qué tal? Te escribo para consultar si pudiste revisar el presupuesto que te enviamos para la obra (${formattedTotal}). Si tienes cualquier duda sobre las partidas o quieres que ajustemos algo, dímelo y lo vemos sin compromiso. ¡Un saludo!`;
 
@@ -309,7 +309,7 @@ export function buildInvoiceFollowUpProposal(unpaidInvoiceItem, company = {}) {
   const clientFirstName = inv.clientName.split(' ')[0];
   const formattedTotal = formatEurAmount(inv.totalAmount);
 
-  const promptMessage = `💰 La factura *${inv.id}* de *${inv.clientName}* (${formattedTotal}) lleva *${inv.daysPending} días* pendiente de pago.\n\n¿Quieres que le prepare un mensaje de cortesía para recordar el cobro?`;
+  const promptMessage = `💰 La factura *${inv.id}* de *${inv.clientName}* (${formattedTotal}) lleva *${inv.daysPending} días* pendiente de pago.\n\n¿Quieres que te prepare un mensaje de cortesía redactado para que solo tengas que copiárselo y pegárselo?`;
 
   const bankInfo = company.iban ? ` a la cuenta ${company.iban}` : (company.bizum ? ` por Bizum al ${company.bizum}` : '');
   const clientMessage = `Hola ${clientFirstName}, ¿qué tal? Te escribo porque queda pendiente el pago de ${formattedTotal} correspondiente a la factura ${inv.id}${bankInfo}. Cuando puedas, ¿me confirmas cuándo podrás realizar la transferencia? Muchas gracias.`;

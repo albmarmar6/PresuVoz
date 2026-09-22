@@ -2703,19 +2703,17 @@ async function startWhatsAppGateway() {
           if (act.type === 'remind_budget' || act.type === 'remind_invoice') {
             const clientName = act.data.clientName || 'el cliente';
             const lines = [
-              `✅ *¡Recordatorio preparado con éxito para ${clientName}!*`,
+              `✍️ *¡Mensaje preparado para ${clientName}! (Listo para copiar y pegar)*`,
               '━━━━━━━━━━━━━━━━━━━━━━━━━',
-              '📲 *Mensaje redactado listo para enviar:*',
-              `_"${act.data.clientMessage}"_`
+              `${act.data.clientMessage}`,
+              '━━━━━━━━━━━━━━━━━━━━━━━━━',
+              '📋 _El bot nunca envía mensajes a tus clientes directamente. Solo tienes que copiar el texto superior y enviárselo desde tu propio WhatsApp._'
             ];
 
             if (act.data.directWaUrl) {
               lines.push('');
-              lines.push('👉 *Abrir chat de WhatsApp con el mensaje preparado (1 clic):*');
+              lines.push('👉 *O pulsa aquí para abrir su WhatsApp con el texto ya escrito (1 clic):*');
               lines.push(act.data.directWaUrl);
-            } else {
-              lines.push('');
-              lines.push('💡 _Copia el texto superior y envíaselo por WhatsApp a tu cliente._');
             }
 
             const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
