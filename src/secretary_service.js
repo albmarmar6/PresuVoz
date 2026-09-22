@@ -52,6 +52,11 @@ export function classifyActionPermission(actionType) {
     case 'add_shopping_items':
     case 'list_shopping_items':
     case 'mark_shopping_items':
+    case 'query_work_status':
+    case 'update_work_task':
+    case 'update_work_dates':
+    case 'rename_client':
+    case 'disambiguate_client':
       return 'A';
 
     // Nivel B — Pedir confirmación simple
@@ -62,6 +67,7 @@ export function classifyActionPermission(actionType) {
     case 'schedule_appointment':
     case 'export_quarter_email':
     case 'clear_shopping_list':
+    case 'finalize_work_project':
       return 'B';
 
     // Nivel C — Confirmación fuerte
@@ -322,4 +328,57 @@ export function buildInvoiceFollowUpProposal(unpaidInvoiceItem, company = {}) {
     clientMessage,
     directWaUrl
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. Desambiguación de Clientes Homónimos y Avisos Preventivos
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Genera el mensaje interactivo para desambiguar cuando hay varios clientes con el mismo nombre.
+ */
+export function formatDisambiguationPrompt(clientQuery, candidates) {
+  const lines = [
+    `🔍 *He encontrado ${candidates.length} clientes/obras para "${clientQuery}":*`,
+    '━━━━━━━━━━━━━━━━━━━━━━━━━'
+  ];
+
+  candidates.forEach((c, idx) => {
+    const numEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣'][idx] || `${idx + 1}️⃣`;
+    const totalStr = (Number(c.totalAmount) || 0).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+    lines.push(`${numEmoji} *${c.clientName}*`);
+    lines.push(`   📍 ${c.clientAddress}`);
+    lines.push(`   📁 Presupuesto: *${c.id}* · Importe: *${totalStr}*`);
+  });
+
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+  lines.push('👉 *¿A cuál de los dos te refieres?*');
+  lines.push(`Responde con el número (*1* o *${candidates.length}*) o el nombre de la calle.`);
+  lines.push('');
+  lines.push(`💡 _Consejo: Puedes añadirle un distintivo diciendo: "Renombrar el 1 a ${candidates[0]?.clientName || clientQuery} (Centro)"._`);
+
+  return lines.join('\n');
+}
+
+/**
+ * Genera la advertencia preventiva cuando se dicta un nuevo presupuesto para un cliente cuyo nombre ya existe.
+ */
+export function formatDuplicateClientWarning(clientName, newAddress, existingCandidates) {
+  const lines = [
+    `⚠️ *¡AVISO IMPORTANTE: Cliente con el mismo nombre detectado!*`,
+    '━━━━━━━━━━━━━━━━━━━━━━━━━',
+    `Has creado una nueva obra para *${clientName}* en *${newAddress || 'nueva ubicación'}*, pero ya existen clientes con ese nombre en tu base de datos:`,
+    ''
+  ];
+
+  existingCandidates.slice(0, 3).forEach((c) => {
+    lines.push(`• Obra anterior: *${c.id}* — ${c.clientAddress} (${c.clientName})`);
+  });
+
+  lines.push('');
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+  lines.push('💡 *Para evitar confusiones en pedidos, facturas y Modo Obra:*');
+  lines.push(`¿Deseas añadirle un distintivo a esta nueva obra? (Ejemplo: *"Renombrar a ${clientName} (${newAddress ? newAddress.split(',')[0].trim() : 'Nueva Obra'})"*).`);
+
+  return lines.join('\n');
 }

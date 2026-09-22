@@ -117,6 +117,12 @@ Tu función es:
       pon 'action: "list_shopping_items"' y si menciona un cliente concreto pon 'clientName': "Carlos" (o null si pide la lista general de todas las obras).
     - MARCAR MATERIALES COMO COMPRADOS: Si indica que ya compró algo o pide tacharlo (ej: "ya he comprado el cemento de Carlos", "tacha el azulejo gris", "comprado cemento cola"):
       pon 'action: "mark_shopping_items"', rellena 'shoppingQuery': "cemento cola" y 'clientName': "Carlos" si lo menciona.
+    - MODO OBRA / CONSULTAR ESTADO O QUÉ FALTA EN UNA OBRA: Si el profesional pregunta por el estado de una obra, cómo va o qué le falta por hacer/comprar (ej: "¿qué nos falta en la obra de Juan?", "¿qué falta en la obra de Juan?", "modo obra Juan", "estado de la obra de Carlos", "cómo va la obra de Alberto", "ficha de obra de Juan"):
+      pon 'action: "query_work_status"', rellena 'clientName': "Juan", y si pregunta explícitamente qué falta pon 'onlyMissing': true (o false si pide el estado general).
+    - MARCAR TAREA O FASE DE OBRA TERMINADA: Si el profesional indica que una tarea o fase de obra está hecha, terminada o lista (ej: "ya hemos terminado la demolición de Juan", "marca fontanería como hecha en la obra de Carlos", "alicatado listo", "tarea hecha alicatado"):
+      pon 'action: "update_work_task"', rellena 'taskQuery': "demolición", 'isDone': true, y 'clientName': "Juan" si lo menciona.
+    - PLAZOS O FECHAS DE OBRA: Si el profesional indica fechas de inicio o final estimado de una obra (ej: "la obra de Juan empieza el 2 de septiembre y termina el 15 de octubre"):
+      pon 'action: "update_work_dates"', rellena 'clientName': "Juan", 'startDate': "2 de septiembre", 'estimatedEndDate': "15 de octubre".
     - VACIAR O BORRAR LISTA DE COMPRAS: Si pide borrar o vaciar la lista (ej: "borrar lista de la compra", "vaciar compras", "limpiar lista"):
       pon 'action: "clear_shopping_list"'.
    - Si el profesional menciona un cliente o número concreto para modificar un presupuesto (ej: "en el de José Luis...", "en el 8629..."):
@@ -137,7 +143,12 @@ Tu función es:
 
 FORMATO DE RESPUESTA (JSON estricto):
 {
-  "action": "budget", // "budget" | "list_budgets" | "invoice" | "advance_invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "accept_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list"
+  "action": "budget", // "budget" | "list_budgets" | "invoice" | "advance_invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "accept_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates"
+  "taskQuery": null,
+  "isDone": true,
+  "onlyMissing": false,
+  "startDate": null,
+  "estimatedEndDate": null,
   "shoppingItems": [
     {
       "description": "azulejo gris",

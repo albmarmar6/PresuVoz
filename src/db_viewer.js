@@ -44,7 +44,68 @@ function getDbData() {
       return { ...p, parsedData: parsed };
     }),
     appointments,
-    shoppingItems
+    shoppingItems,
+    works: budgets.map(b => {
+      let parsed = null;
+      try { parsed = JSON.parse(b.data_json); } catch(e) {}
+      
+      const budgetPayments = payments.filter(p => p.budget_id === b.id);
+      const totalPaid = budgetPayments.reduce((acc, p) => acc + (Number(p.amount) || 0), 0);
+      const totalAmount = Number(b.total_amount) || 0;
+      const remainingBalance = Math.max(0, totalAmount - totalPaid);
+
+      const bName = (b.client_name || '').toLowerCase();
+      const relatedMaterials = shoppingItems.filter(m => {
+        if (m.budget_id && m.budget_id === b.id) return true;
+        if (m.client_name && bName && m.client_name.toLowerCase().includes(bName)) return true;
+        return false;
+      });
+
+      const materialsBought = relatedMaterials.filter(m => m.status === 'BOUGHT');
+      const materialsPending = relatedMaterials.filter(m => m.status !== 'BOUGHT');
+
+      const tasksDone = [];
+      const tasksPending = [];
+      const items = parsed?.items || [];
+      items.forEach((it) => {
+        const isDone = Boolean(it.isDone || it.status === 'DONE');
+        const taskObj = { description: it.description, isDone };
+        if (isDone) tasksDone.push(taskObj);
+        else tasksPending.push(taskObj);
+      });
+
+      const extraTasks = parsed?.workMemory?.extraTasks || [];
+      extraTasks.forEach(et => {
+        const isDone = Boolean(et.isDone);
+        const taskObj = { description: et.description, isDone };
+        if (isDone) tasksDone.push(taskObj);
+        else tasksPending.push(taskObj);
+      });
+
+      return {
+        budgetId: b.id,
+        clientName: b.client_name,
+        clientAddress: b.client_address,
+        clientPhone: b.client_phone,
+        companyPhone: b.company_phone,
+        totalAmount,
+        totalPaid,
+        remainingBalance,
+        status: b.status,
+        startDate: parsed?.workMemory?.startDate || null,
+        estimatedEndDate: parsed?.workMemory?.estimatedEndDate || null,
+        materials: {
+          bought: materialsBought,
+          pending: materialsPending,
+          total: relatedMaterials.length
+        },
+        tasks: {
+          done: tasksDone,
+          pending: tasksPending,
+          total: tasksDone.length + tasksPending.length
+        }
+      };
+    })
   };
 }
 
@@ -91,6 +152,9 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     <div class="flex flex-wrap gap-2 border-b border-slate-800 pb-3">
       <button onclick="setTab('budgets')" id="tabBtn-budgets" class="tab-btn px-4 py-2 rounded-lg text-sm font-medium transition-all bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
         📋 Presupuestos (<span id="count-budgets">0</span>)
+      </button>
+      <button onclick="setTab('works')" id="tabBtn-works" class="tab-btn px-4 py-2 rounded-lg text-sm font-medium transition-all text-slate-400 hover:text-white hover:bg-slate-800">
+        🏠 Modo Obra / Fichas (<span id="count-works">0</span>)
       </button>
       <button onclick="setTab('invoices')" id="tabBtn-invoices" class="tab-btn px-4 py-2 rounded-lg text-sm font-medium transition-all text-slate-400 hover:text-white hover:bg-slate-800">
         🧾 Facturas (<span id="count-invoices">0</span>)
@@ -139,6 +203,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         dbData = await res.json();
         
         document.getElementById('count-budgets').textContent = dbData.budgets?.length || 0;
+        if (document.getElementById('count-works')) document.getElementById('count-works').textContent = dbData.works?.length || 0;
         document.getElementById('count-invoices').textContent = dbData.invoices?.length || 0;
         document.getElementById('count-payments').textContent = dbData.payments?.length || 0;
         document.getElementById('count-appointments').textContent = dbData.appointments?.length || 0;
@@ -350,6 +415,114 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
           html += '</div>';
           html += '<div class="pt-2 border-t border-slate-700/60 text-[11px] font-mono text-slate-500">Registrado: ' + (c.created_at ? new Date(c.created_at).toLocaleString('es-ES') : '-') + '</div>';
           html += '</div>';
+        });
+        html += '</div>';
+        container.innerHTML = html;
+      }
+
+      else if (currentTab === 'works') {
+        const items = dbData.works || [];
+        if (items.length === 0) {
+          container.innerHTML = '<div class="text-center py-12 text-slate-500">No hay obras o presupuestos registrados en la base de datos todavía.</div>';
+          return;
+        }
+
+        let html = '<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">';
+        items.forEach(w => {
+          const totalTasks = w.tasks.total;
+          const doneTasks = w.tasks.done.length;
+          const tasksPercent = totalTasks > 0 ? Math.round((doneTasks / totalTasks) * 100) : 0;
+
+          const totalAmount = w.totalAmount;
+          const paidAmount = w.totalPaid;
+          const payPercent = totalAmount > 0 ? Math.min(100, Math.round((paidAmount / totalAmount) * 100)) : 0;
+
+          html += '<div class="bg-slate-900/90 rounded-2xl border border-slate-800 p-6 shadow-xl flex flex-col justify-between hover:border-slate-700 transition-all">';
+          
+          // Header
+          html += '<div>';
+          html += '  <div class="flex items-start justify-between gap-4 pb-4 border-b border-slate-800">';
+          html += '    <div>';
+          html += '      <div class="flex items-center gap-2">';
+          html += '        <span class="text-xl">🏠</span>';
+          html += '        <h3 class="font-bold text-white text-lg">' + (w.clientName || 'Cliente Particular') + '</h3>';
+          html += '      </div>';
+          html += '      <div class="text-xs text-slate-400 mt-1 font-mono">Presupuesto: <span class="text-emerald-400 font-semibold">' + w.budgetId + '</span>' + (w.clientAddress ? ' · ' + w.clientAddress : '') + '</div>';
+          html += '    </div>';
+          html += '    <div>' + renderBadge(w.status) + '</div>';
+          html += '  </div>';
+
+          // Fechas / Plazos
+          if (w.startDate || w.estimatedEndDate) {
+            html += '<div class="flex items-center gap-4 my-3 text-xs bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/80 font-mono">';
+            if (w.startDate) html += '<div class="flex items-center gap-1.5"><span class="text-blue-400 font-bold">📅 Inicio:</span> <span class="text-slate-200">' + w.startDate + '</span></div>';
+            if (w.estimatedEndDate) html += '<div class="flex items-center gap-1.5"><span class="text-amber-400 font-bold">🏁 Fin est.:</span> <span class="text-slate-200">' + w.estimatedEndDate + '</span></div>';
+            html += '</div>';
+          }
+
+          // Balance Económico
+          html += '<div class="my-4 bg-slate-950/70 p-4 rounded-xl border border-slate-800/80">';
+          html += '  <div class="flex justify-between items-center text-xs text-slate-400 mb-2">';
+          html += '    <span class="font-semibold text-slate-300">ESTADO ECONÓMICO</span>';
+          html += '    <span class="font-mono text-emerald-400 font-bold">' + payPercent + '% Cobrado</span>';
+          html += '  </div>';
+          html += '  <div class="w-full bg-slate-800 rounded-full h-2 mb-3 overflow-hidden">';
+          html += '    <div class="bg-emerald-500 h-2 rounded-full transition-all duration-500" style="width: ' + payPercent + '%"></div>';
+          html += '  </div>';
+          html += '  <div class="grid grid-cols-3 gap-2 text-center text-xs">';
+          html += '    <div class="bg-slate-900/80 p-2 rounded-lg border border-slate-800/60"><div class="text-[10px] text-slate-400 uppercase">Presupuesto</div><div class="font-bold text-white font-mono mt-0.5">' + formatEur(w.totalAmount) + '</div></div>';
+          html += '    <div class="bg-slate-900/80 p-2 rounded-lg border border-slate-800/60"><div class="text-[10px] text-emerald-400 uppercase">Pagado</div><div class="font-bold text-emerald-400 font-mono mt-0.5">' + formatEur(w.totalPaid) + '</div></div>';
+          html += '    <div class="bg-slate-900/80 p-2 rounded-lg border border-slate-800/60"><div class="text-[10px] text-amber-400 uppercase">Pendiente</div><div class="font-bold text-amber-400 font-mono mt-0.5">' + formatEur(w.remainingBalance) + '</div></div>';
+          html += '  </div>';
+          html += '</div>';
+
+          // Grid de Materiales y Tareas
+          html += '<div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs mt-4">';
+          
+          // Columna Materiales
+          html += '  <div class="bg-slate-950/40 p-3.5 rounded-xl border border-slate-800/60">';
+          html += '    <div class="flex items-center justify-between font-bold text-slate-200 mb-2 pb-1.5 border-b border-slate-800">';
+          html += '      <span>🛒 Materiales</span>';
+          html += '      <span class="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">' + w.materials.bought.length + '/' + w.materials.total + '</span>';
+          html += '    </div>';
+          if (w.materials.total === 0) {
+            html += '    <div class="text-slate-500 italic py-2">Sin materiales asignados</div>';
+          } else {
+            html += '    <div class="space-y-1.5 max-h-48 overflow-y-auto pr-1">';
+            w.materials.bought.forEach(m => {
+              html += '      <div class="flex items-center gap-1.5 text-slate-400 line-through text-[11px]"><span class="text-emerald-400 font-bold">✓</span> <span>' + (m.qty && m.unit ? m.qty + ' ' + m.unit + ' ' : '') + m.description + '</span></div>';
+            });
+            w.materials.pending.forEach(m => {
+              html += '      <div class="flex items-center gap-1.5 text-white font-medium text-[11px]"><span class="text-red-400 font-bold">❌</span> <span>' + (m.qty && m.unit ? m.qty + ' ' + m.unit + ' ' : '') + m.description + '</span></div>';
+            });
+            html += '    </div>';
+          }
+          html += '  </div>';
+
+          // Columna Tareas
+          html += '  <div class="bg-slate-950/40 p-3.5 rounded-xl border border-slate-800/60">';
+          html += '    <div class="flex items-center justify-between font-bold text-slate-200 mb-2 pb-1.5 border-b border-slate-800">';
+          html += '      <span>🔨 Tareas de Obra</span>';
+          html += '      <span class="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">' + doneTasks + '/' + totalTasks + ' (' + tasksPercent + '%)</span>';
+          html += '    </div>';
+          if (totalTasks === 0) {
+            html += '    <div class="text-slate-500 italic py-2">Sin tareas registradas</div>';
+          } else {
+            html += '    <div class="space-y-1.5 max-h-48 overflow-y-auto pr-1">';
+            w.tasks.done.forEach(t => {
+              html += '      <div class="flex items-center gap-1.5 text-slate-400 line-through text-[11px]"><span class="text-emerald-400 font-bold">✓</span> <span>' + t.description + '</span></div>';
+            });
+            w.tasks.pending.forEach(t => {
+              html += '      <div class="flex items-center gap-1.5 text-amber-200 font-medium text-[11px]"><span class="text-amber-400 font-bold">⏳</span> <span>' + t.description + '</span></div>';
+            });
+            html += '    </div>';
+          }
+          html += '  </div>';
+
+          html += '</div>'; // End Grid
+          html += '</div>'; // End Top section
+
+          html += '</div>'; // End Card
         });
         html += '</div>';
         container.innerHTML = html;

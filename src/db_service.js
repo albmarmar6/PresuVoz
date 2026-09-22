@@ -214,7 +214,7 @@ export function saveBudget(phone, budget) {
   if (!budget || !budget.id) return;
   const cleanPhone = String(phone).replace(/\D/g, '');
   const now = new Date().toISOString();
-  const total = budget.financials?.totalAmount || 0;
+  const total = budget.financials?.totalAmount || budget.totals?.total || budget.totalAmount || 0;
 
   const cleanBudget = {
     id: budget.id,
@@ -222,12 +222,13 @@ export function saveBudget(phone, budget) {
     company: budget.company,
     client: budget.client,
     items: budget.items,
-    financials: budget.financials,
+    financials: budget.financials || { totalAmount: total },
     terms: budget.terms,
     payments: budget.payments || [],
     paymentSummary: budget.paymentSummary || { totalPaid: 0, remainingBalance: total, status: 'PENDIENTE' },
     isDraft: budget.isDraft,
-    status: budget.status || 'PENDIENTE_ACEPTACION'
+    status: budget.status || 'PENDIENTE_ACEPTACION',
+    workMemory: budget.workMemory || {}
   };
 
   const stmt = db.prepare(`
@@ -416,7 +417,8 @@ export function listInvoices(phone, limit = 20) {
 // ─── Métodos de Cobros ────────────────────────────────────────────────────────
 
 export function savePayment(phone, payment) {
-  if (!payment || !payment.id) return;
+  if (!payment) return;
+  const pId = payment.id || `PAY-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
   const cleanPhone = String(phone).replace(/\D/g, '');
   const now = new Date().toISOString();
 
@@ -427,8 +429,9 @@ export function savePayment(phone, payment) {
       data_json = excluded.data_json
   `);
 
+  payment.id = pId;
   stmt.run(
-    payment.id,
+    pId,
     payment.budgetId || '',
     cleanPhone,
     Number(payment.amount || 0),
@@ -1024,5 +1027,337 @@ export function clearShoppingList(phone) {
   return { deletedCount: result.changes || 0 };
 }
 
+// ─── Métodos de Modo Obra (Memoria y Estado de Obra en Vivo) ─────────────────
 
+export function getWorkMemory(phone, clientOrBudgetId = null) {
+  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  
+  // 1. Buscar presupuesto correspondiente
+  let query = 'SELECT * FROM budgets WHERE company_phone = ?';
+  const params = [cleanPhone];
 
+  if (clientOrBudgetId) {
+    const q = String(clientOrBudgetId).trim().toLowerCase();
+    query += ' AND (LOWER(id) = ? OR LOWER(client_name) LIKE ?)';
+    params.push(q, `%${q}%`);
+  }
+  query += ' ORDER BY updated_at DESC LIMIT 1';
+
+  const budgetRow = db.prepare(query).get(...params);
+  if (!budgetRow) return null;
+
+  let parsed = null;
+  try { parsed = JSON.parse(budgetRow.data_json); } catch(e) {}
+
+  const budgetId = budgetRow.id;
+  const clientName = budgetRow.client_name || parsed?.client?.name || 'Cliente Particular';
+  const clientAddress = budgetRow.client_address || parsed?.client?.address || 'Ubicación según visita';
+  const clientPhone = budgetRow.client_phone || parsed?.client?.phone || null;
+  const totalAmount = budgetRow.total_amount || parsed?.financials?.totalAmount || 0;
+
+  // 2. Pagos acumulados
+  const paymentRows = db.prepare('SELECT amount FROM payments WHERE budget_id = ?').all(budgetId);
+  const totalPaid = paymentRows.reduce((sum, p) => sum + (p.amount || 0), 0);
+  const remainingBalance = Math.max(0, totalAmount - totalPaid);
+
+  // 3. Fechas de obra
+  const workMemory = parsed?.workMemory || {};
+  const startDate = workMemory.startDate || null;
+  const estimatedEndDate = workMemory.estimatedEndDate || null;
+
+  // 4. Materiales asociados (por budgetId o por nombre de cliente)
+  const materialsRows = db.prepare(`
+    SELECT id, description, qty, unit, status, created_at, bought_at
+    FROM shopping_items
+    WHERE company_phone = ? AND (budget_id = ? OR LOWER(client_name) = LOWER(?))
+    ORDER BY created_at ASC
+  `).all(cleanPhone, budgetId, clientName);
+
+  const materialsBought = [];
+  const materialsPending = [];
+
+  for (const m of materialsRows) {
+    const itemObj = {
+      id: m.id,
+      description: m.description,
+      qty: m.qty,
+      unit: m.unit
+    };
+    if (m.status === 'BOUGHT') {
+      materialsBought.push(itemObj);
+    } else {
+      materialsPending.push(itemObj);
+    }
+  }
+
+  // 5. Tareas y partidas presupuestadas + tareas extra
+  const tasksDone = [];
+  const tasksPending = [];
+
+  const items = parsed?.items || [];
+  items.forEach((item, idx) => {
+    const taskObj = {
+      id: item.id || idx + 1,
+      description: item.description,
+      isDone: Boolean(item.isDone || item.status === 'DONE'),
+      source: 'budget_item'
+    };
+    if (taskObj.isDone) {
+      tasksDone.push(taskObj);
+    } else {
+      tasksPending.push(taskObj);
+    }
+  });
+
+  const extraTasks = workMemory.extraTasks || [];
+  extraTasks.forEach(task => {
+    const taskObj = {
+      id: task.id,
+      description: task.description,
+      isDone: Boolean(task.isDone),
+      source: 'extra_task'
+    };
+    if (taskObj.isDone) {
+      tasksDone.push(taskObj);
+    } else {
+      tasksPending.push(taskObj);
+    }
+  });
+
+  return {
+    budgetId,
+    clientName,
+    clientAddress,
+    clientPhone,
+    totalAmount,
+    totalPaid,
+    remainingBalance,
+    startDate,
+    estimatedEndDate,
+    materials: {
+      bought: materialsBought,
+      pending: materialsPending,
+      totalCount: materialsRows.length
+    },
+    tasks: {
+      done: tasksDone,
+      pending: tasksPending,
+      totalCount: tasksDone.length + tasksPending.length
+    },
+    rawBudget: parsed
+  };
+}
+
+export function updateWorkTaskStatus(phone, clientOrBudgetId, taskQuery, isDone = true) {
+  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  if (!taskQuery) return null;
+
+  // Buscar presupuesto
+  let query = 'SELECT * FROM budgets WHERE company_phone = ?';
+  const params = [cleanPhone];
+
+  if (clientOrBudgetId) {
+    const q = String(clientOrBudgetId).trim().toLowerCase();
+    query += ' AND (LOWER(id) = ? OR LOWER(client_name) LIKE ?)';
+    params.push(q, `%${q}%`);
+  }
+  query += ' ORDER BY updated_at DESC LIMIT 1';
+
+  const budgetRow = db.prepare(query).get(...params);
+  if (!budgetRow) return null;
+
+  let parsed = null;
+  try { parsed = JSON.parse(budgetRow.data_json); } catch(e) {}
+  if (!parsed || !parsed.items) return null;
+
+  const tQuery = String(taskQuery).trim().toLowerCase();
+  let matchedTask = null;
+
+  // 1. Buscar en items del presupuesto
+  for (const it of parsed.items) {
+    if (it.description && it.description.toLowerCase().includes(tQuery)) {
+      it.isDone = Boolean(isDone);
+      it.status = isDone ? 'DONE' : 'PENDING';
+      matchedTask = { description: it.description, isDone: it.isDone };
+      break;
+    }
+  }
+
+  // 2. Si no se encontró en items, buscar en extraTasks
+  if (!matchedTask) {
+    parsed.workMemory = parsed.workMemory || {};
+    parsed.workMemory.extraTasks = parsed.workMemory.extraTasks || [];
+    for (const et of parsed.workMemory.extraTasks) {
+      if (et.description && et.description.toLowerCase().includes(tQuery)) {
+        et.isDone = Boolean(isDone);
+        matchedTask = { description: et.description, isDone: et.isDone };
+        break;
+      }
+    }
+  }
+
+  // 3. Si sigue sin existir y el usuario dijo que ya está hecha, podemos añadirla a extraTasks directamente
+  if (!matchedTask) {
+    parsed.workMemory = parsed.workMemory || {};
+    parsed.workMemory.extraTasks = parsed.workMemory.extraTasks || [];
+    const newTask = {
+      id: `TASK-${Date.now()}`,
+      description: taskQuery.trim(),
+      isDone: Boolean(isDone)
+    };
+    parsed.workMemory.extraTasks.push(newTask);
+    matchedTask = { description: newTask.description, isDone: newTask.isDone };
+  }
+
+  const now = new Date().toISOString();
+  db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ?').run(
+    JSON.stringify(parsed),
+    now,
+    budgetRow.id
+  );
+
+  return {
+    budgetId: budgetRow.id,
+    clientName: budgetRow.client_name,
+    task: matchedTask,
+    workMemory: getWorkMemory(cleanPhone, budgetRow.id)
+  };
+}
+
+export function updateWorkDates(phone, clientOrBudgetId, startDate, estimatedEndDate) {
+  const cleanPhone = String(phone || '').replace(/\D/g, '');
+
+  let query = 'SELECT * FROM budgets WHERE company_phone = ?';
+  const params = [cleanPhone];
+
+  if (clientOrBudgetId) {
+    const q = String(clientOrBudgetId).trim().toLowerCase();
+    query += ' AND (LOWER(id) = ? OR LOWER(client_name) LIKE ?)';
+    params.push(q, `%${q}%`);
+  }
+  query += ' ORDER BY updated_at DESC LIMIT 1';
+
+  const budgetRow = db.prepare(query).get(...params);
+  if (!budgetRow) return null;
+
+  let parsed = null;
+  try { parsed = JSON.parse(budgetRow.data_json); } catch(e) {}
+  if (!parsed) return null;
+
+  parsed.workMemory = parsed.workMemory || {};
+  if (startDate) parsed.workMemory.startDate = startDate;
+  if (estimatedEndDate) parsed.workMemory.estimatedEndDate = estimatedEndDate;
+
+  const now = new Date().toISOString();
+  db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ?').run(
+    JSON.stringify(parsed),
+    now,
+    budgetRow.id
+  );
+
+  return {
+    budgetId: budgetRow.id,
+    clientName: budgetRow.client_name,
+    startDate: parsed.workMemory.startDate,
+    estimatedEndDate: parsed.workMemory.estimatedEndDate
+  };
+}
+
+// ─── Desambiguación de Clientes Homónimos y Gestión de Distintivos ──────────
+
+/**
+ * Busca clientes/obras que coincidan con un nombre o término de búsqueda.
+ * Permite detectar si existen múltiples personas con el mismo nombre y apellido.
+ */
+export function findClientsByName(phone, clientNameQuery) {
+  if (!clientNameQuery) return [];
+  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  const q = String(clientNameQuery).trim().toLowerCase();
+
+  const rows = db.prepare(`
+    SELECT id, client_name, client_address, client_phone, total_amount, status, created_at, updated_at, data_json
+    FROM budgets
+    WHERE company_phone = ? AND (
+      LOWER(client_name) = ? OR
+      LOWER(client_name) LIKE ? OR
+      LOWER(client_address) LIKE ? OR
+      LOWER(id) = ?
+    )
+    ORDER BY updated_at DESC
+  `).all(cleanPhone, q, `%${q}%`, `%${q}%`, q);
+
+  return rows.map(r => {
+    let parsed = null;
+    try { parsed = JSON.parse(r.data_json); } catch(e) {}
+    return {
+      id: r.id,
+      clientName: r.client_name,
+      clientAddress: r.client_address || parsed?.client?.address || 'Sin dirección registrada',
+      clientPhone: r.client_phone || parsed?.client?.phone || null,
+      totalAmount: r.total_amount || parsed?.financials?.totalAmount || 0,
+      status: r.status,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at
+    };
+  });
+}
+
+/**
+ * Renombra o añade un distintivo a un cliente/obra existente en la base de datos.
+ * Actualiza en cascada presupuestos, compras y facturas vinculadas.
+ */
+export function renameClientBudget(phone, budgetIdOrQuery, newNameWithBadge) {
+  if (!budgetIdOrQuery || !newNameWithBadge) return null;
+  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  const newName = String(newNameWithBadge).trim();
+
+  // Localizar el presupuesto
+  let budgetRow = db.prepare('SELECT * FROM budgets WHERE company_phone = ? AND id = ?').get(cleanPhone, budgetIdOrQuery);
+  if (!budgetRow) {
+    const q = String(budgetIdOrQuery).trim().toLowerCase();
+    budgetRow = db.prepare(`
+      SELECT * FROM budgets 
+      WHERE company_phone = ? AND (LOWER(client_name) = ? OR LOWER(client_name) LIKE ?)
+      ORDER BY updated_at DESC LIMIT 1
+    `).get(cleanPhone, q, `%${q}%`);
+  }
+
+  if (!budgetRow) return null;
+
+  const oldName = budgetRow.client_name;
+  let parsed = null;
+  try { parsed = JSON.parse(budgetRow.data_json); } catch(e) {}
+  if (parsed && parsed.client) {
+    parsed.client.name = newName;
+  }
+
+  const now = new Date().toISOString();
+
+  // 1. Actualizar budget
+  db.prepare(`
+    UPDATE budgets 
+    SET client_name = ?, data_json = ?, updated_at = ?
+    WHERE id = ?
+  `).run(newName, parsed ? JSON.stringify(parsed) : budgetRow.data_json, now, budgetRow.id);
+
+  // 2. Actualizar compras vinculadas (por budget_id o por nombre anterior de cliente)
+  db.prepare(`
+    UPDATE shopping_items
+    SET client_name = ?
+    WHERE company_phone = ? AND (budget_id = ? OR client_name = ?)
+  `).run(newName, cleanPhone, budgetRow.id, oldName);
+
+  // 3. Actualizar facturas vinculadas
+  db.prepare(`
+    UPDATE invoices
+    SET client_name = ?
+    WHERE company_phone = ? AND budget_id = ?
+  `).run(newName, cleanPhone, budgetRow.id);
+
+  return {
+    budgetId: budgetRow.id,
+    oldName,
+    newName,
+    clientAddress: budgetRow.client_address
+  };
+}

@@ -674,6 +674,215 @@ assert(emptyList.length === 0, "La lista queda completamente vacía tras limpiar
 // Limpieza final
 cleanDb.prepare('DELETE FROM shopping_items WHERE company_phone = ?').run(shoppingPhone);
 
+console.log("\nTEST 17: Modo Obra — Memoria Inteligente, Ficha Viva y Checklist por Obra (Captura Usuario)");
+import {
+  getWorkMemory,
+  updateWorkTaskStatus,
+  updateWorkDates,
+  saveBudget,
+  savePayment
+} from './db_service.js';
+import { formatWorkMemoryForWhatsApp } from './whatsapp_gateway.js';
+
+const workPhone = '34677889900';
+const juanBudgetId = 'PRESU-JUAN-001';
+
+// Limpieza previa
+cleanDb.prepare('DELETE FROM budgets WHERE id = ? OR company_phone = ?').run(juanBudgetId, workPhone);
+cleanDb.prepare('DELETE FROM payments WHERE budget_id = ? OR company_phone = ?').run(juanBudgetId, workPhone);
+cleanDb.prepare('DELETE FROM shopping_items WHERE company_phone = ?').run(workPhone);
+
+// 1. Guardar Presupuesto con 5 partidas de reforma (total 8.450,00 €)
+const juanBudgetObj = {
+  id: juanBudgetId,
+  client: { name: 'Juan García', address: 'Calle Mayor 12', phone: '611223344' },
+  items: [
+    { description: 'Demolición', quantity: 1, unit: 'pa', price: 1200, total: 1200, isDone: true, status: 'DONE' },
+    { description: 'Fontanería', quantity: 1, unit: 'pa', price: 1800, total: 1800, isDone: true, status: 'DONE' },
+    { description: 'Alicatado', quantity: 1, unit: 'pa', price: 2450, total: 2450, isDone: false, status: 'PENDING' },
+    { description: 'Pintura', quantity: 1, unit: 'pa', price: 1500, total: 1500, isDone: false, status: 'PENDING' },
+    { description: 'Sanitarios', quantity: 1, unit: 'pa', price: 1500, total: 1500, isDone: false, status: 'PENDING' }
+  ],
+  financials: { totalAmount: 8450 },
+  workMemory: {
+    startDate: '2 de septiembre',
+    estimatedEndDate: '15 de octubre'
+  }
+};
+
+saveBudget(workPhone, juanBudgetObj);
+
+// 2. Registrar cobro de anticipo de 3.000 € (dejando 5.450 € pendientes)
+savePayment(workPhone, {
+  budgetId: juanBudgetId,
+  amount: 3000,
+  method: 'TRANSFERENCIA',
+  concept: 'Anticipo inicio de obra'
+});
+
+// 3. Añadir materiales asociados a la obra de Juan García
+addShoppingItems(workPhone, [
+  { description: 'Azulejos', qty: 25, unit: 'm²', clientName: 'Juan García', budgetId: juanBudgetId },
+  { description: 'Cemento', qty: 5, unit: 'sacos', clientName: 'Juan García', budgetId: juanBudgetId },
+  { description: 'Grifería', qty: 1, unit: 'ud', clientName: 'Juan García', budgetId: juanBudgetId }
+]);
+
+// 4. Marcar Azulejos y Cemento como comprados
+markShoppingItemBought(workPhone, 'Azulejos', 'Juan García');
+markShoppingItemBought(workPhone, 'Cemento', 'Juan García');
+
+// 5. Consultar getWorkMemory
+const workMem = getWorkMemory(workPhone, 'Juan García');
+assert(workMem !== null, "Recupera la memoria viva de la obra de Juan García");
+assert(workMem.totalAmount === 8450, "Presupuesto total exacto: 8.450 €");
+assert(workMem.totalPaid === 3000, "Cobros acumulados exactos: 3.000 €");
+assert(workMem.remainingBalance === 5450, "Saldo pendiente exacto: 5.450 €");
+assert(workMem.startDate === '2 de septiembre', "Fecha de inicio: 2 de septiembre");
+assert(workMem.estimatedEndDate === '15 de octubre', "Fecha final estimado: 15 de octubre");
+
+assert(workMem.materials.bought.length === 2, "2 materiales comprados (Azulejos, Cemento)");
+assert(workMem.materials.pending.length === 1, "1 material pendiente (Grifería)");
+assert(workMem.tasks.done.length === 2, "2 tareas completadas (Demolición, Fontanería)");
+assert(workMem.tasks.pending.length === 3, "3 tareas pendientes (Alicatado, Pintura, Sanitarios)");
+
+// 6. Validar formateo idéntico a la tarjeta de la captura de usuario (Modo Obra completo)
+const cardText = formatWorkMemoryForWhatsApp(workMem, false);
+assert(cardText.includes("JUAN GARCÍA"), "La tarjeta incluye el nombre de Juan García");
+assert(cardText.includes("8.450,00 €"), "Muestra presupuesto de 8.450,00 €");
+assert(cardText.includes("3.000,00 €"), "Muestra pagado 3.000,00 €");
+assert(cardText.includes("5.450,00 €"), "Muestra pendiente 5.450,00 €");
+assert(cardText.includes("2 de septiembre"), "Muestra fecha inicio: 2 de septiembre");
+assert(cardText.includes("15 de octubre"), "Muestra fecha fin estimado: 15 de octubre");
+assert(cardText.includes("✓") && cardText.includes("Azulejos"), "Muestra ✓ Azulejos");
+assert(cardText.includes("✓") && cardText.includes("Cemento"), "Muestra ✓ Cemento");
+assert(cardText.includes("❌") && cardText.includes("Grifería"), "Muestra ❌ Grifería");
+assert(cardText.includes("✓") && cardText.includes("Demolición"), "Muestra ✓ Demolición");
+assert(cardText.includes("✓") && cardText.includes("Fontanería"), "Muestra ✓ Fontanería");
+assert(cardText.includes("⏳") && cardText.includes("Alicatado"), "Muestra ⏳ Alicatado");
+assert(cardText.includes("⏳") && cardText.includes("Pintura"), "Muestra ⏳ Pintura");
+assert(cardText.includes("⏳") && cardText.includes("Sanitarios"), "Muestra ⏳ Sanitarios");
+
+// 7. Validar consulta de faltantes ("¿Qué nos falta en la obra de Juan?")
+const missingText = formatWorkMemoryForWhatsApp(workMem, true);
+assert(missingText.includes("LO QUE FALTA EN LA OBRA"), "Encabezado específico para faltantes");
+assert(missingText.includes("5.450,00 €"), "Muestra deuda pendiente de 5.450,00 €");
+assert(missingText.includes("❌") && missingText.includes("Grifería"), "Muestra únicamente la grifería pendiente");
+assert(!missingText.includes("Azulejos"), "NO muestra materiales ya comprados");
+assert(missingText.includes("⏳") && missingText.includes("Alicatado"), "Muestra partidas pendientes (Alicatado)");
+assert(!missingText.includes("Demolición"), "NO muestra partidas ya hechas");
+
+// 8. Actualizar tarea mediante updateWorkTaskStatus ("ya terminamos el alicatado de Juan")
+const updateTaskRes = updateWorkTaskStatus(workPhone, 'Juan García', 'Alicatado', true);
+assert(updateTaskRes !== null, "Actualiza el estado de la tarea en SQLite");
+assert(updateTaskRes.task.isDone === true, "La tarea Alicatado pasa a completada");
+
+const updatedMem = getWorkMemory(workPhone, 'Juan García');
+assert(updatedMem.tasks.done.length === 3, "Ahora hay 3 tareas hechas (Demolición, Fontanería, Alicatado)");
+assert(updatedMem.tasks.pending.length === 2, "Quedan 2 tareas pendientes (Pintura, Sanitarios)");
+
+// 9. Actualizar fechas mediante updateWorkDates
+const updateDatesRes = updateWorkDates(workPhone, 'Juan García', '10 de septiembre', '30 de octubre');
+assert(updateDatesRes !== null, "Actualiza plazos de obra en SQLite");
+assert(updateDatesRes.startDate === '10 de septiembre', "Nueva fecha inicio guardada");
+assert(updateDatesRes.estimatedEndDate === '30 de octubre', "Nueva fecha fin guardada");
+
+// 10. Matriz de Permisos para Modo Obra
+assert(classifyActionPermission('query_work_status') === 'A', "query_work_status es Nivel A (Automático)");
+assert(classifyActionPermission('update_work_task') === 'A', "update_work_task es Nivel A (Automático)");
+assert(classifyActionPermission('update_work_dates') === 'A', "update_work_dates es Nivel A (Automático)");
+assert(classifyActionPermission('finalize_work_project') === 'B', "finalize_work_project es Nivel B (Confirmación simple)");
+
+// Limpieza final
+cleanDb.prepare('DELETE FROM budgets WHERE id = ? OR company_phone = ?').run(juanBudgetId, workPhone);
+cleanDb.prepare('DELETE FROM payments WHERE budget_id = ? OR company_phone = ?').run(juanBudgetId, workPhone);
+cleanDb.prepare('DELETE FROM shopping_items WHERE company_phone = ?').run(workPhone);
+
+console.log("\nTEST 18: Desambiguación de Clientes Homónimos, Prevención de Confusiones y Distintivos");
+import {
+  findClientsByName,
+  renameClientBudget
+} from './db_service.js';
+import {
+  formatDisambiguationPrompt,
+  formatDuplicateClientWarning
+} from './secretary_service.js';
+
+const homonymPhone = '34655443322';
+const presu1Id = 'PRESU-ALBERTO-001';
+const presu2Id = 'PRESU-ALBERTO-002';
+
+// Limpieza previa
+cleanDb.prepare('DELETE FROM budgets WHERE company_phone = ?').run(homonymPhone);
+cleanDb.prepare('DELETE FROM shopping_items WHERE company_phone = ?').run(homonymPhone);
+
+// 1. Crear el primer cliente "Alberto Martín" en Calle Girasol
+const alberto1 = {
+  id: presu1Id,
+  client: { name: 'Alberto Martín', address: 'Calle Girasol Nº 7, Sevilla', phone: '655111222' },
+  items: [{ description: 'Demolición tabiquería', quantity: 1, unit: 'pa', price: 1200, total: 1200 }],
+  financials: { totalAmount: 1200 }
+};
+saveBudget(homonymPhone, alberto1);
+
+// 2. Comprobar que inicialmente findClientsByName devuelve 1 único cliente
+const singleResult = findClientsByName(homonymPhone, 'Alberto Martín');
+assert(singleResult.length === 1, "Encuentra el primer Alberto Martín en Calle Girasol");
+assert(singleResult[0].id === presu1Id, "ID correcto del primer presupuesto");
+
+// 3. Crear el segundo cliente con idéntico nombre "Alberto Martín", pero en Avda. Constitución
+const alberto2 = {
+  id: presu2Id,
+  client: { name: 'Alberto Martín', address: 'Avda. Constitución 14, Sevilla', phone: '655333444' },
+  items: [{ description: 'Instalación de fontanería', quantity: 1, unit: 'pa', price: 2500, total: 2500 }],
+  financials: { totalAmount: 2500 }
+};
+saveBudget(homonymPhone, alberto2);
+
+// 4. Detección preventiva de cliente existente (Aviso de homonimia al crear presupuesto)
+const existingHomonyms = findClientsByName(homonymPhone, 'Alberto Martín');
+assert(existingHomonyms.length === 2, "Detecta exactamente 2 clientes/obras con el nombre 'Alberto Martín'");
+
+const warningMsg = formatDuplicateClientWarning('Alberto Martín', 'Avda. Constitución 14', [singleResult[0]]);
+assert(warningMsg.includes("Cliente con el mismo nombre detectado"), "El aviso preventivo incluye la alerta de homonimia");
+assert(warningMsg.includes("Calle Girasol"), "El aviso preventivo menciona la obra anterior para que el usuario la identifique");
+assert(warningMsg.includes("distintivo"), "El aviso preventivo aconseja añadir un distintivo para evitar confusiones");
+
+// 5. Cero adivinación — Desambiguación interactiva (formatDisambiguationPrompt)
+const disambiguationMsg = formatDisambiguationPrompt('Alberto Martín', existingHomonyms);
+assert(disambiguationMsg.includes("He encontrado 2 clientes/obras para \"Alberto Martín\""), "Indica que hay 2 opciones encontradas");
+assert(disambiguationMsg.includes("1️⃣") && disambiguationMsg.includes("2️⃣"), "Lista numerada con emojis para selección fácil");
+assert(disambiguationMsg.includes("Calle Girasol"), "Muestra la dirección de la opción 1");
+assert(disambiguationMsg.includes("Avda. Constitución"), "Muestra la dirección de la opción 2");
+assert(disambiguationMsg.includes("Responde con el número"), "Instruye al usuario a elegir con el número");
+
+// 6. Añadir materiales asociados y comprobar que se pueden asignar por budgetId específico sin confusión
+addShoppingItems(homonymPhone, [
+  { description: 'Tubería multicapa', qty: 20, unit: 'm', clientName: 'Alberto Martín', budgetId: presu2Id }
+]);
+
+// 7. Renombrar cliente / Añadir distintivo (renameClientBudget)
+const renameRes = renameClientBudget(homonymPhone, presu2Id, 'Alberto Martín (Constitución)');
+assert(renameRes !== null, "Ejecuta el renombrado en la base de datos");
+assert(renameRes.oldName === 'Alberto Martín', "Registra el nombre anterior");
+assert(renameRes.newName === 'Alberto Martín (Constitución)', "Registra el nuevo nombre con distintivo");
+
+// 8. Verificar que la base de datos se actualizó unívocamente
+const postRenameConstitucion = findClientsByName(homonymPhone, 'Alberto Martín (Constitución)');
+assert(postRenameConstitucion.length === 1, "Ahora 'Alberto Martín (Constitución)' es 100% unívoco");
+assert(postRenameConstitucion[0].clientAddress.includes("Constitución"), "Mantiene la dirección de Constitución");
+
+const postRenameGirasol = findClientsByName(homonymPhone, 'Calle Girasol');
+assert(postRenameGirasol.length === 1, "El presupuesto de Calle Girasol sigue intacto");
+assert(postRenameGirasol[0].clientName === 'Alberto Martín', "Conserva el nombre sin afectar al otro");
+
+// 9. Verificar matriz de permisos para renombrar y desambiguar
+assert(classifyActionPermission('rename_client') === 'A', "rename_client es Nivel A (Automático)");
+assert(classifyActionPermission('disambiguate_client') === 'A', "disambiguate_client es Nivel A (Automático)");
+
+// Limpieza final
+cleanDb.prepare('DELETE FROM budgets WHERE company_phone = ?').run(homonymPhone);
+cleanDb.prepare('DELETE FROM shopping_items WHERE company_phone = ?').run(homonymPhone);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

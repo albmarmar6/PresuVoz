@@ -51,7 +51,12 @@ import {
   addShoppingItems,
   listShoppingItems,
   markShoppingItemBought,
-  clearShoppingList
+  clearShoppingList,
+  getWorkMemory,
+  updateWorkTaskStatus,
+  updateWorkDates,
+  findClientsByName,
+  renameClientBudget
 } from './db_service.js';
 import {
   PERMISSION_LEVELS,
@@ -61,7 +66,9 @@ import {
   generateDailyBriefing,
   generateEveningReminder,
   buildBudgetFollowUpProposal,
-  buildInvoiceFollowUpProposal
+  buildInvoiceFollowUpProposal,
+  formatDisambiguationPrompt,
+  formatDuplicateClientWarning
 } from './secretary_service.js';
 
 dotenv.config();
@@ -420,6 +427,84 @@ function detectBudgetListIntent(text) {
   return 'all';
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MODO OBRA: Formato WhatsApp — Memoria Viva y Ficha de Obra
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function formatWorkMemoryForWhatsApp(workMem, onlyMissing = false) {
+  if (!workMem) return 'ℹ️ No se ha encontrado información de esta obra.';
+
+  const clientHeader = (workMem.clientName || 'CLIENTE PARTICULAR').toUpperCase();
+  const formatCur = (n) => String(Number(n || 0).toFixed(2)).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ' €';
+
+  const lines = [
+    `🏠 *${onlyMissing ? 'LO QUE FALTA EN LA OBRA' : 'MODO OBRA'} — ${clientHeader}*`,
+    '━━━━━━━━━━━━━━━━━━━━━━━━━',
+    `💰 *Presupuesto:* ${formatCur(workMem.totalAmount)}`,
+    `💵 *Pagado:* ${formatCur(workMem.totalPaid)}`,
+    `⏳ *Pendiente:* ${formatCur(workMem.remainingBalance)}`
+  ];
+
+  if (!onlyMissing && (workMem.startDate || workMem.estimatedEndDate)) {
+    lines.push('');
+    if (workMem.startDate) lines.push(`📅 *Inicio:* ${workMem.startDate}`);
+    if (workMem.estimatedEndDate) lines.push(`🏁 *Final estimado:* ${workMem.estimatedEndDate}`);
+  }
+
+  lines.push('');
+  lines.push('🛒 *Materiales:*');
+  const matBought = workMem.materials?.bought || [];
+  const matPending = workMem.materials?.pending || [];
+
+  if (!onlyMissing && matBought.length > 0) {
+    matBought.forEach(m => {
+      const q = m.qty && m.unit ? `${m.qty} ${m.unit} ` : '';
+      lines.push(`  ✓ ${q}${m.description}`);
+    });
+  }
+
+  if (matPending.length > 0) {
+    matPending.forEach(m => {
+      const q = m.qty && m.unit ? `${m.qty} ${m.unit} ` : '';
+      lines.push(`  ❌ ${q}${m.description}`);
+    });
+  } else if (onlyMissing) {
+    lines.push('  ✓ _Todos los materiales comprados_');
+  } else if (matBought.length === 0 && matPending.length === 0) {
+    lines.push('  _Sin materiales registrados_');
+  }
+
+  lines.push('');
+  lines.push('🔨 *Tareas:*');
+  const tasksDone = workMem.tasks?.done || [];
+  const tasksPending = workMem.tasks?.pending || [];
+
+  if (!onlyMissing && tasksDone.length > 0) {
+    tasksDone.forEach(t => {
+      lines.push(`  ✓ ${t.description}`);
+    });
+  }
+
+  if (tasksPending.length > 0) {
+    tasksPending.forEach(t => {
+      lines.push(`  ⏳ ${t.description}`);
+    });
+  } else if (onlyMissing) {
+    lines.push('  ✓ _Todas las tareas finalizadas_');
+  } else if (tasksDone.length === 0 && tasksPending.length === 0) {
+    lines.push('  _Sin tareas registradas_');
+  }
+
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+  if (onlyMissing) {
+    lines.push(`💡 _Faltan ${matPending.length} material(es) y ${tasksPending.length} tarea(s) por finalizar._`);
+  } else {
+    lines.push('💡 _Puedes marcar tareas diciendo: "ya terminamos la fontanería de ' + (workMem.clientName || 'este cliente') + '"._');
+  }
+
+  return lines.join('\n');
+}
+
 async function startWhatsAppGateway() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
   const { version } = await fetchLatestBaileysVersion();
@@ -615,6 +700,7 @@ async function startWhatsAppGateway() {
         budgets: new Map(),
         invoices: new Map(),
         pendingAction: null,
+        pendingDisambiguation: null,
         lastBriefingDate: null,
         lastEveningReminderDate: null
       });
@@ -1432,12 +1518,97 @@ async function startWhatsAppGateway() {
     return lines.join('\n');
   }
 
-  async function handleAddShoppingItems(sock, remoteJid, session, items, clientName = null) {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // DESAMBIGUACIÓN DE HOMÓNIMOS Y DISTINTIVOS DE CLIENTE
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  async function checkDisambiguation(sock, remoteJid, session, clientQuery, actionType, originalPayload = {}) {
+    if (!clientQuery) return false;
+    const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+    const candidates = findClientsByName(cleanPhone, clientQuery);
+
+    if (candidates && candidates.length > 1) {
+      session.pendingDisambiguation = {
+        actionType,
+        clientQuery,
+        candidates,
+        originalPayload
+      };
+
+      const text = formatDisambiguationPrompt(clientQuery, candidates);
+      const sent = await sock.sendMessage(remoteJid, { text });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+      return true;
+    }
+    return false;
+  }
+
+  async function handleRenameClient(sock, remoteJid, session, targetQuery, newName) {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const candidates = findClientsByName(cleanPhone, targetQuery);
+
+      if (candidates.length > 1) {
+        session.pendingDisambiguation = {
+          actionType: 'rename_client',
+          clientQuery: targetQuery,
+          candidates,
+          originalPayload: { newName }
+        };
+        const text = formatDisambiguationPrompt(targetQuery, candidates) + `\n\n👉 Elige el número de obra que deseas renombrar a *"${newName}"*.`;
+        const sent = await sock.sendMessage(remoteJid, { text });
+        if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+        return;
+      }
+
+      const renamed = renameClientBudget(cleanPhone, targetQuery, newName);
+      if (!renamed) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: `ℹ️ No se ha encontrado ningún cliente o presupuesto que coincida con *"${targetQuery}"* para renombrar.`
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+        return;
+      }
+
+      for (const b of session.budgets.values()) {
+        if (b.id === renamed.budgetId && b.client) {
+          b.client.name = renamed.newName;
+        }
+      }
+
+      const lines = [
+        '🏷️ *¡Distintivo / Nombre de cliente actualizado!* ✅',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `👤 *Nombre anterior:* ${renamed.oldName}`,
+        `✨ *Nuevo nombre:* *${renamed.newName}*`,
+        `📍 *Ubicación:* ${renamed.clientAddress}`,
+        `📁 *Presupuesto:* ${renamed.budgetId}`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        '💡 _A partir de ahora puedes referirte a esta obra como "' + renamed.newName + '" para evitar confusiones con otros clientes homónimos._'
+      ];
+
+      const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    } catch (err) {
+      console.error('❌ Error renombrando cliente:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error renombrando cliente:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
+  async function handleAddShoppingItems(sock, remoteJid, session, items, clientName = null, explicitBudgetId = null) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
       const activeBudget = session.activeBudgetId ? session.budgets.get(session.activeBudgetId) : null;
       const effectiveClient = clientName || (activeBudget?.client?.name !== 'Cliente Particular' ? activeBudget?.client?.name : null);
-      const budgetId = activeBudget?.id || null;
+      const budgetId = explicitBudgetId || activeBudget?.id || null;
+
+      if (effectiveClient && !explicitBudgetId) {
+        const isDis = await checkDisambiguation(sock, remoteJid, session, effectiveClient, 'add_shopping_items', { items });
+        if (isDis) return;
+      }
 
       const added = addShoppingItems(cleanPhone, items, { clientName: effectiveClient, budgetId });
       if (added.length === 0) {
@@ -1472,9 +1643,15 @@ async function startWhatsAppGateway() {
     }
   }
 
-  async function handleListShoppingItems(sock, remoteJid, session, clientQuery = null) {
+  async function handleListShoppingItems(sock, remoteJid, session, clientQuery = null, explicitBudgetId = null) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+
+      if (clientQuery && !explicitBudgetId) {
+        const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'list_shopping_items', {});
+        if (isDis) return;
+      }
+
       const items = listShoppingItems(cleanPhone, 'all', clientQuery);
       const text = formatShoppingListForWhatsApp(items, clientQuery);
       const sent = await sock.sendMessage(remoteJid, { text });
@@ -1488,9 +1665,15 @@ async function startWhatsAppGateway() {
     }
   }
 
-  async function handleMarkShoppingItemBought(sock, remoteJid, session, query, clientQuery = null) {
+  async function handleMarkShoppingItemBought(sock, remoteJid, session, query, clientQuery = null, explicitBudgetId = null) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+
+      if (clientQuery && !explicitBudgetId) {
+        const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'mark_shopping_items', { query });
+        if (isDis) return;
+      }
+
       const updated = markShoppingItemBought(cleanPhone, query, clientQuery);
       if (updated.length === 0) {
         const sentNotFound = await sock.sendMessage(remoteJid, {
@@ -1520,6 +1703,134 @@ async function startWhatsAppGateway() {
       text: '🗑️ *¿Deseas vaciar todos los materiales de tu lista de la compra?*\n\nResponde *"Sí"* para confirmar o *"No"* para cancelarlo.'
     });
     if (sentReq?.key?.id) botSentMessageIds.add(sentReq.key.id);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // MODO OBRA: Memoria Viva y Ficha de Seguimiento por Obra
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  async function handleQueryWorkStatus(sock, remoteJid, session, clientQuery = null, onlyMissing = false) {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const activeBudget = session.activeBudgetId ? session.budgets.get(session.activeBudgetId) : null;
+      const targetQuery = clientQuery || (activeBudget?.client?.name !== 'Cliente Particular' ? activeBudget?.client?.name : null) || activeBudget?.id || null;
+
+      if (clientQuery) {
+        const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'query_work_status', { onlyMissing });
+        if (isDis) return;
+      }
+
+      const workMem = getWorkMemory(cleanPhone, targetQuery);
+      if (!workMem) {
+        const sentNotFound = await sock.sendMessage(remoteJid, {
+          text: `ℹ️ No he encontrado ninguna obra activa o presupuesto${targetQuery ? ` para *"${targetQuery}"*` : ''}.\n\nEscribe *"ver presupuestos"* para ver todas tus obras.`
+        });
+        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+        return;
+      }
+
+      const text = formatWorkMemoryForWhatsApp(workMem, onlyMissing);
+      const sent = await sock.sendMessage(remoteJid, { text });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    } catch (err) {
+      console.error('❌ Error consultando modo obra:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error consultando estado de la obra:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
+  async function handleUpdateWorkTask(sock, remoteJid, session, clientQuery = null, taskQuery = '', isDone = true) {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const activeBudget = session.activeBudgetId ? session.budgets.get(session.activeBudgetId) : null;
+      const targetQuery = clientQuery || (activeBudget?.client?.name !== 'Cliente Particular' ? activeBudget?.client?.name : null) || activeBudget?.id || null;
+
+      if (clientQuery) {
+        const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'update_work_task', { taskQuery, isDone });
+        if (isDis) return;
+      }
+
+      const res = updateWorkTaskStatus(cleanPhone, targetQuery, taskQuery, isDone);
+      if (!res) {
+        const sentNotFound = await sock.sendMessage(remoteJid, {
+          text: `ℹ️ No se pudo actualizar la tarea *"${taskQuery}"*${targetQuery ? ` para la obra de ${targetQuery}` : ''}.\nComprueba que el nombre de la obra o presupuesto sea correcto.`
+        });
+        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+        return;
+      }
+
+      // Sincronizar en memoria de sesión si coincide con activeBudget
+      if (session.activeBudgetId === res.budgetId && session.budgets.has(res.budgetId)) {
+        const b = session.budgets.get(res.budgetId);
+        if (b && b.items) {
+          for (const it of b.items) {
+            if (it.description && it.description.toLowerCase().includes(taskQuery.toLowerCase())) {
+              it.isDone = Boolean(isDone);
+              it.status = isDone ? 'DONE' : 'PENDING';
+              break;
+            }
+          }
+        }
+      }
+
+      const statusIcon = res.task.isDone ? '✓' : '⏳';
+      const statusText = res.task.isDone ? 'COMPLETADA' : 'PENDIENTE';
+      const lines = [
+        `🔨 *¡Fase de obra actualizada!* ✅`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `👤 *Obra:* ${res.clientName}`,
+        `${statusIcon} *Tarea:* ${res.task.description}`,
+        `📌 *Estado:* ${statusText}`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `💡 _Escribe "modo obra ${res.clientName}" para ver la ficha completa._`
+      ];
+
+      const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    } catch (err) {
+      console.error('❌ Error actualizando tarea de obra:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error actualizando tarea:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
+  async function handleUpdateWorkDates(sock, remoteJid, session, clientQuery = null, startDate = null, estimatedEndDate = null) {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const activeBudget = session.activeBudgetId ? session.budgets.get(session.activeBudgetId) : null;
+      const targetQuery = clientQuery || (activeBudget?.client?.name !== 'Cliente Particular' ? activeBudget?.client?.name : null) || activeBudget?.id || null;
+
+      const res = updateWorkDates(cleanPhone, targetQuery, startDate, estimatedEndDate);
+      if (!res) {
+        const sentNotFound = await sock.sendMessage(remoteJid, {
+          text: `ℹ️ No se pudo actualizar los plazos${targetQuery ? ` para la obra de ${targetQuery}` : ''}.\nComprueba que el nombre de la obra sea correcto.`
+        });
+        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+        return;
+      }
+
+      const lines = [
+        `📅 *¡Plazos de obra actualizados!* ✅`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `👤 *Obra:* ${res.clientName}`,
+        `📅 *Inicio:* ${res.startDate || 'No definido'}`,
+        `🏁 *Final estimado:* ${res.estimatedEndDate || 'No definido'}`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━'
+      ];
+
+      const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    } catch (err) {
+      console.error('❌ Error actualizando fechas de obra:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error actualizando fechas:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
   }
 
   function formatBudgetsListForWhatsApp(budgets, filter = 'all', company = null, invoices = null) {
@@ -1966,6 +2277,24 @@ async function startWhatsAppGateway() {
       return;
     }
 
+    // 17. Consultar estado o memoria de obra / Modo Obra (Nivel A: Automático)
+    if (aiResult?.action === 'query_work_status') {
+      await handleQueryWorkStatus(sock, remoteJid, session, aiResult.clientName || null, Boolean(aiResult.onlyMissing));
+      return;
+    }
+
+    // 18. Actualizar tarea o fase de obra (Nivel A: Automático)
+    if (aiResult?.action === 'update_work_task') {
+      await handleUpdateWorkTask(sock, remoteJid, session, aiResult.clientName || null, aiResult.taskQuery || '', aiResult.isDone !== false);
+      return;
+    }
+
+    // 19. Actualizar fechas/plazos de obra (Nivel A: Automático)
+    if (aiResult?.action === 'update_work_dates') {
+      await handleUpdateWorkDates(sock, remoteJid, session, aiResult.clientName || null, aiResult.startDate || null, aiResult.estimatedEndDate || null);
+      return;
+    }
+
     if (!aiResult || !aiResult.items || aiResult.items.length === 0) {
       const sentHelp = await sock.sendMessage(remoteJid, {
         text: `🤖 *PresuVoz Bot*\n\nNo he detectado partidas técnicas en el mensaje. Puedes dictarme los trabajos de obra (ej: _"tirar tabique de 4x3 metros y mover 2 enchufes por 600 euros"_).`
@@ -2023,7 +2352,17 @@ async function startWhatsAppGateway() {
     saveBudget(cleanPhone, engineResult.budget);
     console.log(`💾 Presupuesto guardado en SQLite y sesión: ${engineResult.budget.id} (Total guardados: ${session.budgets.size})`);
 
-    const replyText = formatBudgetForWhatsApp(engineResult.budget, aiResult.warnings || []);
+    // Detección preventiva de cliente homónimo / repetido al crear presupuesto nuevo
+    let homonymWarningText = '';
+    if (!isUpdate && aiResult.clientName && aiResult.clientName !== 'Cliente Particular') {
+      const existingSameName = findClientsByName(cleanPhone, aiResult.clientName);
+      const otherBudgets = existingSameName.filter(b => b.id !== engineResult.budget.id);
+      if (otherBudgets.length > 0) {
+        homonymWarningText = '\n\n' + formatDuplicateClientWarning(aiResult.clientName, aiResult.clientAddress, otherBudgets);
+      }
+    }
+
+    const replyText = formatBudgetForWhatsApp(engineResult.budget, aiResult.warnings || []) + homonymWarningText;
     const sent = await sock.sendMessage(remoteJid, { text: replyText });
     if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
     console.log('✅ Resumen de texto enviado por WhatsApp.');
@@ -2258,6 +2597,97 @@ async function startWhatsAppGateway() {
             });
             if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
           }
+          continue;
+        }
+      }
+
+      // 0.1 Interceptor de Desambiguación de Clientes Homónimos (Cero Suposiciones)
+      if (isText && session.pendingDisambiguation) {
+        const dis = session.pendingDisambiguation;
+        const norm = rawUserText.trim().toLowerCase();
+
+        // 1. Si el usuario cancela
+        if (norm === 'cancelar' || norm === 'ninguno' || norm === 'ninguna' || norm === 'no' || norm === 'descartar') {
+          session.pendingDisambiguation = null;
+          const sentCancel = await sock.sendMessage(remoteJid, {
+            text: '👍 *Operación cancelada.* No se ha modificado ninguna obra.'
+          });
+          if (sentCancel?.key?.id) botSentMessageIds.add(sentCancel.key.id);
+          continue;
+        }
+
+        // 2. Si pide renombrar un candidato en particular
+        // ej: "renombrar el 1 a Alberto Martín Centro", "el 1 y llámalo Alberto Centro", "el 2 ponle Alberto Constitución"
+        let renameTargetCandidate = null;
+        let renameNewName = null;
+        const renameInDisMatch = rawUserText.match(/(?:renombrar\s+(?:el\s+)?([1-9]\d*)|(?:el\s+)?([1-9]\d*)\s+(?:y\s+)?(?:ll[aá]malo|ponle))\s+(?:a|por|como)?\s*(.+)/i);
+        if (renameInDisMatch) {
+          const num = parseInt(renameInDisMatch[1] || renameInDisMatch[2], 10);
+          if (num >= 1 && num <= dis.candidates.length) {
+            renameTargetCandidate = dis.candidates[num - 1];
+            renameNewName = renameInDisMatch[3].trim();
+          }
+        }
+
+        // 3. Identificar candidato por número (1, 2, 3...) o por texto (dirección o ID)
+        let selectedCandidate = null;
+        const numMatch = rawUserText.match(/^([1-9]\d*)$/);
+        if (numMatch) {
+          const idx = parseInt(numMatch[1], 10) - 1;
+          if (idx >= 0 && idx < dis.candidates.length) {
+            selectedCandidate = dis.candidates[idx];
+          }
+        } else if (renameTargetCandidate) {
+          selectedCandidate = renameTargetCandidate;
+        } else {
+          // Búsqueda por coincidencia en ID o dirección
+          selectedCandidate = dis.candidates.find(c =>
+            norm.includes(c.id.toLowerCase()) ||
+            (c.clientAddress && norm.includes(c.clientAddress.toLowerCase())) ||
+            (c.clientAddress && c.clientAddress.toLowerCase().includes(norm))
+          );
+        }
+
+        if (selectedCandidate) {
+          session.pendingDisambiguation = null;
+
+          // Si el usuario pidió renombrar al elegir el candidato
+          if (renameNewName) {
+            renameClientBudget(session.phone || remoteJid, selectedCandidate.id, renameNewName);
+            selectedCandidate.clientName = renameNewName;
+            const sentRen = await sock.sendMessage(remoteJid, {
+              text: `🏷️ *Cliente renombrado a "${renameNewName}"* para diferenciarlo.`
+            });
+            if (sentRen?.key?.id) botSentMessageIds.add(sentRen.key.id);
+          }
+
+          // Ejecutar la acción original con el presupuesto específico del cliente seleccionado
+          if (dis.actionType === 'query_work_status') {
+            await handleQueryWorkStatus(sock, remoteJid, session, selectedCandidate.id, dis.originalPayload?.onlyMissing);
+            continue;
+          } else if (dis.actionType === 'update_work_task') {
+            await handleUpdateWorkTask(sock, remoteJid, session, selectedCandidate.id, dis.originalPayload?.taskQuery, dis.originalPayload?.isDone);
+            continue;
+          } else if (dis.actionType === 'add_shopping_items') {
+            await handleAddShoppingItems(sock, remoteJid, session, dis.originalPayload?.items || [], selectedCandidate.clientName, selectedCandidate.id);
+            continue;
+          } else if (dis.actionType === 'list_shopping_items') {
+            await handleListShoppingItems(sock, remoteJid, session, selectedCandidate.clientName, selectedCandidate.id);
+            continue;
+          } else if (dis.actionType === 'mark_shopping_items') {
+            await handleMarkShoppingItemBought(sock, remoteJid, session, dis.originalPayload?.query, selectedCandidate.clientName, selectedCandidate.id);
+            continue;
+          } else if (dis.actionType === 'rename_client') {
+            if (dis.originalPayload?.newName) {
+              await handleRenameClient(sock, remoteJid, session, selectedCandidate.id, dis.originalPayload.newName);
+            }
+            continue;
+          }
+        } else {
+          const sentClarify = await sock.sendMessage(remoteJid, {
+            text: `⚠️ No he podido identificar tu elección. Por favor, responde con el número (*1* o *${dis.candidates.length}*) o escribe *"cancelar"*.`
+          });
+          if (sentClarify?.key?.id) botSentMessageIds.add(sentClarify.key.id);
           continue;
         }
       }
@@ -2697,6 +3127,49 @@ async function startWhatsAppGateway() {
         continue;
       }
 
+      // Comando directo para consultar qué falta en una obra (Modo Obra - Faltantes)
+      const missingWorkMatch = rawUserText.match(/^(?:qu[eé]\s+(?:nos\s+)?falta\s+(?:en\s+la\s+obra\s+de|en|para)\s+|qu[eé]\s+falta\s+(?:de|en|para)\s+)(.+)$/i);
+      if (missingWorkMatch) {
+        const clientFilter = (missingWorkMatch[1] || '').replace(/[?¿!¡]/g, '').trim();
+        await handleQueryWorkStatus(sock, remoteJid, session, clientFilter, true);
+        continue;
+      }
+
+      // Comando directo para consultar estado o modo obra completo
+      const modeWorkMatch = rawUserText.match(/^(?:modo\s+obra|estado\s+(?:de\s+la\s+)?obra|ficha\s+(?:de\s+la\s+)?obra|memoria\s+obra|c[oó]mo\s+va\s+la\s+obra\s+de)\s+(.+)$/i);
+      if (modeWorkMatch) {
+        const clientFilter = (modeWorkMatch[1] || '').replace(/[?¿!¡]/g, '').trim();
+        await handleQueryWorkStatus(sock, remoteJid, session, clientFilter, false);
+        continue;
+      }
+
+      // Comando directo para marcar tarea/partida como realizada o completada
+      const taskDoneMatch = rawUserText.match(/^(?:ya\s+(?:hemos\s+)?terminad[oa]|terminad[oa]|hech[oa]|lista)\s+(?:la\s+|el\s+)?(demolici[oó]n|fontaner[ií]a|alicatado|pintura|sanitarios?|electricidad|carpinter[ií]a|solado|tabiquer[ií]a|[a-záéíóúñ\s]+?)\s+(?:de|en\s+la\s+obra\s+de)\s+(.+)$/i);
+      if (taskDoneMatch) {
+        const taskQuery = (taskDoneMatch[1] || '').trim();
+        const clientFilter = (taskDoneMatch[2] || '').trim();
+        await handleUpdateWorkTask(sock, remoteJid, session, clientFilter, taskQuery, true);
+        continue;
+      }
+
+      const markTaskExplicitMatch = rawUserText.match(/^(?:marca[r]?|poner)\s+(?:la\s+|el\s+)?(.+?)\s+(?:de|para)\s+(.+?)\s+como\s+(?:hech[oa]|list[oa]|terminad[oa])$/i);
+      if (markTaskExplicitMatch) {
+        const taskQuery = (markTaskExplicitMatch[1] || '').trim();
+        const clientFilter = (markTaskExplicitMatch[2] || '').trim();
+        await handleUpdateWorkTask(sock, remoteJid, session, clientFilter, taskQuery, true);
+        continue;
+      }
+
+      // Comando directo para renombrar cliente o añadir distintivo:
+      // ej: "renombrar cliente Alberto Martín a Alberto Martín (Centro)", "cambiar nombre de cliente Alberto a Alberto Centro"
+      const renameCmdMatch = rawUserText.match(/^(?:renombrar\s+cliente|ponerle\s+distintivo\s+a|cambiar\s+nombre\s+(?:de\s+)?cliente)\s+(.+?)\s+(?:a|por|como)\s+(.+)$/i);
+      if (renameCmdMatch) {
+        const targetQuery = renameCmdMatch[1].trim();
+        const newName = renameCmdMatch[2].trim();
+        await handleRenameClient(sock, remoteJid, session, targetQuery, newName);
+        continue;
+      }
+
       // Preparar payload de IA (audio o texto)
       let audioBuffer = null;
       if (isAudio) {
@@ -2795,6 +3268,15 @@ async function startWhatsAppGateway() {
   });
 }
 
-startWhatsAppGateway().catch((err) => {
-  console.error('Error fatal al iniciar WhatsApp Gateway:', err);
-});
+import { fileURLToPath } from 'node:url';
+
+const isDirectRun = process.argv[1] && (
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url) ||
+  process.argv[1].endsWith('whatsapp_gateway.js')
+);
+
+if (isDirectRun) {
+  startWhatsAppGateway().catch((err) => {
+    console.error('Error fatal al iniciar WhatsApp Gateway:', err);
+  });
+}
