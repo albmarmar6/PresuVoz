@@ -606,37 +606,57 @@ import {
 const shoppingPhone = '34699001122';
 cleanDb.prepare('DELETE FROM shopping_items WHERE company_phone = ?').run(shoppingPhone);
 
-// 1. Inserción de materiales dictados
-const rawDictatedItems = [
-  { description: 'azulejo gris', qty: 14, unit: 'm²' },
-  { description: 'cemento cola flexible', qty: 2, unit: 'sacos' },
-  { description: 'Junta antracita', qty: 1, unit: 'ud' }
+// 1. Inserción de materiales dictados para múltiples obras/clientes
+const carlosItems = [
+  { description: 'azulejo gris', qty: 14, unit: 'm²', clientName: 'Carlos' },
+  { description: 'cemento cola flexible', qty: 2, unit: 'sacos', clientName: 'Carlos' },
+  { description: 'Junta antracita', qty: 1, unit: 'ud', clientName: 'Carlos' }
 ];
-const insertedItems = addShoppingItems(shoppingPhone, rawDictatedItems);
-assert(insertedItems.length === 3, "Inserta los 3 materiales en la lista de compras");
-assert(insertedItems[0].qty === 14 && insertedItems[0].unit === 'm²', "Registra correctamente 14 m² de azulejo");
-assert(insertedItems[1].qty === 2 && insertedItems[1].unit === 'sacos', "Registra correctamente 2 sacos de cemento cola");
-assert(insertedItems[2].description === 'Junta antracita', "Registra descripción exacta del tercer material");
+const albertoItems = [
+  { description: 'plato de ducha resina 120x70', qty: 1, unit: 'ud', clientName: 'Alberto' },
+  { description: 'mampara vidrio templado', qty: 1, unit: 'ud', clientName: 'Alberto' }
+];
+const generalItems = [
+  { description: 'cable 2.5 mm²', qty: 3, unit: 'rollos' }
+];
 
-// 2. Consulta de lista de compras en base de datos
-const pendingShoppingList = listShoppingItems(shoppingPhone, 'pending');
-assert(pendingShoppingList.length === 3, "Consulta los 3 materiales pendientes en SQLite");
-assert(pendingShoppingList[0].status === 'PENDING', "El estado inicial es 'PENDING'");
+const insertedCarlos = addShoppingItems(shoppingPhone, carlosItems);
+const insertedAlberto = addShoppingItems(shoppingPhone, albertoItems);
+const insertedGeneral = addShoppingItems(shoppingPhone, generalItems);
+
+assert(insertedCarlos.length === 3, "Inserta los 3 materiales para la obra de Carlos");
+assert(insertedAlberto.length === 2, "Inserta los 2 materiales para la obra de Alberto");
+assert(insertedGeneral.length === 1, "Inserta 1 material general de taller");
+
+assert(insertedCarlos[0].clientName === 'Carlos', "Asocia el cliente 'Carlos' a los azulejos");
+assert(insertedAlberto[0].clientName === 'Alberto', "Asocia el cliente 'Alberto' al plato de ducha");
+assert(insertedGeneral[0].clientName === null, "Material general queda sin cliente asignado");
+
+// 2. Consulta de lista de compras en base de datos con y sin filtro de cliente
+const allPending = listShoppingItems(shoppingPhone, 'pending');
+assert(allPending.length === 6, "Consulta un total de 6 materiales pendientes en SQLite");
+
+const carlosPending = listShoppingItems(shoppingPhone, 'pending', 'Carlos');
+assert(carlosPending.length === 3, "Filtra exactamente los 3 materiales de la obra de Carlos");
+
+const albertoPending = listShoppingItems(shoppingPhone, 'pending', 'Alberto');
+assert(albertoPending.length === 2, "Filtra exactamente los 2 materiales de la obra de Alberto");
 
 // 3. Marcar material como comprado (tachar)
-const boughtResult = markShoppingItemBought(shoppingPhone, 'cemento cola');
-assert(boughtResult.length === 1, "Encuentra y tacha el material por coincidencia de texto");
+const boughtResult = markShoppingItemBought(shoppingPhone, 'cemento cola', 'Carlos');
+assert(boughtResult.length === 1, "Encuentra y tacha el material por coincidencia de texto y cliente");
 assert(boughtResult[0].status === 'BOUGHT', "El estado pasa a 'BOUGHT'");
 assert(Boolean(boughtResult[0].boughtAt), "Registra timestamp de compra");
 
-const remainingPending = listShoppingItems(shoppingPhone, 'pending');
-assert(remainingPending.length === 2, "Quedan 2 materiales pendientes tras tachar el cemento cola");
+const remainingCarlos = listShoppingItems(shoppingPhone, 'pending', 'Carlos');
+assert(remainingCarlos.length === 2, "Quedan 2 materiales pendientes para Carlos tras comprar el cemento cola");
 
-// 4. Integración con el Briefing Matinal del Secretario Digital
+// 4. Integración con el Briefing Matinal del Secretario Digital (con etiquetas de cliente)
 const morningBriefing = generateDailyBriefing(shoppingPhone);
-assert(morningBriefing.includes("Materiales pendientes de compra (2):"), "El briefing incluye el bloque de materiales pendientes con su contador");
+assert(morningBriefing.includes("Materiales pendientes de compra (5):"), "El briefing incluye el total de materiales de todas las obras (5)");
 assert(morningBriefing.includes("azulejo gris"), "El briefing muestra el azulejo pendiente");
-assert(morningBriefing.includes("Junta antracita"), "El briefing muestra la junta pendiente");
+assert(morningBriefing.includes("(Obra: Carlos)"), "El briefing etiqueta la obra del cliente Carlos");
+assert(morningBriefing.includes("(Obra: Alberto)"), "El briefing etiqueta la obra del cliente Alberto");
 assert(!morningBriefing.includes("cemento cola"), "El briefing NO muestra materiales ya comprados en los pendientes");
 
 // 5. Matriz de permisos para gestión de materiales
@@ -647,7 +667,7 @@ assert(classifyActionPermission('clear_shopping_list') === 'B', "Clasifica 'clea
 
 // 6. Vaciado / Limpieza de la lista de compras
 const clearResult = clearShoppingList(shoppingPhone);
-assert(clearResult.deletedCount >= 3, "Elimina todos los materiales al vaciar la lista");
+assert(clearResult.deletedCount >= 6, "Elimina todos los materiales al vaciar la lista");
 const emptyList = listShoppingItems(shoppingPhone, 'all');
 assert(emptyList.length === 0, "La lista queda completamente vacía tras limpiarla");
 

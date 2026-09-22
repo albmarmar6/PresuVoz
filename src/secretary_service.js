@@ -210,7 +210,8 @@ export function generateDailyBriefing(phone) {
     lines.push(`🛒 *Materiales pendientes de compra (${pendingShopping.length}):*`);
     pendingShopping.slice(0, 5).forEach(item => {
       const qtyUnit = item.qty && item.unit ? `${item.qty} ${item.unit} ` : '';
-      lines.push(`   • ${qtyUnit}${item.description}`);
+      const clientTag = item.clientName ? ` _(Obra: ${item.clientName})_` : '';
+      lines.push(`   • ${qtyUnit}${item.description}${clientTag}`);
     });
     if (pendingShopping.length > 5) {
       lines.push(`   • _...y ${pendingShopping.length - 5} materiales más (di "lista de la compra")_`);

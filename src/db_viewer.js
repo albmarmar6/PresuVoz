@@ -21,7 +21,7 @@ function getDbData() {
   const appointments = db.prepare('SELECT id, company_phone, client_name, client_phone, client_address, date, time, notes, status, created_at, updated_at FROM appointments ORDER BY date DESC, time DESC').all();
   let shoppingItems = [];
   try {
-    shoppingItems = db.prepare('SELECT id, company_phone, description, qty, unit, status, notes, created_at, bought_at FROM shopping_items ORDER BY status ASC, created_at DESC').all();
+    shoppingItems = db.prepare('SELECT id, company_phone, client_name, budget_id, description, qty, unit, status, notes, created_at, bought_at FROM shopping_items ORDER BY status ASC, created_at DESC').all();
   } catch (e) {
     // Tabla shopping_items puede no existir si no se inicializó aún
   }
@@ -299,7 +299,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
         let html = '<div class="overflow-x-auto rounded-xl border border-slate-800"><table class="w-full text-left text-xs">';
         html += '<thead class="bg-slate-950 text-slate-400 font-mono uppercase text-[11px] border-b border-slate-800"><tr>';
-        html += '<th class="p-3.5">ID Material</th><th class="p-3.5">Material / Descripción</th><th class="p-3.5">Cantidad y Unidad</th><th class="p-3.5">Teléfono Profesional</th><th class="p-3.5">Estado</th><th class="p-3.5">Fecha</th>';
+        html += '<th class="p-3.5">ID Material</th><th class="p-3.5">Cliente / Obra</th><th class="p-3.5">Material / Descripción</th><th class="p-3.5">Cantidad y Unidad</th><th class="p-3.5">Teléfono</th><th class="p-3.5">Estado</th><th class="p-3.5">Fecha</th>';
         html += '</tr></thead><tbody class="divide-y divide-slate-800 bg-slate-900/60">';
 
         items.forEach(m => {
@@ -309,9 +309,13 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             : '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">⏳ PENDIENTE</span>';
           
           const descClass = isBought ? 'line-through text-slate-500' : 'font-semibold text-white';
+          const clientDisplay = m.client_name 
+            ? '<span class="px-2 py-0.5 rounded text-xs bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 font-semibold">🏠 ' + m.client_name + '</span>'
+            : '<span class="text-slate-500 italic">General / Taller</span>';
 
           html += '<tr class="hover:bg-slate-800/50 transition-colors">';
           html += '<td class="p-3.5 font-bold font-mono text-cyan-400">' + m.id + '</td>';
+          html += '<td class="p-3.5">' + clientDisplay + '</td>';
           html += '<td class="p-3.5 ' + descClass + '">' + m.description + (m.notes ? '<div class="text-[11px] text-slate-400 font-normal">' + m.notes + '</div>' : '') + '</td>';
           html += '<td class="p-3.5 font-mono text-emerald-400 font-bold">' + (m.qty || 1) + ' ' + (m.unit || 'ud') + '</td>';
           html += '<td class="p-3.5 font-mono text-slate-400">' + (m.company_phone || '-') + '</td>';

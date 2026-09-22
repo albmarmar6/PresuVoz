@@ -47,6 +47,16 @@ try {
 } catch (e) {
   // Ignorar si la columna ya existe
 }
+try {
+  db.exec('ALTER TABLE shopping_items ADD COLUMN client_name TEXT;');
+} catch (e) {
+  // Ignorar si la columna ya existe
+}
+try {
+  db.exec('ALTER TABLE shopping_items ADD COLUMN budget_id TEXT;');
+} catch (e) {
+  // Ignorar si la columna ya existe
+}
 
 db.exec(`
 
@@ -102,6 +112,8 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS shopping_items (
     id TEXT PRIMARY KEY,
     company_phone TEXT,
+    client_name TEXT,
+    budget_id TEXT,
     description TEXT,
     qty REAL,
     unit TEXT,
@@ -873,7 +885,7 @@ export function getBudgetsPendingFollowUp(phone) {
 
 // ─── Métodos de Lista de Compras y Materiales ────────────────────────────────
 
-export function addShoppingItems(phone, items) {
+export function addShoppingItems(phone, items, defaultClientContext = {}) {
   const cleanPhone = String(phone || '').replace(/\D/g, '');
   if (!items) return [];
   const itemsList = Array.isArray(items) ? items : [items];
@@ -881,8 +893,8 @@ export function addShoppingItems(phone, items) {
   const inserted = [];
 
   const stmt = db.prepare(`
-    INSERT INTO shopping_items (id, company_phone, description, qty, unit, status, notes, created_at)
-    VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)
+    INSERT INTO shopping_items (id, company_phone, client_name, budget_id, description, qty, unit, status, notes, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
   `);
 
   for (const item of itemsList) {
@@ -891,6 +903,8 @@ export function addShoppingItems(phone, items) {
     let qty = 1;
     let unit = 'ud';
     let notes = null;
+    let clientName = defaultClientContext.clientName || null;
+    let budgetId = defaultClientContext.budgetId || null;
 
     if (typeof item === 'string') {
       description = item.trim();
@@ -899,15 +913,19 @@ export function addShoppingItems(phone, items) {
       qty = item.qty !== undefined && item.qty !== null ? Number(item.qty) : 1;
       unit = item.unit || 'ud';
       notes = item.notes || null;
+      if (item.clientName) clientName = item.clientName.trim();
+      if (item.budgetId) budgetId = item.budgetId.trim();
     }
 
     if (!description) continue;
 
     const id = `MAT-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-    stmt.run(id, cleanPhone, description, qty, unit, notes, now);
+    stmt.run(id, cleanPhone, clientName, budgetId, description, qty, unit, notes, now);
     inserted.push({
       id,
       companyPhone: cleanPhone,
+      clientName,
+      budgetId,
       description,
       qty,
       unit,
@@ -920,20 +938,30 @@ export function addShoppingItems(phone, items) {
   return inserted;
 }
 
-export function listShoppingItems(phone, filter = 'pending') {
+export function listShoppingItems(phone, filter = 'pending', clientQuery = null) {
   const cleanPhone = String(phone || '').replace(/\D/g, '');
   let query = 'SELECT * FROM shopping_items WHERE company_phone = ?';
+  const params = [cleanPhone];
+
   if (filter === 'pending') {
     query += " AND status = 'PENDING'";
   } else if (filter === 'bought') {
     query += " AND status = 'BOUGHT'";
   }
-  query += " ORDER BY status ASC, created_at DESC";
 
-  const rows = db.prepare(query).all(cleanPhone);
+  if (clientQuery && typeof clientQuery === 'string' && clientQuery.trim() !== '') {
+    query += " AND LOWER(client_name) LIKE ?";
+    params.push(`%${clientQuery.trim().toLowerCase()}%`);
+  }
+
+  query += " ORDER BY status ASC, client_name ASC, created_at DESC";
+
+  const rows = db.prepare(query).all(...params);
   return rows.map(r => ({
     id: r.id,
     companyPhone: r.company_phone,
+    clientName: r.client_name,
+    budgetId: r.budget_id,
     description: r.description,
     qty: r.qty,
     unit: r.unit,
@@ -944,19 +972,25 @@ export function listShoppingItems(phone, filter = 'pending') {
   }));
 }
 
-export function markShoppingItemBought(phone, queryOrId) {
+export function markShoppingItemBought(phone, queryOrId, clientQuery = null) {
   const cleanPhone = String(phone || '').replace(/\D/g, '');
   if (!queryOrId) return [];
   const cleanQuery = String(queryOrId).trim().toLowerCase();
   const now = new Date().toISOString();
 
-  // Buscar coincidencia por ID exacto o por texto en descripción
-  const selectStmt = db.prepare(`
+  let sql = `
     SELECT * FROM shopping_items
     WHERE company_phone = ? AND status = 'PENDING'
       AND (id = ? OR LOWER(description) LIKE ?)
-  `);
-  const rows = selectStmt.all(cleanPhone, queryOrId, `%${cleanQuery}%`);
+  `;
+  const params = [cleanPhone, queryOrId, `%${cleanQuery}%`];
+
+  if (clientQuery && typeof clientQuery === 'string' && clientQuery.trim() !== '') {
+    sql += " AND LOWER(client_name) LIKE ?";
+    params.push(`%${clientQuery.trim().toLowerCase()}%`);
+  }
+
+  const rows = db.prepare(sql).all(...params);
   if (rows.length === 0) return [];
 
   const updateStmt = db.prepare(`
@@ -971,6 +1005,8 @@ export function markShoppingItemBought(phone, queryOrId) {
     updated.push({
       id: r.id,
       companyPhone: r.company_phone,
+      clientName: r.client_name,
+      budgetId: r.budget_id,
       description: r.description,
       qty: r.qty,
       unit: r.unit,

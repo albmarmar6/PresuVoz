@@ -1372,56 +1372,85 @@ async function startWhatsAppGateway() {
     }
   }
 
-  function formatShoppingListForWhatsApp(items) {
+  function formatShoppingListForWhatsApp(items, clientFilter = null) {
     if (!items || items.length === 0) {
-      return '🛒 *Tu lista de la compra está vacía.*\n\nNo tienes materiales pendientes por comprar.\n\n💡 Para añadir materiales, di: _"comprar 2 sacos de cemento cola y 14 m² de azulejo"_ o mándame una nota de voz.';
+      if (clientFilter) {
+        return `🛒 *No hay materiales pendientes para la obra de ${clientFilter}.*\n\n💡 Para añadir materiales para este cliente, di: _"comprar 14 m² de azulejo para ${clientFilter}"_.`;
+      }
+      return '🛒 *Tu lista de la compra está vacía.*\n\nNo tienes materiales pendientes por comprar.\n\n💡 Para añadir materiales, di: _"para la obra de Carlos comprar 2 sacos de cemento cola y 14 m² de azulejo"_ o mándame una nota de voz.';
     }
+
     const pending = items.filter(i => i.status === 'PENDING');
     const bought = items.filter(i => i.status === 'BOUGHT');
 
+    const title = clientFilter
+      ? `🛒 *LISTA DE MATERIALES — OBRA DE ${clientFilter.toUpperCase()}*`
+      : '🛒 *LISTA GENERAL DE COMPRAS Y MATERIALES*';
+
     const lines = [
-      '🛒 *LISTA DE COMPRAS Y MATERIALES*',
+      title,
       '━━━━━━━━━━━━━━━━━━━━━━━━━'
     ];
 
     if (pending.length > 0) {
-      lines.push(`📋 *Pendientes de comprar (${pending.length}):*`);
-      pending.forEach((it, idx) => {
-        const qtyUnit = it.qty && it.unit ? `*${it.qty} ${it.unit}* ` : '';
-        lines.push(`${idx + 1}️⃣ ${qtyUnit}${it.description}`);
+      // Agrupar pendientes por obra/cliente
+      const groups = new Map();
+      pending.forEach(it => {
+        const groupKey = it.clientName ? `🏠 *Obra de ${it.clientName}:*` : '📦 *Materiales Generales / Almacén:*';
+        if (!groups.has(groupKey)) groups.set(groupKey, []);
+        groups.get(groupKey).push(it);
       });
+
+      let globalIdx = 1;
+      for (const [groupHeader, groupItems] of groups.entries()) {
+        lines.push(`\n${groupHeader}`);
+        groupItems.forEach(it => {
+          const qtyUnit = it.qty && it.unit ? `*${it.qty} ${it.unit}* ` : '';
+          lines.push(`  ${globalIdx}️⃣ ${qtyUnit}${it.description}`);
+          globalIdx++;
+        });
+      }
     } else {
-      lines.push('✅ _¡No tienes ningún material pendiente de compra!_');
+      lines.push('\n✅ _¡No tienes ningún material pendiente de compra!_');
     }
 
     if (bought.length > 0) {
-      lines.push('');
+      lines.push('\n━━━━━━━━━━━━━━━━━━━━━━━━━');
       lines.push(`✔️ *Comprados / Tachados recientemente (${bought.length}):*`);
       bought.slice(0, 5).forEach(it => {
-        lines.push(`   ~${it.description}~`);
+        const clientTag = it.clientName ? ` _(${it.clientName})_` : '';
+        lines.push(`   ~${it.description}~${clientTag}`);
       });
     }
 
-    lines.push('');
-    lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
-    lines.push('💡 _Para tachar: "ya compré el cemento" o "tachar azulejo". Para vaciar: "vaciar lista de compras"._');
+    lines.push('\n━━━━━━━━━━━━━━━━━━━━━━━━━');
+    if (!clientFilter) {
+      lines.push('💡 _Puedes consultar una obra concreta diciendo: "¿qué tengo que comprar para Carlos?" o tachar diciendo: "ya compré el cemento"._');
+    } else {
+      lines.push('💡 _Para tachar: "ya compré el cemento de ' + clientFilter + '" o "tachar azulejo"._');
+    }
     return lines.join('\n');
   }
 
-  async function handleAddShoppingItems(sock, remoteJid, session, items) {
+  async function handleAddShoppingItems(sock, remoteJid, session, items, clientName = null) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const added = addShoppingItems(cleanPhone, items);
+      const activeBudget = session.activeBudgetId ? session.budgets.get(session.activeBudgetId) : null;
+      const effectiveClient = clientName || (activeBudget?.client?.name !== 'Cliente Particular' ? activeBudget?.client?.name : null);
+      const budgetId = activeBudget?.id || null;
+
+      const added = addShoppingItems(cleanPhone, items, { clientName: effectiveClient, budgetId });
       if (added.length === 0) {
         const sentErr = await sock.sendMessage(remoteJid, {
-          text: '⚠️ No he podido identificar los materiales a comprar. Prueba diciendo: _"necesito comprar 14 m² azulejo gris y 2 sacos cemento cola"_.'
+          text: '⚠️ No he podido identificar los materiales a comprar. Prueba diciendo: _"para la obra de Carlos comprar 14 m² azulejo gris y 2 sacos cemento cola"_.'
         });
         if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
         return;
       }
 
+      const clientTitle = effectiveClient ? ` para la obra de *${effectiveClient}*` : '';
       const lines = [
-        `🛒 *¡${added.length === 1 ? 'Material añadido' : `${added.length} materiales añadidos`} a tu lista de compra!* ✅`,
+        `🛒 *¡${added.length === 1 ? 'Material añadido' : `${added.length} materiales añadidos`}${clientTitle}!* ✅`,
         '━━━━━━━━━━━━━━━━━━━━━━━━━'
       ];
       added.forEach(it => {
@@ -1430,7 +1459,7 @@ async function startWhatsAppGateway() {
       });
       lines.push('');
       lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
-      lines.push('💡 _Queda guardado en tu historial. Te lo recordaré en tu briefing matinal o cuando digas "lista de la compra"._');
+      lines.push('💡 _Guardado por obra. Te lo recordaré en tu briefing matinal o cuando preguntes "¿qué tengo que comprar?"._');
 
       const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
       if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
@@ -1443,11 +1472,11 @@ async function startWhatsAppGateway() {
     }
   }
 
-  async function handleListShoppingItems(sock, remoteJid, session) {
+  async function handleListShoppingItems(sock, remoteJid, session, clientQuery = null) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const items = listShoppingItems(cleanPhone, 'all');
-      const text = formatShoppingListForWhatsApp(items);
+      const items = listShoppingItems(cleanPhone, 'all', clientQuery);
+      const text = formatShoppingListForWhatsApp(items, clientQuery);
       const sent = await sock.sendMessage(remoteJid, { text });
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
     } catch (err) {
@@ -1459,19 +1488,19 @@ async function startWhatsAppGateway() {
     }
   }
 
-  async function handleMarkShoppingItemBought(sock, remoteJid, session, query) {
+  async function handleMarkShoppingItemBought(sock, remoteJid, session, query, clientQuery = null) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const updated = markShoppingItemBought(cleanPhone, query);
+      const updated = markShoppingItemBought(cleanPhone, query, clientQuery);
       if (updated.length === 0) {
         const sentNotFound = await sock.sendMessage(remoteJid, {
-          text: `ℹ️ No he encontrado ningún material pendiente que coincida con *"${query}"*.\n\nEscribe *"lista de la compra"* para ver tus materiales pendientes.`
+          text: `ℹ️ No he encontrado ningún material pendiente que coincida con *"${query}"*${clientQuery ? ` para la obra de ${clientQuery}` : ''}.\n\nEscribe *"lista de la compra"* para ver todos tus materiales pendientes.`
         });
         if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
         return;
       }
 
-      const names = updated.map(u => `*${u.description}*`).join(', ');
+      const names = updated.map(u => `*${u.description}*${u.clientName ? ` (Obra: ${u.clientName})` : ''}`).join(', ');
       const sentOk = await sock.sendMessage(remoteJid, {
         text: `✔️ *¡Tachado de la lista:* ${names}! ✅\n\nMarcado como comprado en tu historial.`
       });
@@ -1915,19 +1944,19 @@ async function startWhatsAppGateway() {
 
     // 13. Añadir materiales a la lista de compra (Nivel A: Automático)
     if (aiResult?.action === 'add_shopping_items') {
-      await handleAddShoppingItems(sock, remoteJid, session, aiResult.shoppingItems || []);
+      await handleAddShoppingItems(sock, remoteJid, session, aiResult.shoppingItems || [], aiResult.clientName || null);
       return;
     }
 
     // 14. Consultar lista de materiales a comprar (Nivel A: Automático)
     if (aiResult?.action === 'list_shopping_items') {
-      await handleListShoppingItems(sock, remoteJid, session);
+      await handleListShoppingItems(sock, remoteJid, session, aiResult.clientName || null);
       return;
     }
 
     // 15. Marcar materiales como comprados (Nivel A: Automático)
     if (aiResult?.action === 'mark_shopping_items') {
-      await handleMarkShoppingItemBought(sock, remoteJid, session, aiResult.shoppingQuery || '');
+      await handleMarkShoppingItemBought(sock, remoteJid, session, aiResult.shoppingQuery || '', aiResult.clientName || null);
       return;
     }
 
@@ -2639,16 +2668,26 @@ async function startWhatsAppGateway() {
         continue;
       }
 
-      // Comando directo para consultar lista de compras / materiales: ej. "lista de la compra", "materiales", "¿qué tengo que comprar?"
-      if (/^(?:lista\s+de\s+(?:la\s+)?compras?|materiales\s+pendientes|qu[eé]\s+(?:tengo\s+que|hay\s+que)\s+comprar|ver\s+compras?|mis\s+compras|materiales)$/i.test(rawUserText)) {
-        await handleListShoppingItems(sock, remoteJid, session);
+      // Comando directo para consultar lista de compras / materiales: ej. "lista de la compra", "¿qué tengo que comprar?", "¿qué tengo que comprar para Carlos?"
+      const listShoppingMatch = rawUserText.match(/^(?:lista\s+de\s+(?:la\s+)?compras?|materiales\s+pendientes|qu[eé]\s+(?:tengo\s+que|hay\s+que)\s+comprar|ver\s+compras?|mis\s+compras|materiales)(?:\s+(?:de|para|en\s+la\s+obra\s+de)\s+(.+))?$/i);
+      if (listShoppingMatch) {
+        const clientFilter = (listShoppingMatch[1] || '').trim() || null;
+        await handleListShoppingItems(sock, remoteJid, session, clientFilter);
         continue;
       }
 
-      // Comando directo para marcar material como comprado: ej. "ya compré el cemento", "comprado azulejo", "tachar cable"
+      // Comando directo para marcar material como comprado: ej. "ya compré el cemento", "comprado azulejo", "tachar cable de Carlos"
       const boughtCmdMatch = rawUserText.match(/^(?:ya\s+compr[eé]|comprad[oa]s?|tachad[oa]s?|tachar)\s+(.+)$/i);
       if (boughtCmdMatch) {
-        await handleMarkShoppingItemBought(sock, remoteJid, session, boughtCmdMatch[1].trim());
+        const fullQuery = boughtCmdMatch[1].trim();
+        let clientQuery = null;
+        let itemQuery = fullQuery;
+        const deMatch = fullQuery.match(/^(.+?)\s+(?:de|para)\s+(.+)$/i);
+        if (deMatch) {
+          itemQuery = deMatch[1].trim();
+          clientQuery = deMatch[2].trim();
+        }
+        await handleMarkShoppingItemBought(sock, remoteJid, session, itemQuery, clientQuery);
         continue;
       }
 

@@ -111,12 +111,12 @@ Tu función es:
       pon 'action: "query_balance"' y selecciona el presupuesto en 'targetBudgetId'.
     - FACTURACIÓN (COMPLETA O FINAL DE LIQUIDACIÓN): Si el profesional pide emitir, sacar o generar la factura del presupuesto o por finalización de obra (ej: "sácame la factura", "emíteme la factura del presupuesto de Alberto", "factura la obra de José Luis", "emite factura de...", "pasa a factura", "factura por finalización"):
       pon 'action: "invoice"' y selecciona el presupuesto correspondiente en 'targetBudgetId'.
-    - LISTA DE MATERIALES / COMPRAS: Si el profesional pide comprar, apuntar o añadir materiales, suministros o herramientas a su lista de la compra (ej: "necesito comprar 14 m² azulejo gris, 2 sacos cemento cola, Junta antracita", "apunta para comprar 3 rollos de cable de 2.5", "añade a la lista de compra 5 sacos de yeso", "comprar...", "hay que comprar..."):
-      pon 'action: "add_shopping_items"' y rellena 'shoppingItems': [ { "description": "azulejo gris", "qty": 14, "unit": "m²" }, { "description": "cemento cola", "qty": 2, "unit": "sacos" }, ... ].
-    - CONSULTAR LISTA DE MATERIALES / COMPRAS: Si el profesional pregunta qué tiene que comprar o pide ver la lista (ej: "¿qué materiales tengo que comprar?", "lista de la compra", "materiales pendientes", "qué tengo que comprar", "ver compras"):
-      pon 'action: "list_shopping_items"'.
-    - MARCAR MATERIALES COMO COMPRADOS: Si indica que ya compró algo o pide tacharlo (ej: "ya he comprado el cemento", "tacha el azulejo gris", "comprado cemento cola"):
-      pon 'action: "mark_shopping_items"' y rellena 'shoppingQuery': "cemento cola".
+    - LISTA DE MATERIALES / COMPRAS: Si el profesional pide comprar, apuntar o añadir materiales, suministros o herramientas a su lista de la compra (ej: "necesito comprar 14 m² azulejo gris, 2 sacos cemento cola, Junta antracita", "para la obra de Carlos necesito 14 m² azulejo gris...", "apunta para comprar 3 rollos de cable de 2.5", "añade para Juan 5 sacos de yeso"):
+      pon 'action: "add_shopping_items"', si menciona cliente o la obra de alguien rellena 'clientName': "Carlos", y rellena 'shoppingItems': [ { "description": "azulejo gris", "qty": 14, "unit": "m²", "clientName": "Carlos" }, ... ].
+    - CONSULTAR LISTA DE MATERIALES / COMPRAS: Si el profesional pregunta qué tiene que comprar o pide ver la lista (ej: "¿qué materiales tengo que comprar?", "¿qué tengo que comprar para Carlos?", "lista de la compra", "materiales pendientes de Alberto", "qué tengo que comprar"):
+      pon 'action: "list_shopping_items"' y si menciona un cliente concreto pon 'clientName': "Carlos" (o null si pide la lista general de todas las obras).
+    - MARCAR MATERIALES COMO COMPRADOS: Si indica que ya compró algo o pide tacharlo (ej: "ya he comprado el cemento de Carlos", "tacha el azulejo gris", "comprado cemento cola"):
+      pon 'action: "mark_shopping_items"', rellena 'shoppingQuery': "cemento cola" y 'clientName': "Carlos" si lo menciona.
     - VACIAR O BORRAR LISTA DE COMPRAS: Si pide borrar o vaciar la lista (ej: "borrar lista de la compra", "vaciar compras", "limpiar lista"):
       pon 'action: "clear_shopping_list"'.
    - Si el profesional menciona un cliente o número concreto para modificar un presupuesto (ej: "en el de José Luis...", "en el 8629..."):
