@@ -56,7 +56,10 @@ import {
   updateWorkTaskStatus,
   updateWorkDates,
   findClientsByName,
-  renameClientBudget
+  renameClientBudget,
+  getMonthlyRevenue,
+  listAppointmentsWeek,
+  getDashboard
 } from './db_service.js';
 import {
   PERMISSION_LEVELS,
@@ -75,6 +78,7 @@ import {
   startOnboarding,
   processOnboardingStep
 } from './onboarding_service.js';
+import { detectIntent, resolveIntent } from './intent_router.js';
 
 dotenv.config();
 
@@ -2052,6 +2056,12 @@ async function startWhatsAppGateway() {
     let aiResult;
     if (taskData.isAudio) {
       console.log(`🎙️ Enviando audio a Gemini (${taskData.audioBuffer?.length} bytes)...`);
+      try {
+        const sentAudioNotice = await sock.sendMessage(remoteJid, {
+          text: '🎙️ _Escuchando tu nota de voz y procesando los datos... Te aviso en unos segundos._'
+        });
+        if (sentAudioNotice?.key?.id) botSentMessageIds.add(sentAudioNotice.key.id);
+      } catch (noticeErr) {}
       aiResult = await callGemini({
         audioBuffer: taskData.audioBuffer,
         mimeType: taskData.audioMimeType || 'audio/ogg',
@@ -3187,6 +3197,20 @@ async function startWhatsAppGateway() {
         const newName = renameCmdMatch[2].trim();
         await handleRenameClient(sock, remoteJid, session, targetQuery, newName);
         continue;
+      }
+
+      // 3. Router de Intenciones Determinístico (Resuelve con SQLite sin pasar por Gemini)
+      if (!isAudio && rawUserText) {
+        const detected = detectIntent(rawUserText);
+        if (detected) {
+          console.log(`⚡ [IntentRouter] Intención detectada: ${detected.intent}`, detected.params);
+          const resolvedReply = await resolveIntent(detected, senderNumber, session);
+          if (resolvedReply) {
+            const sentIntentMsg = await sock.sendMessage(remoteJid, { text: resolvedReply });
+            if (sentIntentMsg?.key?.id) botSentMessageIds.add(sentIntentMsg.key.id);
+            continue;
+          }
+        }
       }
 
       // Preparar payload de IA (audio o texto)

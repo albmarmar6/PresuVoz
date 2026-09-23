@@ -965,6 +965,154 @@ export function getBudgetsPendingFollowUp(phone) {
   }).filter(Boolean);
 }
 
+// ─── Métodos de Consultas Agregadas (Intent Router — sin IA) ─────────────────
+
+/**
+ * Calcula los ingresos facturados, cobrados y pendientes en un mes concreto.
+ * Usado por el Intent Router para responder "¿cuánto llevo este mes?" sin IA.
+ * @param {string} phone
+ * @param {number} year  - ej. 2026
+ * @param {number} month - 1 a 12
+ * @returns {{ invoiceCount, budgetCount, totalInvoiced, totalCollected, totalPending }}
+ */
+export function getMonthlyRevenue(phone, year, month) {
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const startISO = new Date(year, month - 1, 1, 0, 0, 0).toISOString();
+  const endISO   = new Date(year, month, 0, 23, 59, 59, 999).toISOString();
+
+  // Facturas del mes
+  const invoiceRows = db.prepare(`
+    SELECT total_amount, status, data_json
+    FROM invoices
+    WHERE company_phone = ? AND created_at >= ? AND created_at <= ?
+  `).all(cleanPhone, startISO, endISO);
+
+  let totalInvoiced  = 0;
+  let totalCollected = 0;
+  let totalPending   = 0;
+
+  for (const r of invoiceRows) {
+    let parsed = null;
+    try { parsed = JSON.parse(r.data_json); } catch (e) {}
+    const total    = r.total_amount || parsed?.financials?.totalAmount || 0;
+    const advance  = parsed?.financials?.advanceAmount || 0;
+    const remaining = parsed?.financials?.remainingAmount ?? Math.max(0, total - advance);
+    const collected = r.status === 'PAGADA' ? total : advance;
+    totalInvoiced  += total;
+    totalCollected += collected;
+    totalPending   += remaining;
+  }
+
+  // Presupuestos del mes
+  const budgetCount = db.prepare(`
+    SELECT COUNT(*) as c FROM budgets
+    WHERE company_phone = ? AND created_at >= ? AND created_at <= ?
+  `).get(cleanPhone, startISO, endISO)?.c || 0;
+
+  return {
+    invoiceCount:  invoiceRows.length,
+    budgetCount:   Number(budgetCount),
+    totalInvoiced:  Number(totalInvoiced.toFixed(2)),
+    totalCollected: Number(totalCollected.toFixed(2)),
+    totalPending:   Number(totalPending.toFixed(2))
+  };
+}
+
+/**
+ * Devuelve las citas y visitas de los proximos 7 dias (agenda semanal).
+ * Usado por el Intent Router para "que tengo esta semana?" sin IA.
+ * @param {string} phone
+ * @returns {Array<object>} - Lista de citas ordenadas cronologicamente
+ */
+export function listAppointmentsWeek(phone) {
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const now    = new Date();
+  const todayStr  = now.toISOString().split('T')[0];
+  const weekEnd   = new Date(now);
+  weekEnd.setDate(weekEnd.getDate() + 7);
+  const weekEndStr = weekEnd.toISOString().split('T')[0];
+
+  const rows = db.prepare(`
+    SELECT * FROM appointments
+    WHERE company_phone = ?
+      AND date >= ?
+      AND date <= ?
+      AND status != 'CANCELADA'
+    ORDER BY date ASC, time ASC
+  `).all(cleanPhone, todayStr, weekEndStr);
+
+  return rows.map(r => ({
+    id:            r.id,
+    clientName:    r.client_name,
+    clientPhone:   r.client_phone,
+    clientAddress: r.client_address,
+    date:          r.date,
+    time:          r.time,
+    notes:         r.notes,
+    status:        r.status
+  }));
+}
+
+/**
+ * Dashboard global rapido: combina deudas, citas de hoy, presupuestos pendientes
+ * y resumen del mes en una sola consulta compuesta.
+ * Usado por el Intent Router para "resumen" / "como estoy?" sin IA.
+ * @param {string} phone
+ * @returns {{ totalDebt, debtCount, todayAppointments, pendingBudgets, monthlyStats }}
+ */
+export function getDashboard(phone) {
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const now     = new Date();
+  const todayStr   = now.toISOString().split('T')[0];
+  const month   = now.getMonth() + 1;
+  const year    = now.getFullYear();
+
+  // 1. Deudas totales
+  const unpaidRows = db.prepare(`
+    SELECT total_amount, data_json FROM invoices
+    WHERE company_phone = ? AND status != 'PAGADA'
+  `).all(cleanPhone);
+
+  let totalDebt  = 0;
+  for (const r of unpaidRows) {
+    let parsed = null;
+    try { parsed = JSON.parse(r.data_json); } catch (e) {}
+    const total    = r.total_amount || parsed?.financials?.totalAmount || 0;
+    const advance  = parsed?.financials?.advanceAmount || 0;
+    const remaining = parsed?.financials?.remainingAmount ?? Math.max(0, total - advance);
+    totalDebt += remaining;
+  }
+
+  // 2. Citas de hoy
+  const todayAppointments = db.prepare(`
+    SELECT client_name, client_address, time FROM appointments
+    WHERE company_phone = ? AND date = ? AND status != 'CANCELADA'
+    ORDER BY time ASC
+  `).all(cleanPhone, todayStr).map(r => ({
+    clientName:    r.client_name,
+    clientAddress: r.client_address,
+    time:          r.time
+  }));
+
+  // 3. Presupuestos pendientes de firma
+  const pendingBudgets = db.prepare(`
+    SELECT COUNT(*) as c FROM budgets
+    WHERE company_phone = ?
+      AND status IN ('PENDIENTE_ACEPTACION', 'ENVIADO')
+  `).get(cleanPhone)?.c || 0;
+
+  // 4. Resumen del mes actual
+  const monthlyStats = getMonthlyRevenue(cleanPhone, year, month);
+
+  return {
+    totalDebt:          Number(totalDebt.toFixed(2)),
+    debtCount:          unpaidRows.length,
+    todayAppointments,
+    pendingBudgets:     Number(pendingBudgets),
+    monthlyStats
+  };
+}
+
 // ─── Métodos de Lista de Compras y Materiales ────────────────────────────────
 
 export function addShoppingItems(phone, items, defaultClientContext = {}) {

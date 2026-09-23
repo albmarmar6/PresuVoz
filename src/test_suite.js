@@ -1042,6 +1042,114 @@ assert(customInv.financials.totalAmount === 1060, "Ajusta el total a pagar desco
 // Limpieza test
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(onboardPhone);
 
+// -----------------------------------------------------------------------------
+// CASO 20: Router de Intenciones Determinístico y Consultas Agregadas SQLite (Sin IA)
+// -----------------------------------------------------------------------------
+console.log("\nTEST 20: Router de Intenciones Determinístico y Consultas Agregadas SQLite (Sin IA)");
+import { detectIntent, resolveIntent } from './intent_router.js';
+import {
+  getMonthlyRevenue,
+  listAppointmentsWeek,
+  getDashboard,
+  saveInvoice as dbSaveInvoice,
+  saveAppointment as dbSaveAppointment
+} from './db_service.js';
+
+// 1. Detección de intenciones determinísticas
+assert(detectIntent("resumen")?.intent === 'DASHBOARD', "Detecta 'resumen' como DASHBOARD");
+assert(detectIntent("estado")?.intent === 'DASHBOARD', "Detecta 'estado' como DASHBOARD");
+assert(detectIntent("¿Qué tal va todo?")?.intent === 'DASHBOARD', "Detecta '¿Qué tal va todo?' como DASHBOARD");
+
+assert(detectIntent("¿Quién me debe dinero?")?.intent === 'ALL_DEBTS', "Detecta '¿Quién me debe dinero?' como ALL_DEBTS");
+assert(detectIntent("deudas pendientes")?.intent === 'ALL_DEBTS', "Detecta 'deudas pendientes' como ALL_DEBTS");
+assert(detectIntent("cobros pendientes")?.intent === 'ALL_DEBTS', "Detecta 'cobros pendientes' como ALL_DEBTS");
+
+const debtCarlos = detectIntent("¿Cuánto me debe Carlos?");
+assert(debtCarlos?.intent === 'DEBT_BY_CLIENT', "Detecta '¿Cuánto me debe Carlos?' como DEBT_BY_CLIENT");
+assert(debtCarlos?.params?.clientName === 'carlos', "Extrae nombre de cliente 'carlos'");
+
+const statsSep = detectIntent("facturado en septiembre 2026");
+assert(statsSep?.intent === 'MONTHLY_STATS', "Detecta 'facturado en septiembre 2026' como MONTHLY_STATS");
+assert(statsSep?.params?.month === 9 && statsSep?.params?.year === 2026, "Extrae mes 9 y año 2026");
+
+const statsThisMonth = detectIntent("¿Cuánto llevo este mes?");
+assert(statsThisMonth?.intent === 'MONTHLY_STATS', "Detecta '¿Cuánto llevo este mes?' como MONTHLY_STATS");
+
+assert(detectIntent("¿Qué tengo esta semana?")?.intent === 'WEEKLY_AGENDA', "Detecta '¿Qué tengo esta semana?' como WEEKLY_AGENDA");
+assert(detectIntent("próximas citas")?.intent === 'WEEKLY_AGENDA', "Detecta 'próximas citas' como WEEKLY_AGENDA");
+
+assert(detectIntent("¿Cuántos presupuestos tengo?")?.intent === 'BUDGET_STATS', "Detecta '¿Cuántos presupuestos tengo?' como BUDGET_STATS");
+
+const workJuan = detectIntent("¿Cómo va la obra de Juan?");
+assert(workJuan?.intent === 'WORK_STATUS', "Detecta '¿Cómo va la obra de Juan?' como WORK_STATUS");
+assert(workJuan?.params?.clientName === 'juan', "Extrae cliente 'juan' para estado de obra");
+
+const clientMaria = detectIntent("el presupuesto de María");
+assert(clientMaria?.intent === 'CLIENT_LOOKUP', "Detecta 'el presupuesto de María' como CLIENT_LOOKUP");
+assert(clientMaria?.params?.clientName === 'maria', "Extrae 'maria' para búsqueda");
+
+// Tareas complejas que SÍ deben ir a Gemini
+assert(detectIntent("He ido a ver la cocina de Pedro, tirar tabique y poner azulejos por 1200 euros") === null, "Audio/descripción compleja pasa a Gemini (null)");
+assert(detectIntent("Redáctale un mensaje a Carlos para decirle que empezamos el lunes") === null, "Redacción de mensaje pasa a Gemini (null)");
+assert(detectIntent("Hola, qué tal") === null, "Saludo pasa a flujo normal (null)");
+
+// 2. Funciones de consulta agregada en SQLite
+const testPhoneIntent = '34688776655';
+const now = new Date();
+const currentYear = now.getFullYear();
+const currentMonth = now.getMonth() + 1;
+
+// Guardar factura de prueba
+dbSaveInvoice(testPhoneIntent, {
+  id: `FAC-${currentYear}-9999`,
+  client: { name: 'Cliente Test Mes', address: 'Calle Test 12' },
+  financials: { totalAmount: 1500, advanceAmount: 500, remainingAmount: 1000 },
+  status: 'PENDIENTE_PAGO'
+});
+
+const monthlyRev = getMonthlyRevenue(testPhoneIntent, currentYear, currentMonth);
+assert(monthlyRev.invoiceCount >= 1, "getMonthlyRevenue contabiliza al menos 1 factura");
+assert(monthlyRev.totalInvoiced >= 1500, "getMonthlyRevenue suma el total facturado");
+assert(monthlyRev.totalPending >= 1000, "getMonthlyRevenue suma el total pendiente");
+
+// Guardar cita de prueba para próximos días
+dbSaveAppointment(testPhoneIntent, {
+  clientName: 'Visita Semanal Test',
+  date: now.toISOString().split('T')[0],
+  time: '11:30',
+  notes: 'Revisión fontanería'
+});
+
+const weekApts = listAppointmentsWeek(testPhoneIntent);
+assert(weekApts.some(a => a.clientName === 'Visita Semanal Test'), "listAppointmentsWeek encuentra la cita semanal");
+
+const dashData = getDashboard(testPhoneIntent);
+assert(dashData.totalDebt >= 1000, "getDashboard calcula deuda total correctamente");
+assert(dashData.debtCount >= 1, "getDashboard cuenta las facturas pendientes");
+
+// 3. Resolución de intenciones con resolveIntent
+const dashReply = await resolveIntent({ intent: 'DASHBOARD', params: {} }, testPhoneIntent, {});
+assert(dashReply.includes('Dashboard de PresuVoz'), "resolveIntent(DASHBOARD) genera cabecera de Dashboard");
+assert(dashReply.includes('Pendiente de cobrar'), "resolveIntent(DASHBOARD) incluye deudas");
+
+const debtsReply = await resolveIntent({ intent: 'ALL_DEBTS', params: {} }, testPhoneIntent, {});
+assert(debtsReply.includes('Cobros pendientes'), "resolveIntent(ALL_DEBTS) lista deudas pendientes");
+assert(debtsReply.includes('Cliente Test Mes'), "resolveIntent(ALL_DEBTS) muestra el cliente con deuda");
+
+const debtClientReply = await resolveIntent({ intent: 'DEBT_BY_CLIENT', params: { clientName: 'Test Mes' } }, testPhoneIntent, {});
+assert(debtClientReply.includes('Deuda de Cliente Test Mes'), "resolveIntent(DEBT_BY_CLIENT) muestra deuda del cliente específico");
+
+const agendaReply = await resolveIntent({ intent: 'WEEKLY_AGENDA', params: {} }, testPhoneIntent, {});
+assert(agendaReply.includes('Agenda — próximos 7 días'), "resolveIntent(WEEKLY_AGENDA) formatea agenda");
+
+const statsReply = await resolveIntent({ intent: 'MONTHLY_STATS', params: { month: currentMonth, year: currentYear } }, testPhoneIntent, {});
+assert(statsReply.includes('Total facturado'), "resolveIntent(MONTHLY_STATS) resume finanzas del mes");
+
+// Limpieza de datos de prueba
+cleanDb.prepare('DELETE FROM invoices WHERE company_phone = ?').run(testPhoneIntent);
+cleanDb.prepare('DELETE FROM appointments WHERE company_phone = ?').run(testPhoneIntent);
+cleanDb.prepare('DELETE FROM budgets WHERE company_phone = ?').run(testPhoneIntent);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
