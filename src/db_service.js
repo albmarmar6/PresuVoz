@@ -303,21 +303,21 @@ db.exec(`
 `);
 
 export const DEFAULT_COMPANY = {
-  name: 'Carpintería y Reformas Manolo S.L.',
-  fiscalName: 'Carpintería y Reformas Manolo S.L.',
-  ownerName: 'Manolo',
-  cif: 'B-41987654',
+  name: null,
+  fiscalName: null,
+  ownerName: null,
+  cif: null,
   trade: 'Reformas y Construcción',
-  address: 'Pol. Ind. El Pino, Nave 4 - Sevilla',
-  city: 'Sevilla',
-  workingHours: 'Lunes a Viernes de 8:00 a 18:00',
-  paymentTerms: '50% al empezar y 50% al acabar',
+  address: null,
+  city: null,
+  workingHours: null,
+  paymentTerms: null,
   quoteValidityDays: 15,
-  entityType: 'empresa',
+  entityType: 'autonomo',
   irpfRate: 0,
   invoiceSeries: '2026-',
-  phone: '601 02 23 67',
-  email: 'presupuestos@presuvoz.app',
+  phone: null,
+  email: null,
   iban: null,
   bizum: null,
   logoPath: null,
@@ -325,7 +325,8 @@ export const DEFAULT_COMPANY = {
   defaultTaxRate: 10,
   defaultAdvance: 30,
   onboardingStep: null,
-  onboardingDataJson: null
+  onboardingDataJson: null,
+  isConfigured: false
 };
 
 // ─── Métodos de Empresa ───────────────────────────────────────────────────────
@@ -340,30 +341,30 @@ export function getCompany(phone) {
   }
   return {
     phone: row.phone,
-    name: row.name || DEFAULT_COMPANY.name,
-    fiscalName: row.fiscal_name || row.name || DEFAULT_COMPANY.fiscalName,
-    ownerName: row.owner_name || DEFAULT_COMPANY.ownerName,
-    cif: row.cif || DEFAULT_COMPANY.cif,
+    name: row.name || null,
+    fiscalName: row.fiscal_name || row.name || null,
+    ownerName: row.owner_name || null,
+    cif: row.cif || null,
     trade: row.trade || DEFAULT_COMPANY.trade,
-    address: row.address || DEFAULT_COMPANY.address,
-    city: row.city || DEFAULT_COMPANY.city,
-    workingHours: row.working_hours || DEFAULT_COMPANY.workingHours,
-    paymentTerms: row.payment_terms || DEFAULT_COMPANY.paymentTerms,
-    quoteValidityDays: row.quote_validity_days !== null && row.quote_validity_days !== undefined ? row.quote_validity_days : DEFAULT_COMPANY.quoteValidityDays,
-    entityType: row.entity_type || DEFAULT_COMPANY.entityType,
-    irpfRate: row.irpf_rate !== null && row.irpf_rate !== undefined ? row.irpf_rate : DEFAULT_COMPANY.irpfRate,
-    invoiceSeries: row.invoice_series || DEFAULT_COMPANY.invoiceSeries,
-    phone: row.phone_contact || cleanPhone || DEFAULT_COMPANY.phone,
-    email: row.email || DEFAULT_COMPANY.email,
+    address: row.address || null,
+    city: row.city || null,
+    workingHours: row.working_hours || null,
+    paymentTerms: row.payment_terms || null,
+    quoteValidityDays: row.quote_validity_days !== null && row.quote_validity_days !== undefined ? row.quote_validity_days : 15,
+    entityType: row.entity_type || 'autonomo',
+    irpfRate: row.irpf_rate !== null && row.irpf_rate !== undefined ? row.irpf_rate : 0,
+    invoiceSeries: row.invoice_series || '2026-',
+    phone: row.phone_contact || cleanPhone,
+    email: row.email || null,
     iban: row.iban ? row.iban : null,
     bizum: row.bizum ? row.bizum : null,
     logoPath: row.logo_path || null,
     gestoriaEmail: row.gestoria_email || null,
-    defaultTaxRate: row.default_tax_rate || 10,
-    defaultAdvance: row.default_advance || 30,
+    defaultTaxRate: row.default_tax_rate !== null && row.default_tax_rate !== undefined ? row.default_tax_rate : 10,
+    defaultAdvance: row.default_advance !== null && row.default_advance !== undefined ? row.default_advance : 30,
     onboardingStep: row.onboarding_step || null,
     onboardingDataJson: row.onboarding_data_json || null,
-    isConfigured: Boolean(row.name && row.cif && row.name !== DEFAULT_COMPANY.name && !row.onboarding_step)
+    isConfigured: Boolean(row.name && row.cif && !row.onboarding_step)
   };
 }
 

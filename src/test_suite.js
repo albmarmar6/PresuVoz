@@ -1058,6 +1058,41 @@ assert(compSkipped.iban === null, "El IBAN queda null en base de datos al respon
 assert(compSkipped.bizum === null, "El Bizum queda null en base de datos al responder 'luego'");
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(skipPhone);
 
+// Test omisión completa de datos fiscales con "luego"
+const skipAllPhone = '34677777777';
+cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(skipAllPhone);
+startOnboarding(skipAllPhone);
+processOnboardingStep(skipAllPhone, "Manolo y la empresa se llama Reformas Manolo S.L"); // Paso 1
+processOnboardingStep(skipAllPhone, "Albañilería"); // Paso 2
+processOnboardingStep(skipAllPhone, "luego"); // Paso 3 (CITY)
+processOnboardingStep(skipAllPhone, "luego"); // Paso 4 (HOURS)
+processOnboardingStep(skipAllPhone, "luego"); // Paso 5 (TERMS)
+processOnboardingStep(skipAllPhone, "luego"); // Paso 6 (ADVANCE)
+processOnboardingStep(skipAllPhone, "15 días"); // Paso 7 (VALIDITY)
+processOnboardingStep(skipAllPhone, "empresa"); // Paso 8 (ENTITY)
+processOnboardingStep(skipAllPhone, "luego"); // Paso 9 (FISCAL_NAME)
+processOnboardingStep(skipAllPhone, "luego"); // Paso 10 (CIF)
+processOnboardingStep(skipAllPhone, "luego"); // Paso 11 (ADDRESS)
+processOnboardingStep(skipAllPhone, "10"); // Paso 12 (TAX)
+processOnboardingStep(skipAllPhone, "0"); // Paso 13 (IRPF)
+processOnboardingStep(skipAllPhone, "luego"); // Paso 14 (SERIES)
+const rFinalSkip = processOnboardingStep(skipAllPhone, "luego"); // Paso 15 (BANK)
+
+assert(rFinalSkip.completed === true, "Onboarding con omisiones finaliza con éxito");
+assert(rFinalSkip.message.includes("• *NIF/CIF:* No indicado"), "CIF omitido muestra 'No indicado' y no B-00000000");
+assert(rFinalSkip.message.includes("• *Dirección:* No indicada"), "Dirección omitida muestra 'No indicada' y no 'España'");
+assert(rFinalSkip.message.includes("• *IBAN:* No configurado"), "IBAN omitido muestra 'No configurado'");
+assert(rFinalSkip.message.includes("• *Bizum:* No configurado"), "Bizum omitido muestra 'No configurado'");
+assert(rFinalSkip.message.includes("📍 *Zona de trabajo:* No indicada"), "Zona omitida muestra 'No indicada'");
+assert(rFinalSkip.message.includes("⏰ *Horario habitual:* No indicado"), "Horario omitido muestra 'No indicado'");
+const compAllSkipped = dbGetCompany(skipAllPhone);
+assert(compAllSkipped.cif === null, "NIF queda null en base de datos al responder 'luego'");
+assert(compAllSkipped.address === null, "Dirección queda null en base de datos al responder 'luego'");
+assert(compAllSkipped.city === null, "Ciudad queda null en base de datos al responder 'luego'");
+assert(compAllSkipped.ownerName === 'Manolo', "Extrae limpiamente el ownerName 'Manolo'");
+assert(compAllSkipped.name === 'Reformas Manolo S.L', "Extrae limpiamente el name 'Reformas Manolo S.L'");
+cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(skipAllPhone);
+
 // Limpieza test
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(onboardPhone);
 
