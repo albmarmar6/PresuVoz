@@ -670,10 +670,6 @@ async function startWhatsAppGateway() {
               } else {
                 targetJids.add(`${cleanPhone}@lid`);
               }
-            } else if (ALLOWED_NUMBERS && ALLOWED_NUMBERS.length > 0) {
-              // Fallback de desarrollo si no hay teléfono asignado
-              const firstAllowed = String(ALLOWED_NUMBERS[0]).replace(/\D/g, '');
-              if (firstAllowed) targetJids.add(`${firstAllowed}@s.whatsapp.net`);
             }
 
             for (const jid of targetJids) {
