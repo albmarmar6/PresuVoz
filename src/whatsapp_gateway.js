@@ -639,28 +639,41 @@ async function startWhatsAppGateway() {
           const acceptedList = await syncPendingSignaturesFromCloud();
           for (const item of acceptedList) {
             const targetJids = new Set();
+            const cleanPhone = String(item.companyPhone || '').replace(/\D/g, '');
 
-            // 1. Enviar al teléfono autorizado en .env (Alberto)
-            if (ALLOWED_NUMBERS && ALLOWED_NUMBERS.length > 0) {
-              ALLOWED_NUMBERS.forEach(n => {
-                const clean = String(n).replace(/\D/g, '');
-                if (clean) targetJids.add(`${clean}@s.whatsapp.net`);
-              });
-            }
-
-            // 2. Enviar a los chats activos donde se haya hablado con el bot
-            for (const activeJid of userSessions.keys()) {
-              if (activeJid && !activeJid.includes('broadcast') && !activeJid.includes('@g.us')) {
-                targetJids.add(activeJid);
+            // 1. Buscar en sesiones activas el chat del profesional dueño de este presupuesto
+            let foundActiveJid = null;
+            for (const [activeJid, sess] of userSessions.entries()) {
+              if (activeJid.includes('broadcast') || activeJid.includes('@g.us')) continue;
+              const sessPhone = String(sess.phone || '').replace(/\D/g, '');
+              const jidUser = String(activeJid.split('@')[0]).replace(/\D/g, '');
+              if ((cleanPhone && (sessPhone === cleanPhone || jidUser === cleanPhone)) ||
+                  (sess.budgets && sess.budgets.has(item.budgetId))) {
+                foundActiveJid = activeJid;
+                // Sincronizar en memoria en tiempo real
+                if (sess.budgets && sess.budgets.has(item.budgetId)) {
+                  const b = sess.budgets.get(item.budgetId);
+                  b.status = 'ACEPTADO';
+                  b.signedAt = item.signedAt;
+                  b.signedEmail = item.signedEmail;
+                }
+                break;
               }
             }
 
-            // 3. Teléfono de empresa si es un número válido estándar
-            if (item.companyPhone) {
-              const clean = String(item.companyPhone).replace(/\D/g, '');
-              if (clean.length >= 9 && clean.length <= 12) {
-                targetJids.add(`${clean}@s.whatsapp.net`);
+            if (foundActiveJid) {
+              targetJids.add(foundActiveJid);
+            } else if (cleanPhone) {
+              // Si no hay sesión activa en memoria, enviar a su número directo
+              if (cleanPhone.length >= 9 && cleanPhone.length <= 12) {
+                targetJids.add(`${cleanPhone}@s.whatsapp.net`);
+              } else {
+                targetJids.add(`${cleanPhone}@lid`);
               }
+            } else if (ALLOWED_NUMBERS && ALLOWED_NUMBERS.length > 0) {
+              // Fallback de desarrollo si no hay teléfono asignado
+              const firstAllowed = String(ALLOWED_NUMBERS[0]).replace(/\D/g, '');
+              if (firstAllowed) targetJids.add(`${firstAllowed}@s.whatsapp.net`);
             }
 
             for (const jid of targetJids) {
