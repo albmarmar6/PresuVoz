@@ -1081,6 +1081,60 @@ export function updateAppointmentStatus(id, status) {
   stmt.run(status, now, id);
 }
 
+/**
+ * Modifica los campos de una cita existente (fecha, hora, dirección, notas).
+ * Busca la cita por ID exacto o por nombre de cliente/notas (match parcial).
+ * @param {string} phone - Teléfono de la empresa
+ * @param {string} query - ID de cita o nombre del cliente
+ * @param {object} changes - Campos a actualizar: { date, time, clientAddress, notes, clientName, clientPhone }
+ * @returns {object|null} La cita actualizada, o null si no se encontró
+ */
+export function updateAppointment(phone, query, changes = {}) {
+  if (!query && !changes) return null;
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const q = `%${(query || '').trim().toLowerCase()}%`;
+
+  const findStmt = db.prepare(`
+    SELECT * FROM appointments
+    WHERE company_phone = ?
+      AND status != 'CANCELADA'
+      AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ?)
+    ORDER BY date ASC, time ASC
+    LIMIT 1
+  `);
+
+  const row = findStmt.get(cleanPhone, q, q, q);
+  if (!row) return null;
+
+  const now = new Date().toISOString();
+  const newDate = changes.date || row.date;
+  const newTime = changes.time || row.time;
+  const newAddress = changes.clientAddress || row.client_address;
+  const newNotes = changes.notes || row.notes;
+  const newClientName = changes.clientName || row.client_name;
+  const newClientPhone = changes.clientPhone || row.client_phone;
+
+  const updateStmt = db.prepare(`
+    UPDATE appointments
+    SET date = ?, time = ?, client_address = ?, notes = ?,
+        client_name = ?, client_phone = ?, updated_at = ?
+    WHERE id = ?
+  `);
+  updateStmt.run(newDate, newTime, newAddress, newNotes, newClientName, newClientPhone, now, row.id);
+
+  return {
+    id: row.id,
+    companyPhone: cleanPhone,
+    clientName: newClientName,
+    clientPhone: newClientPhone,
+    clientAddress: newAddress,
+    date: newDate,
+    time: newTime,
+    notes: newNotes,
+    status: row.status
+  };
+}
+
 export function cancelAppointment(phone, query) {
   if (!query) return null;
   const cleanPhone = String(phone).replace(/\D/g, '');

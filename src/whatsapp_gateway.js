@@ -59,6 +59,7 @@ import {
   getAppointment,
   listAppointments,
   updateAppointmentStatus,
+  updateAppointment,
   cancelAppointment,
   updateBudgetStatus,
   syncPendingSignaturesFromCloud,
@@ -1530,6 +1531,58 @@ async function startWhatsAppGateway() {
     }
   }
 
+  async function handleUpdateAppointment(sock, remoteJid, session, updateInfo = {}) {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const query = updateInfo.appointmentQuery || updateInfo.clientName || '';
+      const changes = {
+        date: updateInfo.date || null,
+        time: updateInfo.time || null,
+        clientAddress: updateInfo.clientAddress || null,
+        notes: updateInfo.notes || null,
+        clientName: updateInfo.newClientName || null,
+        clientPhone: updateInfo.clientPhone || null
+      };
+      // Elimina nulls para no sobreescribir con vacío
+      Object.keys(changes).forEach(k => { if (!changes[k]) delete changes[k]; });
+
+      const updated = updateAppointment(cleanPhone, query, changes);
+      if (!updated) {
+        const sentNotFound = await sock.sendMessage(remoteJid, {
+          text: `⚠️ No encontré ninguna cita activa que coincida con *"${query}"*.\n\nEscribe *"agenda"* para ver tus citas y asegúrate de indicar el nombre del cliente.`
+        });
+        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+        return;
+      }
+
+      const dateParts = (updated.date || '').split('-');
+      const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : updated.date;
+
+      const lines = [
+        `✅ *Cita modificada con éxito*`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `👤 *Cliente:* ${updated.clientName}`,
+        updated.clientPhone ? `📞 *Teléfono:* ${updated.clientPhone}` : null,
+        `📍 *Dirección:* ${updated.clientAddress || 'Por concretar'}`,
+        `🗓️ *Fecha:* ${formattedDate}`,
+        `⏰ *Hora:* ${updated.time} h`,
+        updated.notes ? `📝 *Notas:* ${updated.notes}` : null,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `_Referencia: ${updated.id}_`
+      ].filter(Boolean);
+
+      const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+      console.log(`✏️ Cita ${updated.id} modificada para ${cleanPhone}: ${JSON.stringify(changes)}`);
+    } catch (err) {
+      console.error('❌ Error modificando cita:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error modificando la cita:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
   function formatShoppingListForWhatsApp(items, clientFilter = null) {
     if (!items || items.length === 0) {
       if (clientFilter) {
@@ -2335,27 +2388,56 @@ async function startWhatsAppGateway() {
 
     // 9. Agendar cita (Nivel B: Confirmación simple)
     if (aiResult?.action === 'schedule_appointment') {
-      const appInfo = aiResult.appointmentInfo || {};
-      session.pendingAction = createProposedAction('B', 'schedule_appointment', { appointmentInfo: appInfo });
+      const appsList = (aiResult.appointmentsList && aiResult.appointmentsList.length > 0)
+        ? aiResult.appointmentsList
+        : [aiResult.appointmentInfo || {}];
 
-      const dateParts = (appInfo.date || '').split('-');
-      const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : appInfo.date;
+      if (appsList.length > 1) {
+        // ── PROPUESTA CONJUNTA para múltiples citas ──────────────────────────
+        session.pendingAction = createProposedAction('B', 'schedule_multiple_appointments', { appointmentsList: appsList });
 
-      const lines = [
-        '📅 *PROPUESTA DE VISITA TÉCNICA (Nivel B)*',
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        `👤 *Cliente:* ${appInfo.clientName || 'Cliente Particular'}`,
-        appInfo.clientPhone ? `📞 *Teléfono:* ${appInfo.clientPhone}` : null,
-        `📍 *Dirección:* ${appInfo.clientAddress || 'Por concretar'}`,
-        `🗓️ *Fecha:* ${formattedDate}`,
-        `⏰ *Hora:* ${appInfo.time || '10:00'} h`,
-        `📝 *Motivo:* ${appInfo.notes || 'Visita técnica y toma de medidas'}`,
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        '¿Quieres que la guarde en tu agenda? Responde *"Sí"* para confirmar o *"No"* para descartar.'
-      ].filter(Boolean);
+        const lines = [
+          `📅 *PROPUESTA DE ${appsList.length} VISITAS TÉCNICAS (Nivel B)*`,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━'
+        ];
+        appsList.forEach((app, idx) => {
+          const dp = (app.date || '').split('-');
+          const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}/${dp[0]}` : (app.date || 'Por concretar');
+          lines.push(`\n*Cita ${idx + 1}:* ${app.clientName || 'Cliente Particular'}`);
+          if (app.clientPhone) lines.push(`📞 ${app.clientPhone}`);
+          lines.push(`📍 ${app.clientAddress || 'Por concretar'}`);
+          lines.push(`🗓️ ${fd} · ⏰ ${app.time || '10:00'} h`);
+          if (app.notes) lines.push(`📝 ${app.notes}`);
+        });
+        lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+        lines.push(`¿Las agendo todas? Responde *"Sí"* para confirmar las ${appsList.length} visitas o *"No"* para descartar.`);
 
-      const sentProp = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
-      if (sentProp?.key?.id) botSentMessageIds.add(sentProp.key.id);
+        const sentProp = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+        if (sentProp?.key?.id) botSentMessageIds.add(sentProp.key.id);
+      } else {
+        // ── PROPUESTA INDIVIDUAL (comportamiento original) ───────────────────
+        const appInfo = appsList[0];
+        session.pendingAction = createProposedAction('B', 'schedule_appointment', { appointmentInfo: appInfo });
+
+        const dateParts = (appInfo.date || '').split('-');
+        const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : appInfo.date;
+
+        const lines = [
+          '📅 *PROPUESTA DE VISITA TÉCNICA (Nivel B)*',
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          `👤 *Cliente:* ${appInfo.clientName || 'Cliente Particular'}`,
+          appInfo.clientPhone ? `📞 *Teléfono:* ${appInfo.clientPhone}` : null,
+          `📍 *Dirección:* ${appInfo.clientAddress || 'Por concretar'}`,
+          `🗓️ *Fecha:* ${formattedDate}`,
+          `⏰ *Hora:* ${appInfo.time || '10:00'} h`,
+          `📝 *Motivo:* ${appInfo.notes || 'Visita técnica y toma de medidas'}`,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          '¿Quieres que la guarde en tu agenda? Responde *"Sí"* para confirmar o *"No"* para descartar.'
+        ].filter(Boolean);
+
+        const sentProp = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+        if (sentProp?.key?.id) botSentMessageIds.add(sentProp.key.id);
+      }
       return;
     }
 
@@ -2380,6 +2462,35 @@ async function startWhatsAppGateway() {
 
       const sentWarn = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
       if (sentWarn?.key?.id) botSentMessageIds.add(sentWarn.key.id);
+      return;
+    }
+
+    // 11b. Modificar cita (Nivel B: Confirmación simple)
+    if (aiResult?.action === 'update_appointment') {
+      const updateInfo = aiResult.appointmentInfo || {};
+      updateInfo.appointmentQuery = updateInfo.appointmentQuery || aiResult.appointmentQuery || aiResult.clientName || '';
+      session.pendingAction = createProposedAction('B', 'update_appointment', { updateInfo });
+
+      const query = updateInfo.appointmentQuery || updateInfo.clientName || 'la cita';
+      const dateParts = (updateInfo.date || '').split('-');
+      const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : (updateInfo.date || '');
+
+      const changeLines = [];
+      if (updateInfo.date) changeLines.push(`🗓️ *Nueva fecha:* ${formattedDate}`);
+      if (updateInfo.time) changeLines.push(`⏰ *Nueva hora:* ${updateInfo.time} h`);
+      if (updateInfo.clientAddress) changeLines.push(`📍 *Nueva dirección:* ${updateInfo.clientAddress}`);
+      if (updateInfo.notes) changeLines.push(`📝 *Nuevas notas:* ${updateInfo.notes}`);
+
+      const lines = [
+        `✏️ *MODIFICAR CITA — ${query.toUpperCase()}*`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        ...changeLines,
+        '',
+        '¿Confirmas estos cambios? Responde *"Sí"* para guardar o *"No"* para cancelar.'
+      ];
+
+      const sentProp = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sentProp?.key?.id) botSentMessageIds.add(sentProp.key.id);
       return;
     }
 
@@ -2536,6 +2647,12 @@ async function startWhatsAppGateway() {
 
     } catch (pdfErr) {
       console.error('⚠️ No se pudo generar o enviar el PDF:', pdfErr.message);
+      const budgetIdForRecovery = engineResult.budget.id || '';
+      const clientNameForRecovery = engineResult.budget.client?.name || 'el cliente';
+      const sentPdfErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *El presupuesto se ha guardado correctamente*, pero no se pudo generar el PDF en este momento (posiblemente por conexión inestable).\n\nCuando quieras el PDF di: *"pdf de ${clientNameForRecovery}"* y te lo mando al instante junto con el enlace de firma.`
+      });
+      if (sentPdfErr?.key?.id) botSentMessageIds.add(sentPdfErr.key.id);
     }
 
     const optionsLines = [
@@ -2863,8 +2980,25 @@ async function startWhatsAppGateway() {
             return;
           }
 
+          if (act.type === 'schedule_multiple_appointments') {
+            const appsList = act.data.appointmentsList || [];
+            for (const appInfo of appsList) {
+              await handleScheduleAppointment(sock, remoteJid, session, appInfo);
+            }
+            const sentConfirm = await sock.sendMessage(remoteJid, {
+              text: `✅ *${appsList.length} visitas guardadas en tu agenda.* Puedes escribir *"agenda"* en cualquier momento para verlas todas.`
+            });
+            if (sentConfirm?.key?.id) botSentMessageIds.add(sentConfirm.key.id);
+            return;
+          }
+
           if (act.type === 'cancel_appointment') {
             await handleCancelAppointment(sock, remoteJid, session, act.data.query);
+            return;
+          }
+
+          if (act.type === 'update_appointment') {
+            await handleUpdateAppointment(sock, remoteJid, session, act.data.updateInfo || {});
             return;
           }
 
@@ -3155,7 +3289,58 @@ async function startWhatsAppGateway() {
         return;
       }
 
-      // Iniciar presupuesto nuevo
+      // Comando de recuperación de PDF: "pdf de [cliente]", "reenviar pdf alberto", "pdf PRE-2026-xxxx"
+      const pdfRecoveryMatch = rawUserText.match(/^(?:pdf|reenviar\s+pdf|enviar\s+pdf|mandar\s+pdf|volver\s+a\s+enviar\s+pdf)(?:\s+(?:de|del)?\s*(.+))?$/i);
+      if (pdfRecoveryMatch) {
+        const query = (pdfRecoveryMatch[1] || '').trim();
+        const budgetList = [...session.budgets.values()];
+        let target = null;
+        if (query) {
+          target = budgetList.find(b =>
+            (b.id && b.id.toLowerCase().includes(query.toLowerCase())) ||
+            (b.client?.name && b.client.name.toLowerCase().includes(query.toLowerCase()))
+          );
+        }
+        if (!target && session.activeBudgetId) target = session.budgets.get(session.activeBudgetId);
+        if (!target && budgetList.length > 0) target = budgetList[budgetList.length - 1];
+
+        if (!target) {
+          const sentNoBudget = await sock.sendMessage(remoteJid, {
+            text: '⚠️ No encontré ningún presupuesto para regenerar el PDF. Indica el nombre del cliente o el número de presupuesto.'
+          });
+          if (sentNoBudget?.key?.id) botSentMessageIds.add(sentNoBudget.key.id);
+        } else {
+          try {
+            const pdfBuffer = await generateBudgetPDF(target);
+            const pdfFileName = `Presupuesto_${target.id || 'Obra'}.pdf`;
+            const sentDoc = await sock.sendMessage(remoteJid, {
+              document: pdfBuffer,
+              mimetype: 'application/pdf',
+              fileName: pdfFileName,
+              caption: `📄 *${pdfFileName}*\nPresupuesto formal en PDF listo para enviar a tu cliente.`
+            });
+            if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
+            try {
+              const signingUrl = generateSigningUrl(target, session.company, cleanPhone);
+              const sentSig = await sock.sendMessage(remoteJid, {
+                text: `✍️ *Enlace de Aceptación y Firma Digital:*\n${signingUrl}\n\n📲 _Compártelo con tu cliente para que firme desde su móvil._`
+              });
+              if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
+            } catch (sigErr) {
+              console.warn('⚠️ No se pudo generar enlace de firma en recuperación PDF:', sigErr.message);
+            }
+          } catch (pdfRecovErr) {
+            console.error('⚠️ Error regenerando PDF:', pdfRecovErr.message);
+            const sentErrRecov = await sock.sendMessage(remoteJid, {
+              text: `⚠️ No se pudo regenerar el PDF: ${pdfRecovErr.message}`
+            });
+            if (sentErrRecov?.key?.id) botSentMessageIds.add(sentErrRecov.key.id);
+          }
+        }
+        return;
+      }
+
+
       if (/^(presupuesto nuevo|nuevo presupuesto|nuevo|otro cliente|empezar de nuevo|#nuevo)$/i.test(rawUserText)) {
         session.activeBudgetId = null;
         const sentReset = await sock.sendMessage(remoteJid, {

@@ -349,8 +349,17 @@ export class PresuVozEngine {
 
     const year = new Date().getFullYear();
     const invoiceCounter = options.invoiceNumber || Math.floor(100 + Math.random() * 900);
-    const invoiceId = `FAC-${year}-${String(invoiceCounter).padStart(4, '0')}`;
+    const comp = options.company || budget.company || {};
+    let invoiceId;
+    if (comp.invoiceSeries) {
+      const cleanSeries = comp.invoiceSeries.trim();
+      const prefix = cleanSeries.endsWith('-') || cleanSeries.endsWith('/') ? cleanSeries : `${cleanSeries}-`;
+      invoiceId = `${prefix}${String(invoiceCounter).padStart(3, '0')}`;
+    } else {
+      invoiceId = `FAC-${year}-${String(invoiceCounter).padStart(4, '0')}`;
+    }
     const today = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
 
     const taxRate = (budget.financials?.taxRatePercentage || 10) / 100;
     const taxableBase = Number((rawAmount / (1 + taxRate)).toFixed(2));

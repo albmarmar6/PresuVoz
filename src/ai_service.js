@@ -85,10 +85,15 @@ Se te proporciona el contexto de los presupuestos guardados del profesional y el
 
 Tu función es:
 1. DETECCIÓN DE INTENCIÓN Y DESTINO:
-   - AGENDAR CITA / VISITA TÉCNICA: Si el profesional pide agendar, apuntar o programar una visita, cita previa o medición (ej: "apunta visita con Juan el jueves a las 11:00 en Calle Mayor 14 para ver la caldera", "cita mañana a las 16:30 con María para medir cocina", "visita el viernes a las 9 con Carlos 612345678"):
-     pon 'action: "schedule_appointment"' y rellena 'appointmentInfo': { "clientName": "...", "clientPhone": "...", "clientAddress": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "notes": "..." } (resuelve fechas relativas como hoy, mañana o días de la semana a partir de la fecha actual proporcionada en el contexto).
+   - AGENDAR CITA / VISITA TÉCNICA: Si el profesional pide agendar, apuntar o programar una visita, cita previa o medición:
+     * Si menciona UNA SOLA cita (ej: "apunta visita con Juan el jueves a las 11:00 en Calle Mayor 14"):
+       pon 'action: "schedule_appointment"' y rellena 'appointmentInfo': { "clientName": "...", "clientPhone": "...", "clientAddress": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "notes": "..." }.
+     * Si menciona VARIAS CITAS en el mismo mensaje (ej: "apunta visita con Juan el jueves a las 11 y con María el viernes a las 16 en otra dirección"):
+       pon 'action: "schedule_appointment"' y rellena 'appointmentsList' (array con TODOS los objetos de citas), dejando 'appointmentInfo' con el primer elemento. Resuelve fechas relativas a partir de la fecha del contexto.
    - CONSULTAR AGENDA / CITAS: Si el profesional pregunta por sus visitas o agenda (ej: "¿qué citas tengo hoy?", "agenda de mañana", "mis visitas", "ver agenda", "¿tengo visitas esta semana?"):
      pon 'action: "list_appointments"' y rellena 'appointmentFilter': "today" | "tomorrow" | "upcoming" | "all".
+   - MODIFICAR / CAMBIAR / MOVER CITA: Si el profesional pide cambiar, modificar, mover, adelantar o atrasar una cita existente (ej: "mueve la cita de Juan al martes", "cambia la hora de la visita de María a las 10", "adelanta la cita de Carlos al jueves a las 9"):
+     pon 'action: "update_appointment"' y rellena 'appointmentInfo': { "appointmentQuery": "nombre o referencia de la cita a modificar", "date": "YYYY-MM-DD o null si no cambia", "time": "HH:MM o null si no cambia", "clientAddress": "nueva dirección o null", "notes": "nuevas notas o null" }.
    - CANCELAR CITA / VISITA: Si el profesional pide anular o cancelar una cita (ej: "cancela la cita con Juan", "anula la visita de las 11", "borra la cita con María"):
      pon 'action: "cancel_appointment"' y rellena 'appointmentQuery': "nombre o referencia a cancelar".
    - EXPORTAR TRIMESTRE / GESTORÍA: Si el profesional pide el trimestre para su gestoría, exportar facturas, el resumen del IVA o liquidación fiscal (ej: "sácame el trimestre para la gestoría", "exportar 3T", "prepárame el trimestre", "resumen de facturas de este trimestre", "mándale las facturas a mi gestoría"):
@@ -149,7 +154,7 @@ Tu función es:
 
 FORMATO DE RESPUESTA (JSON estricto):
 {
-  "action": "budget", // "budget" | "list_budgets" | "invoice" | "advance_invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "accept_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates" | "purchase_invoice"
+  "action": "budget", // "budget" | "list_budgets" | "invoice" | "advance_invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "update_appointment" | "accept_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates" | "purchase_invoice"
   "taskQuery": null,
   "isDone": true,
   "onlyMissing": false,
@@ -182,8 +187,19 @@ FORMATO DE RESPUESTA (JSON estricto):
     "clientAddress": "Dirección completa",
     "date": "2026-10-15",
     "time": "11:00",
-    "notes": "Motivo o trabajos a valorar"
+    "notes": "Motivo o trabajos a valorar",
+    "appointmentQuery": null
   },
+  "appointmentsList": [
+    {
+      "clientName": "Nombre cliente",
+      "clientPhone": null,
+      "clientAddress": "Dirección completa",
+      "date": "2026-10-15",
+      "time": "11:00",
+      "notes": "Motivo o trabajos a valorar"
+    }
+  ],
   "appointmentFilter": "upcoming", // "today" | "tomorrow" | "upcoming" | "all"
   "appointmentQuery": null,
   "quarter": null, // 1 | 2 | 3 | 4 | null
