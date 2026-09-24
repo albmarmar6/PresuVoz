@@ -116,7 +116,7 @@ export function evaluateConfirmationResponse(pendingAction, userText = '') {
   }
 
   // Rechazo universal para cualquier nivel
-  if (/^(?:no|cancelar?|descarta|espera|d[eé]jalo|parar|ahora\s+no|olv[ií]dalo)$/i.test(raw)) {
+  if (/^(?:no\s*,?\s*(?:espera|cancelar?|gracias|d[eé]jalo)?|cancelar?|descarta|espera|d[eé]jalo|parar|ahora\s+no|olv[ií]dalo)$/i.test(raw)) {
     return { status: 'REJECTED' };
   }
 

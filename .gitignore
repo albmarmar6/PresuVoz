@@ -38,5 +38,6 @@ payload.json
 data/*.db
 data/*.db-journal
 data/backups/
+data/fiscal_exports/
 data/logos/*
 !data/logos/.gitkeep

@@ -13,7 +13,7 @@ if (!fs.existsSync(LOGOS_DIR)) {
 }
 
 const DB_PATH = path.join(DATA_DIR, 'presuvoz.db');
-const db = new DatabaseSync(DB_PATH);
+export const db = new DatabaseSync(DB_PATH);
 
 // Inicializar tablas relacionales
 db.exec(`
@@ -82,6 +82,15 @@ try {
 } catch (e) {
   // Ignorar si la columna ya existe
 }
+try {
+  db.exec('ALTER TABLE invoices ADD COLUMN rectifies_invoice_id TEXT;');
+} catch (e) {}
+try {
+  db.exec('ALTER TABLE invoices ADD COLUMN fiscal_period TEXT;');
+} catch (e) {}
+try {
+  db.exec('ALTER TABLE invoices ADD COLUMN verifactu_hash TEXT;');
+} catch (e) {}
 
 db.exec(`
 
@@ -161,6 +170,136 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_messages_wam_id ON messages(whatsapp_message_id);
   CREATE INDEX IF NOT EXISTS idx_messages_chat_status ON messages(chat_id, status);
+
+  CREATE TABLE IF NOT EXISTS business_tax_profiles (
+    business_id TEXT PRIMARY KEY,
+    legal_name TEXT,
+    tax_id TEXT,
+    legal_form TEXT DEFAULT 'AUTONOMO',
+    economic_activity TEXT,
+    iae_code TEXT,
+    tax_regime TEXT DEFAULT 'GENERAL',
+    vat_regime TEXT DEFAULT 'GENERAL',
+    income_tax_regime TEXT DEFAULT 'ESTIMACION_DIRECTA_SIMPLIFICADA',
+    vat_frequency TEXT DEFAULT 'QUARTERLY',
+    income_tax_frequency TEXT DEFAULT 'QUARTERLY',
+    irpf_withholding_applicable INTEGER DEFAULT 0,
+    default_irpf_rate REAL DEFAULT 0,
+    default_vat_rate REAL DEFAULT 21,
+    accounting_start_date TEXT,
+    fiscal_year INTEGER DEFAULT 2026,
+    current_invoice_series TEXT DEFAULT '2026-',
+    verifactu_status TEXT DEFAULT 'PREPARED',
+    gestor_name TEXT,
+    gestor_email TEXT,
+    gestor_phone TEXT,
+    gestor_notes TEXT,
+    created_at TEXT,
+    updated_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS purchase_invoices (
+    id TEXT PRIMARY KEY,
+    business_id TEXT NOT NULL,
+    supplier_name TEXT NOT NULL,
+    supplier_tax_id TEXT,
+    invoice_number TEXT,
+    invoice_date TEXT NOT NULL,
+    operation_date TEXT,
+    description TEXT,
+    taxable_base REAL NOT NULL,
+    vat_rate REAL NOT NULL,
+    vat_amount REAL NOT NULL,
+    total_amount REAL NOT NULL,
+    deductible_vat_amount REAL NOT NULL,
+    deductibility_status TEXT DEFAULT 'LIKELY_DEDUCTIBLE',
+    income_tax_relevance TEXT DEFAULT 'DEDUCTIBLE',
+    expense_category TEXT DEFAULT 'MATERIALES',
+    payment_status TEXT DEFAULT 'PAGADA',
+    payment_method TEXT,
+    payment_date TEXT,
+    document_path TEXT,
+    is_investment_asset INTEGER DEFAULT 0,
+    fiscal_period TEXT NOT NULL,
+    notes TEXT,
+    data_json TEXT,
+    created_at TEXT,
+    updated_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_purchase_inv_period ON purchase_invoices(business_id, fiscal_period);
+  CREATE INDEX IF NOT EXISTS idx_purchase_inv_date ON purchase_invoices(business_id, invoice_date);
+
+  CREATE TABLE IF NOT EXISTS expense_payments (
+    id TEXT PRIMARY KEY,
+    purchase_invoice_id TEXT NOT NULL,
+    business_id TEXT NOT NULL,
+    amount REAL NOT NULL,
+    payment_date TEXT NOT NULL,
+    payment_method TEXT,
+    reference TEXT,
+    created_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS investment_assets (
+    id TEXT PRIMARY KEY,
+    business_id TEXT NOT NULL,
+    purchase_invoice_id TEXT,
+    description TEXT NOT NULL,
+    purchase_date TEXT NOT NULL,
+    supplier_name TEXT,
+    purchase_base REAL NOT NULL,
+    vat_amount REAL NOT NULL,
+    total_amount REAL NOT NULL,
+    business_use_percentage REAL DEFAULT 100,
+    depreciation_method TEXT DEFAULT 'TABLAS_OFICIALES',
+    depreciation_status TEXT DEFAULT 'NEEDS_GESTOR_REVIEW',
+    notes TEXT,
+    created_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS fiscal_periods (
+    id TEXT PRIMARY KEY,
+    business_id TEXT NOT NULL,
+    fiscal_year INTEGER NOT NULL,
+    quarter INTEGER NOT NULL,
+    status TEXT DEFAULT 'OPEN',
+    last_quality_check_at TEXT,
+    critical_incidents_count INTEGER DEFAULT 0,
+    warnings_count INTEGER DEFAULT 0,
+    package_path TEXT,
+    sent_at TEXT,
+    sent_to_email TEXT,
+    created_at TEXT,
+    updated_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS fiscal_incidents (
+    id TEXT PRIMARY KEY,
+    business_id TEXT NOT NULL,
+    fiscal_period TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    error_code TEXT NOT NULL,
+    message TEXT NOT NULL,
+    resolution_status TEXT DEFAULT 'OPEN',
+    created_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY,
+    business_id TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    field_changed TEXT,
+    old_value TEXT,
+    new_value TEXT,
+    changed_by TEXT DEFAULT 'USER_WHATSAPP',
+    reason TEXT,
+    timestamp TEXT NOT NULL
+  );
 `);
 
 export const DEFAULT_COMPANY = {
@@ -463,29 +602,48 @@ export function listBudgets(phone, limit = 20) {
 // ─── Métodos de Facturas ──────────────────────────────────────────────────────
 
 export function saveInvoice(phone, invoice) {
-  if (!invoice || !invoice.id) return;
+  if (!invoice || !invoice.id) return null;
   const cleanPhone = String(phone).replace(/\D/g, '');
   const now = new Date().toISOString();
-  const total = invoice.financials?.totalAmount || 0;
+  const total = Number(invoice.financials?.totalAmount ?? invoice.total_amount ?? invoice.totalAmount ?? 0);
+
+  const rectifiesId = invoice.rectifies_invoice_id || invoice.rectifiesInvoiceId || null;
+  const fiscalPeriod = invoice.fiscal_period || invoice.fiscalPeriod || null;
+  const verifactuHash = invoice.verifactu_hash || invoice.verifactuHash || null;
 
   const stmt = db.prepare(`
-    INSERT INTO invoices (id, budget_id, company_phone, client_name, total_amount, status, data_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO invoices (id, budget_id, company_phone, client_name, total_amount, status, data_json, rectifies_invoice_id, fiscal_period, verifactu_hash, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       status = excluded.status,
-      data_json = excluded.data_json
+      data_json = excluded.data_json,
+      total_amount = excluded.total_amount,
+      rectifies_invoice_id = excluded.rectifies_invoice_id,
+      fiscal_period = excluded.fiscal_period,
+      verifactu_hash = excluded.verifactu_hash
   `);
+
+  invoice.rectifiesInvoiceId = rectifiesId;
+  invoice.fiscalPeriod = fiscalPeriod;
+  invoice.verifactuHash = verifactuHash;
+  if (invoice.is_advance !== undefined) {
+    invoice.isAdvance = Boolean(invoice.is_advance);
+  }
 
   stmt.run(
     invoice.id,
-    invoice.budgetId || '',
+    invoice.budgetId || invoice.budget_id || '',
     cleanPhone,
-    invoice.client?.name || 'Cliente Particular',
+    invoice.client?.name || invoice.client_name || 'Cliente Particular',
     total,
     invoice.status || 'PENDIENTE_PAGO',
     JSON.stringify(invoice),
+    rectifiesId,
+    fiscalPeriod,
+    verifactuHash,
     now
   );
+  return invoice;
 }
 
 export function getInvoice(id) {
@@ -509,11 +667,35 @@ export function listInvoices(phone, limit = 20) {
 
 // ─── Métodos de Cobros ────────────────────────────────────────────────────────
 
-export function savePayment(phone, payment) {
-  if (!payment) return;
+export function savePayment(phone, paymentOrBudgetId, maybePayment) {
+  let cleanPhone = String(phone).replace(/\D/g, '');
+  let payment = maybePayment || paymentOrBudgetId;
+  let targetId = maybePayment ? paymentOrBudgetId : (payment?.budgetId || payment?.invoiceId || '');
+  if (!payment) return null;
   const pId = payment.id || `PAY-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-  const cleanPhone = String(phone).replace(/\D/g, '');
   const now = new Date().toISOString();
+
+  payment.id = pId;
+  payment.budgetId = targetId;
+
+  // Si también está asociado a una factura en invoices, actualizar sus pagos dentro de data_json
+  if (targetId) {
+    const invRow = db.prepare('SELECT data_json FROM invoices WHERE id = ?').get(targetId);
+    if (invRow) {
+      try {
+        const inv = JSON.parse(invRow.data_json);
+        if (!inv.payments) inv.payments = [];
+        inv.payments.push({
+          id: pId,
+          amount: Number(payment.amount || 0),
+          date: payment.date || now.split('T')[0],
+          method: payment.method || 'Transferencia',
+          concept: payment.concept || ''
+        });
+        db.prepare('UPDATE invoices SET data_json = ? WHERE id = ?').run(JSON.stringify(inv), targetId);
+      } catch (e) {}
+    }
+  }
 
   const stmt = db.prepare(`
     INSERT INTO payments (id, budget_id, company_phone, amount, method, concept, data_json, created_at)
@@ -522,10 +704,9 @@ export function savePayment(phone, payment) {
       data_json = excluded.data_json
   `);
 
-  payment.id = pId;
   stmt.run(
     pId,
-    payment.budgetId || '',
+    targetId,
     cleanPhone,
     Number(payment.amount || 0),
     payment.method || 'Bizum',
@@ -533,6 +714,7 @@ export function savePayment(phone, payment) {
     JSON.stringify(payment),
     now
   );
+  return payment;
 }
 
 export function getPayments(budgetId) {
@@ -1691,5 +1873,607 @@ export function listRecentMessages(chatId, limit = 50) {
     timestamp: row.timestamp,
     status: row.status
   }));
+}
+
+// ─── Métodos de Gestión Fiscal y Libros Registro (AEAT / Gestoría) ────────────
+
+/**
+ * Obtiene el perfil fiscal completo de un negocio
+ */
+export function getTaxProfile(businessId) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  const row = db.prepare('SELECT * FROM business_tax_profiles WHERE business_id = ?').get(cleanId);
+  if (!row) {
+    // Si aún no existe el perfil fiscal específico, inicializarlo a partir de la tabla companies
+    const comp = getCompany(cleanId);
+    return {
+      businessId: cleanId,
+      legalName: comp.fiscalName || comp.name || 'Empresa de Reformas',
+      taxId: comp.cif || '',
+      legalForm: comp.entityType === 'empresa' ? 'SL' : 'AUTONOMO',
+      economicActivity: comp.trade || 'Reformas y Construcción',
+      iaeCode: '504.1',
+      taxRegime: 'GENERAL',
+      vatRegime: 'GENERAL',
+      incomeTaxRegime: comp.entityType === 'empresa' ? 'IMPUESTO_SOCIEDADES' : 'ESTIMACION_DIRECTA_SIMPLIFICADA',
+      vatFrequency: 'QUARTERLY',
+      incomeTaxFrequency: comp.entityType === 'empresa' ? 'NOT_APPLICABLE' : 'QUARTERLY',
+      irpfWithholdingApplicable: comp.irpfRate > 0 ? 1 : 0,
+      defaultIrpfRate: Number(comp.irpfRate || 0),
+      defaultVatRate: 21,
+      accountingStartDate: `${new Date().getFullYear()}-01-01`,
+      fiscalYear: new Date().getFullYear(),
+      currentInvoiceSeries: comp.invoiceSeries || '2026-',
+      verifactuStatus: 'PREPARED',
+      gestorName: 'Asesoría Fiscal',
+      gestorEmail: comp.gestoriaEmail || null,
+      gestorPhone: null,
+      gestorNotes: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  return {
+    businessId: row.business_id,
+    legalName: row.legal_name,
+    taxId: row.tax_id,
+    legalForm: row.legal_form,
+    economicActivity: row.economic_activity,
+    iaeCode: row.iae_code,
+    taxRegime: row.tax_regime,
+    vatRegime: row.vat_regime,
+    incomeTaxRegime: row.income_tax_regime,
+    vatFrequency: row.vat_frequency,
+    incomeTaxFrequency: row.income_tax_frequency,
+    irpfWithholdingApplicable: Boolean(row.irpf_withholding_applicable),
+    defaultIrpfRate: Number(row.default_irpf_rate || 0),
+    defaultVatRate: Number(row.default_vat_rate || 21),
+    accountingStartDate: row.accounting_start_date,
+    fiscalYear: Number(row.fiscal_year || 2026),
+    currentInvoiceSeries: row.current_invoice_series,
+    verifactuStatus: row.verifactu_status,
+    gestorName: row.gestor_name,
+    gestorEmail: row.gestor_email,
+    gestorPhone: row.gestor_phone,
+    gestorNotes: row.gestor_notes,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+/**
+ * Guarda o actualiza el perfil fiscal del negocio
+ */
+export function saveTaxProfile(businessId, profileData = {}) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  const existing = getTaxProfile(cleanId);
+  const updated = { ...existing, ...profileData, businessId: cleanId, updatedAt: new Date().toISOString() };
+
+  const stmt = db.prepare(`
+    INSERT INTO business_tax_profiles (
+      business_id, legal_name, tax_id, legal_form, economic_activity, iae_code,
+      tax_regime, vat_regime, income_tax_regime, vat_frequency, income_tax_frequency,
+      irpf_withholding_applicable, default_irpf_rate, default_vat_rate,
+      accounting_start_date, fiscal_year, current_invoice_series, verifactu_status,
+      gestor_name, gestor_email, gestor_phone, gestor_notes, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(business_id) DO UPDATE SET
+      legal_name = excluded.legal_name,
+      tax_id = excluded.tax_id,
+      legal_form = excluded.legal_form,
+      economic_activity = excluded.economic_activity,
+      iae_code = excluded.iae_code,
+      tax_regime = excluded.tax_regime,
+      vat_regime = excluded.vat_regime,
+      income_tax_regime = excluded.income_tax_regime,
+      vat_frequency = excluded.vat_frequency,
+      income_tax_frequency = excluded.income_tax_frequency,
+      irpf_withholding_applicable = excluded.irpf_withholding_applicable,
+      default_irpf_rate = excluded.default_irpf_rate,
+      default_vat_rate = excluded.default_vat_rate,
+      accounting_start_date = excluded.accounting_start_date,
+      fiscal_year = excluded.fiscal_year,
+      current_invoice_series = excluded.current_invoice_series,
+      verifactu_status = excluded.verifactu_status,
+      gestor_name = excluded.gestor_name,
+      gestor_email = excluded.gestor_email,
+      gestor_phone = excluded.gestor_phone,
+      gestor_notes = excluded.gestor_notes,
+      updated_at = excluded.updated_at
+  `);
+
+  stmt.run(
+    updated.businessId,
+    updated.legalName,
+    updated.taxId,
+    updated.legalForm,
+    updated.economicActivity,
+    updated.iaeCode,
+    updated.taxRegime,
+    updated.vatRegime,
+    updated.incomeTaxRegime,
+    updated.vatFrequency,
+    updated.incomeTaxFrequency,
+    updated.irpfWithholdingApplicable ? 1 : 0,
+    updated.defaultIrpfRate,
+    updated.defaultVatRate,
+    updated.accountingStartDate,
+    updated.fiscalYear,
+    updated.currentInvoiceSeries,
+    updated.verifactuStatus,
+    updated.gestorName,
+    updated.gestorEmail,
+    updated.gestorPhone,
+    updated.gestorNotes,
+    updated.createdAt,
+    updated.updatedAt
+  );
+
+  return getTaxProfile(cleanId);
+}
+
+/**
+ * Guarda o actualiza una Factura Recibida (Compra / Proveedor)
+ */
+export function savePurchaseInvoice(businessId, inv = {}) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  const id = inv.id || `REC-${new Date().getFullYear()}-${Date.now().toString().slice(-4)}`;
+  const now = new Date().toISOString();
+
+  // Calcular periodo fiscal por fecha de factura si no viene dado
+  let fiscalPeriod = inv.fiscalPeriod || inv.fiscal_period;
+  const invDate = inv.invoiceDate || inv.issueDate || inv.issue_date || now.split('T')[0];
+  if (!fiscalPeriod && invDate) {
+    const d = new Date(invDate);
+    if (!isNaN(d.getTime())) {
+      const q = Math.floor(d.getMonth() / 3) + 1;
+      fiscalPeriod = `${d.getFullYear()}_Q${q}`;
+    }
+  }
+  if (!fiscalPeriod) {
+    const q = Math.floor(new Date().getMonth() / 3) + 1;
+    fiscalPeriod = `${new Date().getFullYear()}_Q${q}`;
+  }
+
+  const base = Number(inv.taxableBase ?? inv.taxBase ?? inv.baseAmount ?? 0);
+  const vatRate = Number(inv.vatRate !== undefined ? inv.vatRate : 21);
+  const vatAmount = Number(inv.vatAmount !== undefined ? inv.vatAmount : (base * vatRate) / 100);
+  const total = Number(inv.totalAmount !== undefined ? inv.totalAmount : base + vatAmount);
+
+  // Deducibilidad de IVA
+  const deductibilityStatus = inv.deductibilityStatus || 'LIKELY_DEDUCTIBLE';
+  const deductPercent = Number(inv.deductiblePercentage !== undefined ? inv.deductiblePercentage : (inv.vatDeductible === false || deductibilityStatus === 'NOT_DEDUCTIBLE' ? 0 : 100));
+  const deductibleVat = deductibilityStatus === 'NOT_DEDUCTIBLE' || inv.vatDeductible === false ? 0 : (vatAmount * (deductPercent / 100));
+  const isAsset = Boolean(inv.isInvestmentAsset || base >= 3005.06 || total >= 3005.06);
+
+  const stmt = db.prepare(`
+    INSERT INTO purchase_invoices (
+      id, business_id, supplier_name, supplier_tax_id, invoice_number,
+      invoice_date, operation_date, description, taxable_base, vat_rate,
+      vat_amount, total_amount, deductible_vat_amount, deductibility_status,
+      income_tax_relevance, expense_category, payment_status, payment_method,
+      payment_date, document_path, is_investment_asset, fiscal_period, notes,
+      data_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      supplier_name = excluded.supplier_name,
+      supplier_tax_id = excluded.supplier_tax_id,
+      invoice_number = excluded.invoice_number,
+      invoice_date = excluded.invoice_date,
+      operation_date = excluded.operation_date,
+      description = excluded.description,
+      taxable_base = excluded.taxable_base,
+      vat_rate = excluded.vat_rate,
+      vat_amount = excluded.vat_amount,
+      total_amount = excluded.total_amount,
+      deductible_vat_amount = excluded.deductible_vat_amount,
+      deductibility_status = excluded.deductibility_status,
+      income_tax_relevance = excluded.income_tax_relevance,
+      expense_category = excluded.expense_category,
+      payment_status = excluded.payment_status,
+      payment_method = excluded.payment_method,
+      payment_date = excluded.payment_date,
+      document_path = excluded.document_path,
+      is_investment_asset = excluded.is_investment_asset,
+      fiscal_period = excluded.fiscal_period,
+      notes = excluded.notes,
+      data_json = excluded.data_json,
+      updated_at = excluded.updated_at
+  `);
+
+  stmt.run(
+    id,
+    cleanId,
+    inv.supplierName || 'Proveedor General',
+    inv.supplierTaxId || null,
+    inv.invoiceNumber || id,
+    invDate,
+    inv.operationDate || invDate,
+    inv.description || 'Compra de materiales y suministros',
+    Number(base.toFixed(2)),
+    vatRate,
+    Number(vatAmount.toFixed(2)),
+    Number(total.toFixed(2)),
+    Number(deductibleVat.toFixed(2)),
+    deductibilityStatus,
+    inv.incomeTaxRelevance || 'DEDUCTIBLE',
+    inv.expenseCategory || inv.category || 'MATERIALES',
+    inv.paymentStatus || 'PAGADA',
+    inv.paymentMethod || 'Tarjeta',
+    inv.paymentDate || invDate,
+    inv.documentPath || null,
+    isAsset ? 1 : 0,
+    fiscalPeriod,
+    inv.notes || null,
+    JSON.stringify(inv),
+    now,
+    now
+  );
+
+  return getPurchaseInvoice(id);
+}
+
+/**
+ * Obtiene una factura recibida por su ID
+ */
+export function getPurchaseInvoice(id) {
+  if (!id) return null;
+  const row = db.prepare('SELECT * FROM purchase_invoices WHERE id = ?').get(id);
+  if (!row) return null;
+  return {
+    id: row.id,
+    businessId: row.business_id,
+    supplierName: row.supplier_name,
+    supplierTaxId: row.supplier_tax_id,
+    invoiceNumber: row.invoice_number,
+    invoiceDate: row.invoice_date,
+    issueDate: row.invoice_date,
+    operationDate: row.operation_date,
+    description: row.description,
+    taxableBase: Number(row.taxable_base) || 0,
+    taxBase: Number(row.taxable_base) || 0,
+    vatRate: row.vat_rate != null ? Number(row.vat_rate) : 21,
+    vatAmount: row.vat_amount != null ? Number(row.vat_amount) : 0,
+    totalAmount: Number(row.total_amount) || 0,
+    deductibleVatAmount: Number(row.deductible_vat_amount) || 0,
+    vatDeductible: row.deductibility_status !== 'NOT_DEDUCTIBLE' && Number(row.deductible_vat_amount) > 0,
+    deductiblePercentage: row.deductibility_status === 'NOT_DEDUCTIBLE' ? 0 : 100,
+    deductibilityStatus: row.deductibility_status,
+    incomeTaxRelevance: row.income_tax_relevance,
+    expenseCategory: row.expense_category,
+    category: row.expense_category,
+    paymentStatus: row.payment_status,
+    paymentMethod: row.payment_method,
+    paymentDate: row.payment_date,
+    paidAmount: Number(row.total_amount) || 0,
+    documentPath: row.document_path,
+    isInvestmentAsset: Boolean(row.is_investment_asset),
+    fiscalPeriod: row.fiscal_period,
+    notes: row.notes,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+/**
+ * Lista facturas recibidas de un negocio con filtros opcionales
+ */
+export function listPurchaseInvoices(businessId, { fiscalPeriod, startDate, endDate } = {}) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  let query = 'SELECT * FROM purchase_invoices WHERE business_id = ?';
+  const params = [cleanId];
+
+  if (fiscalPeriod) {
+    const altPeriod = fiscalPeriod.includes('_') ? fiscalPeriod.replace('_', '-') : fiscalPeriod.replace('-', '_');
+    query += ' AND (fiscal_period = ? OR fiscal_period = ?)';
+    params.push(fiscalPeriod, altPeriod);
+  }
+  if (startDate) {
+    query += ' AND invoice_date >= ?';
+    params.push(startDate);
+  }
+  if (endDate) {
+    query += ' AND invoice_date <= ?';
+    params.push(endDate);
+  }
+  query += ' ORDER BY invoice_date ASC, created_at ASC';
+
+  const rows = db.prepare(query).all(...params);
+  return rows.map(row => ({
+    id: row.id,
+    businessId: row.business_id,
+    supplierName: row.supplier_name,
+    supplierTaxId: row.supplier_tax_id,
+    invoiceNumber: row.invoice_number,
+    invoiceDate: row.invoice_date,
+    issueDate: row.invoice_date,
+    operationDate: row.operation_date,
+    description: row.description,
+    taxableBase: Number(row.taxable_base) || 0,
+    taxBase: Number(row.taxable_base) || 0,
+    vatRate: row.vat_rate != null ? Number(row.vat_rate) : 21,
+    vatAmount: row.vat_amount != null ? Number(row.vat_amount) : 0,
+    totalAmount: Number(row.total_amount) || 0,
+    deductibleVatAmount: Number(row.deductible_vat_amount) || 0,
+    vatDeductible: row.deductibility_status !== 'NOT_DEDUCTIBLE' && Number(row.deductible_vat_amount) > 0,
+    deductiblePercentage: row.deductibility_status === 'NOT_DEDUCTIBLE' ? 0 : 100,
+    deductibilityStatus: row.deductibility_status,
+    incomeTaxRelevance: row.income_tax_relevance,
+    expenseCategory: row.expense_category,
+    category: row.expense_category,
+    paymentStatus: row.payment_status,
+    paymentMethod: row.payment_method,
+    paymentDate: row.payment_date,
+    paidAmount: Number(row.total_amount) || 0,
+    documentPath: row.document_path,
+    isInvestmentAsset: Boolean(row.is_investment_asset),
+    fiscalPeriod: row.fiscal_period,
+    notes: row.notes,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }));
+}
+
+export function deletePurchaseInvoice(id) {
+  if (!id) return;
+  db.prepare('DELETE FROM purchase_invoices WHERE id = ?').run(id);
+}
+
+/**
+ * Registra un pago de gasto/compra (desacoplamiento de pagos)
+ */
+export function saveExpensePayment(businessId, p = {}) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  const id = p.id || `EXP-PAY-${Date.now()}`;
+  const now = new Date().toISOString();
+
+  const stmt = db.prepare(`
+    INSERT INTO expense_payments (id, purchase_invoice_id, business_id, amount, payment_date, payment_method, reference, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  stmt.run(
+    id,
+    p.purchaseInvoiceId || '',
+    cleanId,
+    Number(p.amount || 0),
+    p.paymentDate || now.split('T')[0],
+    p.paymentMethod || 'Transferencia',
+    p.reference || null,
+    now
+  );
+
+  return { id, ...p };
+}
+
+export function listExpensePayments(businessId, purchaseInvoiceId = null) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  let query = 'SELECT * FROM expense_payments WHERE business_id = ?';
+  const params = [cleanId];
+  if (purchaseInvoiceId) {
+    query += ' AND purchase_invoice_id = ?';
+    params.push(purchaseInvoiceId);
+  }
+  query += ' ORDER BY payment_date ASC';
+  return db.prepare(query).all(...params);
+}
+
+/**
+ * Bienes de Inversión (Activos > 3.005,06 €)
+ */
+export function saveInvestmentAsset(businessId, asset = {}) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  const id = asset.id || `AST-${new Date().getFullYear()}-${Date.now().toString().slice(-4)}`;
+  const now = new Date().toISOString();
+
+  const stmt = db.prepare(`
+    INSERT INTO investment_assets (
+      id, business_id, purchase_invoice_id, description, purchase_date,
+      supplier_name, purchase_base, vat_amount, total_amount, business_use_percentage,
+      depreciation_method, depreciation_status, notes, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      description = excluded.description,
+      purchase_base = excluded.purchase_base,
+      vat_amount = excluded.vat_amount,
+      total_amount = excluded.total_amount,
+      business_use_percentage = excluded.business_use_percentage,
+      notes = excluded.notes
+  `);
+
+  stmt.run(
+    id,
+    cleanId,
+    asset.purchaseInvoiceId || null,
+    asset.description || 'Bien de inversión / maquinaria',
+    asset.purchaseDate || now.split('T')[0],
+    asset.supplierName || 'Proveedor Maquinaria',
+    Number(asset.purchaseBase || 0),
+    Number(asset.vatAmount || 0),
+    Number(asset.totalAmount || 0),
+    Number(asset.businessUsePercentage || 100),
+    asset.depreciationMethod || 'TABLAS_OFICIALES',
+    asset.depreciationStatus || 'NEEDS_GESTOR_REVIEW',
+    asset.notes || null,
+    now
+  );
+
+  return { id, ...asset };
+}
+
+export function listInvestmentAssets(businessId) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  return db.prepare('SELECT * FROM investment_assets WHERE business_id = ? ORDER BY purchase_date ASC').all(cleanId);
+}
+
+/**
+ * Periodos Fiscales y Control de Trimestre
+ */
+export function getOrCreateFiscalPeriod(businessId, year, quarter) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  const id = `${cleanId}_${year}_Q${quarter}`;
+  let period = db.prepare('SELECT * FROM fiscal_periods WHERE id = ?').get(id);
+
+  if (!period) {
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO fiscal_periods (id, business_id, fiscal_year, quarter, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'OPEN', ?, ?)
+    `).run(id, cleanId, year, quarter, now, now);
+    period = db.prepare('SELECT * FROM fiscal_periods WHERE id = ?').get(id);
+  }
+
+  return {
+    id: period.id,
+    businessId: period.business_id,
+    fiscalYear: period.fiscal_year,
+    quarter: period.quarter,
+    status: period.status,
+    lastQualityCheckAt: period.last_quality_check_at,
+    criticalIncidentsCount: period.critical_incidents_count,
+    warningsCount: period.warnings_count,
+    packagePath: period.package_path,
+    sentAt: period.sent_at,
+    sentToEmail: period.sent_to_email,
+    createdAt: period.created_at,
+    updatedAt: period.updated_at
+  };
+}
+
+export function updateFiscalPeriodStatus(businessId, year, quarter, status, extra = {}) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  const id = `${cleanId}_${year}_Q${quarter}`;
+  const now = new Date().toISOString();
+
+  let query = 'UPDATE fiscal_periods SET status = ?, updated_at = ?';
+  const params = [status, now];
+
+  if (extra.packagePath) {
+    query += ', package_path = ?';
+    params.push(extra.packagePath);
+  }
+  if (extra.sentToEmail) {
+    query += ', sent_to_email = ?, sent_at = ?';
+    params.push(extra.sentToEmail, now);
+  }
+  if (extra.criticalCount !== undefined) {
+    query += ', critical_incidents_count = ?';
+    params.push(extra.criticalCount);
+  }
+  if (extra.warningsCount !== undefined) {
+    query += ', warnings_count = ?';
+    params.push(extra.warningsCount);
+  }
+  if (extra.lastQualityCheckAt) {
+    query += ', last_quality_check_at = ?';
+    params.push(extra.lastQualityCheckAt);
+  }
+
+  query += ' WHERE id = ?';
+  params.push(id);
+
+  db.prepare(query).run(...params);
+  return getOrCreateFiscalPeriod(cleanId, year, quarter);
+}
+
+/**
+ * Incidencias de Calidad Fiscal (Data Quality Checks)
+ */
+export function saveFiscalIncident(businessId, incident = {}) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  const id = incident.id || `INC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO fiscal_incidents (id, business_id, fiscal_period, entity_type, entity_id, severity, error_code, message, resolution_status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    cleanId,
+    incident.fiscalPeriod || 'GENERAL',
+    incident.entityType || 'INVOICE',
+    incident.entityId || '',
+    incident.severity || 'WARNING',
+    incident.errorCode || 'UNKNOWN_ERROR',
+    incident.message || 'Incidencia fiscal detectada',
+    incident.resolutionStatus || 'OPEN',
+    now
+  );
+
+  return { id, ...incident };
+}
+
+export function listFiscalIncidents(businessId, fiscalPeriod = null, status = 'OPEN') {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  let query = 'SELECT * FROM fiscal_incidents WHERE business_id = ?';
+  const params = [cleanId];
+  if (fiscalPeriod) {
+    query += ' AND fiscal_period = ?';
+    params.push(fiscalPeriod);
+  }
+  if (status) {
+    query += ' AND resolution_status = ?';
+    params.push(status);
+  }
+  query += ' ORDER BY created_at DESC';
+  return db.prepare(query).all(...params);
+}
+
+export function resolveFiscalIncident(incidentId) {
+  db.prepare("UPDATE fiscal_incidents SET resolution_status = 'RESOLVED' WHERE id = ?").run(incidentId);
+}
+
+/**
+ * Trazabilidad y Auditoría Fiscal (Audit Log)
+ */
+export function recordAuditLog({
+  businessId,
+  entityType,
+  entityId,
+  action,
+  fieldChanged = null,
+  oldValue = null,
+  newValue = null,
+  changedBy = 'USER_WHATSAPP',
+  reason = null
+}) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  const id = `LOG-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO audit_logs (id, business_id, entity_type, entity_id, action, field_changed, old_value, new_value, changed_by, reason, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    cleanId,
+    entityType || 'FISCAL_RECORD',
+    entityId || '',
+    action || 'UPDATE',
+    fieldChanged,
+    oldValue ? String(oldValue) : null,
+    newValue ? String(newValue) : null,
+    changedBy,
+    reason,
+    now
+  );
+  return { id, timestamp: now };
+}
+
+export function listAuditLogs(businessId, { entityType, entityId } = {}) {
+  const cleanId = String(businessId || '').replace(/\D/g, '');
+  let query = 'SELECT * FROM audit_logs WHERE business_id = ?';
+  const params = [cleanId];
+  if (entityType) {
+    query += ' AND entity_type = ?';
+    params.push(entityType);
+  }
+  if (entityId) {
+    query += ' AND entity_id = ?';
+    params.push(entityId);
+  }
+  query += ' ORDER BY timestamp DESC';
+  return db.prepare(query).all(...params);
 }
 

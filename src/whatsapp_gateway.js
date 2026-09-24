@@ -19,13 +19,24 @@ import zlib from 'node:zlib';
 import dotenv from 'dotenv';
 import { Resend } from 'resend';
 import { PresuVozEngine } from './engine.js';
-import { GEMINI_SYSTEM_PROMPT, GEMINI_UPDATE_PROMPT } from './ai_service.js';
+import {
+  GEMINI_SYSTEM_PROMPT,
+  GEMINI_UPDATE_PROMPT,
+  parsePurchaseInvoiceWithGemini,
+  validateAndNormalizePurchaseInvoice
+} from './ai_service.js';
 import {
   generateBudgetPDF,
   generateInvoicePDF,
   generateReceiptPDF,
   generateQuarterTaxPDF
 } from './pdf_service.js';
+import {
+  buildGestoriaPackageZip,
+  sendFiscalPackageToGestoria,
+  formatQuarterWhatsAppSummary,
+  getQuarterSummary
+} from './fiscal_service.js';
 import {
   getCompany,
   saveCompany,
@@ -37,6 +48,11 @@ import {
   listInvoices,
   savePayment,
   getPayments,
+  savePurchaseInvoice,
+  saveExpensePayment,
+  saveInvestmentAsset,
+  getTaxProfile,
+  saveTaxProfile,
   getQuarterInvoices,
   generateQuarterCSV,
   saveAppointment,
@@ -2181,6 +2197,56 @@ async function startWhatsAppGateway() {
       return;
     }
 
+    // 4.1 Factura de compra / gasto recibido (desde audio o texto interpretado por Gemini)
+    if (aiResult?.action === 'purchase_invoice' && aiResult?.purchaseInvoiceInfo) {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const normalizedInvoice = validateAndNormalizePurchaseInvoice(aiResult.purchaseInvoiceInfo, cleanPhone);
+      const savedInvoice = savePurchaseInvoice(cleanPhone, normalizedInvoice);
+
+      if (normalizedInvoice.isInvestmentAsset) {
+        saveInvestmentAsset(cleanPhone, {
+          purchaseInvoiceId: savedInvoice.id,
+          description: savedInvoice.description || savedInvoice.supplierName,
+          purchaseDate: savedInvoice.issueDate,
+          supplierName: savedInvoice.supplierName,
+          purchaseBase: savedInvoice.taxBase,
+          vatAmount: savedInvoice.vatAmount,
+          totalAmount: savedInvoice.totalAmount
+        });
+      }
+
+      saveExpensePayment(cleanPhone, {
+        purchaseInvoiceId: savedInvoice.id,
+        amount: savedInvoice.paidAmount,
+        paymentDate: savedInvoice.issueDate,
+        paymentMethod: aiResult.paymentInfo?.method || 'Tarjeta',
+        reference: `Factura ${savedInvoice.invoiceNumber}`
+      });
+
+      const fmtEur = num => `${Number(num || 0).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+      const lines = [
+        '🧾 *¡GASTO / FACTURA DE PROVEEDOR REGISTRADA!*',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `🏢 *Proveedor:* ${savedInvoice.supplierName} _(${savedInvoice.supplierTaxId || '⚠️ Sin NIF/CIF'})_`,
+        `📄 *Nº Factura:* ${savedInvoice.invoiceNumber}`,
+        `📅 *Fecha:* ${savedInvoice.issueDate}`,
+        `📦 *Concepto:* ${savedInvoice.description}`,
+        `💰 *Base Imponible:* ${fmtEur(savedInvoice.taxBase)}`,
+        `📊 *IVA (${savedInvoice.vatRate}%):* ${fmtEur(savedInvoice.vatAmount)}`,
+        savedInvoice.irpfRetention > 0 ? `✂️ *Retención IRPF:* ${fmtEur(savedInvoice.irpfRetention)}` : '',
+        `🏷️ *TOTAL:* *${fmtEur(savedInvoice.totalAmount)}*`,
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        savedInvoice.deductibilityStatus === 'NEEDS_REVIEW'
+          ? '⚠️ *Nota fiscal:* Pendiente de revisión del gestor.'
+          : '✅ *Incorporado al libro registro oficial del IVA e IRPF.*',
+        normalizedInvoice.isInvestmentAsset ? '🏗️ *Aviso:* Registrado como Bien de Inversión sujeto a amortización.' : ''
+      ].filter(Boolean);
+
+      const sentPinv = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sentPinv?.key?.id) botSentMessageIds.add(sentPinv.key.id);
+      return;
+    }
+
     // 5. Consulta datos empresa
     if (aiResult?.action === 'show_company') {
       const companyText = formatCompanyForWhatsApp(session.company);
@@ -2532,10 +2598,13 @@ async function startWhatsAppGateway() {
     try {
       const session = getUserSession(remoteJid, senderNumber);
 
-      // Si recibimos una imagen para el logotipo de la empresa
+      // Si recibimos una imagen para logotipo de empresa o factura de gasto/ticket
       if (isImage) {
-        const caption = (imageMsg.caption || '').trim().toLowerCase();
-        if (caption.includes('logo') || caption === 'foto' || caption === 'logotipo' || caption === 'mi logo' || caption === '') {
+        const rawCaption = (imageMsg.caption || '').trim();
+        const caption = rawCaption.toLowerCase();
+        const isExplicitLogo = caption.includes('logo') || caption === 'logotipo' || caption === 'mi logo';
+
+        if (isExplicitLogo) {
           try {
             console.log(`🖼️ Imagen de logotipo recibida de ${senderNumber}...`);
             const buffer = await downloadMediaMessage(
@@ -2564,6 +2633,83 @@ async function startWhatsAppGateway() {
             if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
           }
           return;
+        } else {
+          // Procesamiento inteligente de factura recibida / ticket de gasto con IA Multimodal y validación determinística
+          try {
+            console.log(`🧾 Imagen de factura/ticket recibida de ${senderNumber}... Descargando...`);
+            const buffer = await downloadMediaMessage(
+              { key: msg.key, message: messageContent },
+              'buffer',
+              {},
+              { logger, reuploadRequest: sock.updateMediaMessage }
+            );
+
+            // Guardar justificante en disco
+            const receiptsDir = path.resolve('data', 'purchase_receipts');
+            if (!fs.existsSync(receiptsDir)) fs.mkdirSync(receiptsDir, { recursive: true });
+            const receiptPath = path.join(receiptsDir, `${senderNumber}_${Date.now()}.jpg`);
+            fs.writeFileSync(receiptPath, buffer);
+
+            const rawExtraction = await parsePurchaseInvoiceWithGemini(
+              { buffer, mimeType: 'image/jpeg', caption: rawCaption },
+              GEMINI_API_KEY
+            );
+
+            const normalizedInvoice = validateAndNormalizePurchaseInvoice(rawExtraction, senderNumber, receiptPath);
+            const savedInvoice = savePurchaseInvoice(senderNumber, normalizedInvoice);
+
+            // Si es un bien de inversión (>3.005,06€), registrar automáticamente en inventario
+            if (normalizedInvoice.isInvestmentAsset) {
+              saveInvestmentAsset(senderNumber, {
+                purchaseInvoiceId: savedInvoice.id,
+                description: savedInvoice.description || savedInvoice.supplierName,
+                purchaseDate: savedInvoice.issueDate,
+                supplierName: savedInvoice.supplierName,
+                purchaseBase: savedInvoice.taxBase,
+                vatAmount: savedInvoice.vatAmount,
+                totalAmount: savedInvoice.totalAmount
+              });
+            }
+
+            // También registrar el pago del gasto
+            saveExpensePayment(senderNumber, {
+              purchaseInvoiceId: savedInvoice.id,
+              amount: savedInvoice.paidAmount,
+              paymentDate: savedInvoice.issueDate,
+              paymentMethod: rawExtraction.paymentMethod || 'Tarjeta',
+              reference: `Ticket ${savedInvoice.invoiceNumber}`
+            });
+
+            const fmtEur = num => `${Number(num || 0).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+            const lines = [
+              '🧾 *¡GASTO / FACTURA REGISTRADA PARA LA GESTORÍA!*',
+              '━━━━━━━━━━━━━━━━━━━━━━━━━',
+              `🏢 *Proveedor:* ${savedInvoice.supplierName} _(${savedInvoice.supplierTaxId || '⚠️ Sin NIF/CIF en ticket'})_`,
+              `📄 *Nº Factura / Ticket:* ${savedInvoice.invoiceNumber}`,
+              `📅 *Fecha:* ${savedInvoice.issueDate}`,
+              `📦 *Concepto:* ${savedInvoice.description}`,
+              `💰 *Base Imponible:* ${fmtEur(savedInvoice.taxBase)}`,
+              `📊 *IVA (${savedInvoice.vatRate}%):* ${fmtEur(savedInvoice.vatAmount)}`,
+              savedInvoice.irpfRetention > 0 ? `✂️ *Retención IRPF:* ${fmtEur(savedInvoice.irpfRetention)}` : '',
+              `🏷️ *TOTAL:* *${fmtEur(savedInvoice.totalAmount)}*`,
+              '━━━━━━━━━━━━━━━━━━━━━━━━━',
+              savedInvoice.deductibilityStatus === 'NEEDS_REVIEW'
+                ? '⚠️ *Nota fiscal:* Marcado para revisión del gestor (deducibilidad parcial o falta de CIF).'
+                : '✅ *Listo para deducir:* Incorporado al libro registro oficial del IVA e IRPF.',
+              normalizedInvoice.isInvestmentAsset ? '🏗️ *Aviso:* Supera 3.005,06 €, registrado como Bien de Inversión sujeto a amortización.' : ''
+            ].filter(Boolean);
+
+            const sentSuccess = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+            if (sentSuccess?.key?.id) botSentMessageIds.add(sentSuccess.key.id);
+            return;
+          } catch (receiptErr) {
+            console.error('❌ Error procesando factura recibida:', receiptErr.message);
+            const sentErr = await sock.sendMessage(remoteJid, {
+              text: `⚠️ *No se pudo procesar la factura/ticket:* ${receiptErr.message}`
+            });
+            if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+            return;
+          }
         }
       }
 
@@ -2704,6 +2850,49 @@ async function startWhatsAppGateway() {
               text: `🗑️ *Lista de compras vaciada con éxito.* Se han eliminado ${res.deletedCount} materiales de tu lista.`
             });
             if (sentClr?.key?.id) botSentMessageIds.add(sentClr.key.id);
+            return;
+          }
+
+          if (act.type === 'send_gestoria_package') {
+            const phone = session.phone || String(remoteJid).replace(/\D/g, '');
+            try {
+              const res = await sendFiscalPackageToGestoria({
+                businessId: phone,
+                year: act.data.year,
+                quarter: act.data.quarter,
+                resendInstance: resend
+              });
+
+              // También enviar el paquete ZIP y el informe PDF a WhatsApp para el profesional
+              const { zipBuffer, pdfBuffer, fileName } = await buildGestoriaPackageZip(phone, act.data.year, act.data.quarter);
+
+              const sentOk = await sock.sendMessage(remoteJid, {
+                text: `✅ *¡Paquete de Cierre Trimestral enviado con éxito!*\n\n📧 Se ha remitido el dossier completo a tu gestoría en *${res.targetEmail || session.company?.gestoriaEmail}*.\n\n📎 Te dejo aquí también una copia del ZIP oficial y el PDF para tu archivo personal:`
+              });
+              if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+
+              const sentZip = await sock.sendMessage(remoteJid, {
+                document: zipBuffer,
+                mimetype: 'application/zip',
+                fileName: fileName,
+                caption: `📦 *${fileName}*\nLibros Registro Oficiales AEAT en Excel multicapa y CSVs.`
+              });
+              if (sentZip?.key?.id) botSentMessageIds.add(sentZip.key.id);
+
+              const sentPdf = await sock.sendMessage(remoteJid, {
+                document: pdfBuffer,
+                mimetype: 'application/pdf',
+                fileName: `Informe_Fiscal_${act.data.year || '2026'}_Q${act.data.quarter || '3'}.pdf`,
+                caption: `📄 *Informe Oficial para Gestoría (PDF)*`
+              });
+              if (sentPdf?.key?.id) botSentMessageIds.add(sentPdf.key.id);
+
+            } catch (err) {
+              const sentErr = await sock.sendMessage(remoteJid, {
+                text: `⚠️ *Error al enviar el paquete a la gestoría:* ${err.message}`
+              });
+              if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+            }
             return;
           }
         } else if (evalResult.status === 'REJECTED') {
@@ -3142,6 +3331,56 @@ async function startWhatsAppGateway() {
         const detected = detectIntent(rawUserText);
         if (detected) {
           console.log(`⚡ [IntentRouter] Intención detectada: ${detected.intent}`, detected.params);
+
+          if (detected.intent === 'SEND_TO_GESTORIA') {
+            const comp = getCompany(senderNumber);
+            if (comp.gestoriaEmail) {
+              session.pendingAction = createProposedAction('C', 'send_gestoria_package', {
+                quarter: detected.params.quarter,
+                year: detected.params.year
+              }, 'Enviar paquete fiscal a gestoría');
+            }
+            const resolvedReply = await resolveIntent(detected, senderNumber, session);
+            if (resolvedReply) {
+              const sentIntentMsg = await sock.sendMessage(remoteJid, { text: resolvedReply });
+              if (sentIntentMsg?.key?.id) botSentMessageIds.add(sentIntentMsg.key.id);
+            }
+            return;
+          }
+
+          if (detected.intent === 'FISCAL_QUARTER_SUMMARY') {
+            const resolvedReply = await resolveIntent(detected, senderNumber, session);
+            if (resolvedReply) {
+              const sentIntentMsg = await sock.sendMessage(remoteJid, { text: resolvedReply });
+              if (sentIntentMsg?.key?.id) botSentMessageIds.add(sentIntentMsg.key.id);
+            }
+            try {
+              const { zipBuffer, pdfBuffer, fileName } = await buildGestoriaPackageZip(
+                senderNumber,
+                detected.params.year,
+                detected.params.quarter
+              );
+              const sentZip = await sock.sendMessage(remoteJid, {
+                document: zipBuffer,
+                mimetype: 'application/zip',
+                fileName: fileName,
+                caption: `📦 *${fileName}*\nLibro Oficial normalizado en Excel multicapa + CSVs.`
+              });
+              if (sentZip?.key?.id) botSentMessageIds.add(sentZip.key.id);
+
+              const sentPdf = await sock.sendMessage(remoteJid, {
+                document: pdfBuffer,
+                mimetype: 'application/pdf',
+                fileName: `Informe_Fiscal_${detected.params.year || new Date().getFullYear()}_Q${detected.params.quarter || 'Activo'}.pdf`,
+                caption: `📄 *Informe Oficial de Cierre para Gestoría (PDF)*`
+              });
+              if (sentPdf?.key?.id) botSentMessageIds.add(sentPdf.key.id);
+            } catch (fileErr) {
+              console.error('Error generando adjuntos de trimestre:', fileErr.message);
+            }
+            return;
+          }
+
           const resolvedReply = await resolveIntent(detected, senderNumber, session);
           if (resolvedReply) {
             const sentIntentMsg = await sock.sendMessage(remoteJid, { text: resolvedReply });

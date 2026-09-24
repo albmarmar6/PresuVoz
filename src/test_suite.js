@@ -1238,6 +1238,411 @@ assert(getConversationState(testChatId) === 'WAITING_FOR_INPUT', "Estado pasa a 
 cleanDb.prepare('DELETE FROM messages WHERE chat_id = ?').run(testChatId);
 setConversationState(testChatId, 'IDLE');
 
+// -----------------------------------------------------------------------------
+// CASO 22: Módulo Fiscal y Cierre Trimestral para Gestoría (Casos 1 al 14 - AEAT, Control de Calidad y Exportación)
+// -----------------------------------------------------------------------------
+console.log("\nTEST 22: Módulo Fiscal y Cierre Trimestral para Gestoría (Casos 1 al 14 - AEAT, Control de Calidad y Exportación)");
+import {
+  saveCompany as dbSaveCompanyFiscal,
+  saveInvoice as dbSaveInvoiceFiscal,
+  savePayment as dbSavePaymentFiscal,
+  saveTaxProfile,
+  getTaxProfile,
+  savePurchaseInvoice,
+  listPurchaseInvoices,
+  saveExpensePayment,
+  listExpensePayments,
+  saveInvestmentAsset,
+  listInvestmentAssets,
+  getOrCreateFiscalPeriod,
+  updateFiscalPeriodStatus,
+  listFiscalIncidents,
+  recordAuditLog,
+  listAuditLogs
+} from './db_service.js';
+import {
+  getFiscalPeriodBounds,
+  getQuarterSummary,
+  runFiscalQualityChecks,
+  generateNormalizedExcel,
+  generateGestoriaSummaryPDF,
+  generateIssuedInvoicesCSV,
+  generateReceivedInvoicesCSV,
+  buildGestoriaPackageZip,
+  sendFiscalPackageToGestoria,
+  formatQuarterWhatsAppSummary
+} from './fiscal_service.js';
+import fs from 'node:fs';
+
+const testFiscalPhone = '34655443322';
+const testFiscalPhoneB = '34699887766'; // Empresa B para prueba multi-tenancy
+
+// Limpieza inicial
+cleanDb.prepare('DELETE FROM invoices WHERE company_phone = ? OR company_phone = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM purchase_invoices WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM expense_payments WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM investment_assets WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM fiscal_periods WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM fiscal_incidents WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM audit_logs WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM companies WHERE phone = ? OR phone = ?').run(testFiscalPhone, testFiscalPhoneB);
+
+// Configurar perfil de empresa y perfil fiscal
+dbSaveCompanyFiscal(testFiscalPhone, {
+  name: 'Reformas Pro Martínez S.L.',
+  cif: 'B87654321',
+  address: 'Calle Mayor 10, Madrid',
+  gestoriaEmail: 'asesor@gestoriamartinez.es'
+});
+
+saveTaxProfile(testFiscalPhone, {
+  entityType: 'AUTONOMO',
+  vatRegime: 'GENERAL',
+  defaultVatRate: 21,
+  defaultIrpfRetentionRate: 15,
+  gestoriaEmail: 'asesor@gestoriamartinez.es'
+});
+
+// Periodo de prueba: Q3 2026 (1 julio 2026 a 30 septiembre 2026)
+const pBounds = getFiscalPeriodBounds(2026, 3);
+assert(pBounds.startDate === '2026-07-01' && pBounds.endDate === '2026-09-30', "Determina los límites exactos de Q3 2026");
+
+// CASO 1: Factura emitida normal (Base 1.000€, IVA 210€, Total 1.210€)
+const inv1 = dbSaveInvoiceFiscal(testFiscalPhone, {
+  id: 'INV-2026-001',
+  invoice_number: 'F-2026-001',
+  issue_date: '2026-07-10',
+  client_name: 'Alberto Gómez',
+  client_tax_id: '12345678Z',
+  client_address: 'Calle Luna 15, Madrid',
+  tax_base: 1000.00,
+  tax_rate: 21.00,
+  tax_amount: 210.00,
+  irpf_rate: 0,
+  irpf_retention: 0,
+  total_amount: 1210.00,
+  is_advance: 0,
+  fiscal_period: '2026_Q3'
+});
+assert(inv1.id === 'INV-2026-001', "CASO 1: Registra factura emitida F-2026-001");
+
+let qSum1 = getQuarterSummary(testFiscalPhone, 2026, 3);
+assert(qSum1.summary.issuedCount === 1, "CASO 1: Contabiliza 1 factura emitida");
+assert(qSum1.summary.issuedTaxBase === 1000, "CASO 1: Base imponible correcta (1.000€)");
+assert(qSum1.summary.issuedVatTotal === 210, "CASO 1: IVA devengado repercutido correcto (210€)");
+assert(qSum1.summary.issuedTotalAmount === 1210, "CASO 1: Total facturado correcto (1.210€)");
+
+// CASO 2: Factura recibida de proveedor (Leroy Merlin, Base 500€, IVA 105€, Total 605€)
+const pinv1 = savePurchaseInvoice(testFiscalPhone, {
+  id: 'PINV-001',
+  supplierName: 'Leroy Merlin España S.L.U.',
+  supplierTaxId: 'A12345678',
+  invoiceNumber: 'LM-998822',
+  issueDate: '2026-07-15',
+  category: 'MATERIALES',
+  description: 'Mortero, cemento y azulejo blanco',
+  taxBase: 500.00,
+  vatRate: 21.00,
+  vatAmount: 105.00,
+  irpfRetention: 0,
+  totalAmount: 605.00,
+  vatDeductible: true,
+  deductiblePercentage: 100,
+  deductibilityStatus: 'LIKELY_DEDUCTIBLE',
+  paidAmount: 605.00,
+  fiscalPeriod: '2026_Q3'
+});
+assert(pinv1.id === 'PINV-001', "CASO 2: Registra factura recibida de proveedor");
+
+let qSum2 = getQuarterSummary(testFiscalPhone, 2026, 3);
+assert(qSum2.summary.receivedCount === 1, "CASO 2: Contabiliza 1 factura recibida");
+assert(qSum2.summary.receivedTaxBase === 500, "CASO 2: Base deducible de compras correcta (500€)");
+assert(qSum2.summary.receivedVatSupported === 105, "CASO 2: IVA soportado correcto (105€)");
+assert(qSum2.summary.receivedVatDeductible === 105, "CASO 2: IVA deducible correcto (105€)");
+assert(qSum2.summary.modelo303.ivaDevengado === 210, "CASO 2: Modelo 303 IVA devengado = 210€");
+assert(qSum2.summary.modelo303.ivaDeducible === 105, "CASO 2: Modelo 303 IVA deducible = 105€");
+assert(qSum2.summary.modelo303.resultado === 105, "CASO 2: Modelo 303 resultado = 105€ a ingresar");
+assert(qSum2.summary.modelo303.tipoResultado === 'A_INGRESAR', "CASO 2: Modelo 303 tipo A_INGRESAR");
+
+// CASO 3: Factura emitida cobrada parcialmente (Total 1.210€, cobro 600€)
+dbSavePaymentFiscal(testFiscalPhone, 'INV-2026-001', {
+  amount: 600.00,
+  date: '2026-07-20',
+  method: 'Transferencia',
+  concept: 'Pago a cuenta obra'
+});
+let qSum3 = getQuarterSummary(testFiscalPhone, 2026, 3);
+assert(qSum3.summary.issuedTotalAmount === 1210, "CASO 3: Total factura sigue siendo 1.210€");
+assert(qSum3.summary.issuedCollectedTotal === 600, "CASO 3: Cobrado registrado exactamente 600€");
+assert(qSum3.summary.issuedPendingTotal === 610, "CASO 3: Pendiente de cobro exactamente 610€ (1.210 - 600)");
+assert(qSum3.invoices[0].isPaid === false, "CASO 3: Factura parcialmente cobrada figura como no pagada");
+
+// CASO 4: Factura con dos pagos distintos (Cobro 2: 610€ por Bizum -> Liquidada)
+dbSavePaymentFiscal(testFiscalPhone, 'INV-2026-001', {
+  amount: 610.00,
+  date: '2026-08-05',
+  method: 'Bizum',
+  concept: 'Liquidación final factura'
+});
+let qSum4 = getQuarterSummary(testFiscalPhone, 2026, 3);
+assert(qSum4.summary.issuedCollectedTotal === 1210, "CASO 4: Suma acumulada de cobros = 1.210€");
+assert(qSum4.summary.issuedPendingTotal === 0, "CASO 4: Pendiente pasa a 0€");
+assert(qSum4.invoices[0].isPaid === true, "CASO 4: Factura pasa a estado COBRADA");
+
+// CASO 5: Factura rectificativa vinculada a la factura previa
+const rect1 = dbSaveInvoiceFiscal(testFiscalPhone, {
+  id: 'INV-2026-R01',
+  invoice_number: 'R-2026-001',
+  issue_date: '2026-08-15',
+  client_name: 'Alberto Gómez',
+  client_tax_id: '12345678Z',
+  tax_base: -200.00,
+  tax_rate: 21.00,
+  tax_amount: -42.00,
+  total_amount: -242.00,
+  rectifies_invoice_id: 'INV-2026-001',
+  invoice_type: 'RECTIFICATIVA',
+  fiscal_period: '2026_Q3'
+});
+assert((rect1.rectifiesInvoiceId || rect1.rectifies_invoice_id) === 'INV-2026-001', "CASO 5: Factura rectificativa vinculada por ID");
+let qSum5 = getQuarterSummary(testFiscalPhone, 2026, 3);
+assert(qSum5.summary.rectificativas.count === 1, "CASO 5: Detecta 1 factura rectificativa");
+assert(qSum5.summary.rectificativas.base === -200, "CASO 5: Base rectificada -200€");
+assert(qSum5.summary.rectificativas.vat === -42, "CASO 5: Cuota IVA rectificada -42€");
+
+// CASO 6: Factura de anticipo (Devengo inmediato de IVA)
+const adv1 = dbSaveInvoiceFiscal(testFiscalPhone, {
+  id: 'INV-2026-ADV01',
+  invoice_number: 'F-2026-002',
+  issue_date: '2026-08-20',
+  client_name: 'María Santillana',
+  client_tax_id: '98765432B',
+  tax_base: 413.22,
+  tax_rate: 21.00,
+  tax_amount: 86.78,
+  total_amount: 500.00,
+  is_advance: 1,
+  fiscal_period: '2026_Q3'
+});
+assert(Boolean(adv1.isAdvance || adv1.is_advance) === true, "CASO 6: Factura guardada como anticipo");
+let qSum6 = getQuarterSummary(testFiscalPhone, 2026, 3);
+assert(qSum6.summary.advances.count === 1, "CASO 6: Detecta 1 factura de anticipo");
+assert(qSum6.summary.advances.total === 500, "CASO 6: Total anticipo devengado 500€");
+
+// CASO 7: Gasto sin IVA o exento (Seguro RC Profesional Mapfre 350€, IVA 0)
+const pinvExempt = savePurchaseInvoice(testFiscalPhone, {
+  id: 'PINV-002',
+  supplierName: 'Mapfre Seguros Generales',
+  supplierTaxId: 'A28000000',
+  invoiceNumber: 'MAP-2026-88',
+  issueDate: '2026-08-25',
+  category: 'SEGUROS',
+  description: 'Póliza Seguro Responsabilidad Civil Profesional',
+  taxBase: 350.00,
+  vatRate: 0.00,
+  vatAmount: 0.00,
+  totalAmount: 350.00,
+  vatDeductible: false,
+  deductiblePercentage: 0,
+  deductibilityStatus: 'LIKELY_DEDUCTIBLE', // Deducible en IRPF, exento de IVA
+  paidAmount: 350.00,
+  fiscalPeriod: '2026_Q3'
+});
+let qSum7 = getQuarterSummary(testFiscalPhone, 2026, 3);
+assert(qSum7.summary.receivedTaxBase === 850, "CASO 7: Base total compras 850€ (500 + 350)");
+assert(qSum7.summary.receivedVatSupported === 105, "CASO 7: IVA soportado sigue en 105€ (no suma IVA el seguro)");
+assert(qSum7.summary.modelo130.gastosDeduciblesIRPF >= 850, "CASO 7: Se computa el seguro como gasto en IRPF");
+
+// CASO 8: Gasto no deducible o en revisión (Combustible y Restauración)
+const pinvGas = savePurchaseInvoice(testFiscalPhone, {
+  id: 'PINV-003',
+  supplierName: 'Repsol Estación de Servicio',
+  supplierTaxId: 'A28003704',
+  invoiceNumber: 'REP-9921',
+  issueDate: '2026-09-01',
+  category: 'COMBUSTIBLE',
+  description: 'Gasóleo A furgoneta',
+  taxBase: 100.00,
+  vatRate: 21.00,
+  vatAmount: 21.00,
+  totalAmount: 121.00,
+  vatDeductible: true,
+  deductiblePercentage: 100, // Marcado al 100% pero en categoría combustible
+  deductibilityStatus: 'NEEDS_REVIEW',
+  paidAmount: 121.00,
+  fiscalPeriod: '2026_Q3'
+});
+let qSum8 = getQuarterSummary(testFiscalPhone, 2026, 3);
+assert(qSum8.summary.needsReviewCount >= 1, "CASO 8: Marca gasto como NEEDS_REVIEW");
+
+// CASO 9: Bien de inversión > 3.005,06 € (Maquinaria hormigonera 4.000€ + IVA)
+const pinvAsset = savePurchaseInvoice(testFiscalPhone, {
+  id: 'PINV-004',
+  supplierName: 'Maquinaria de Construcción Madrid S.L.',
+  supplierTaxId: 'B82233445',
+  invoiceNumber: 'MAQ-4451',
+  issueDate: '2026-09-05',
+  category: 'HERRAMIENTAS',
+  description: 'Hormigonera industrial 350L y generador diésel',
+  taxBase: 4000.00,
+  vatRate: 21.00,
+  vatAmount: 840.00,
+  totalAmount: 4840.00,
+  vatDeductible: true,
+  deductiblePercentage: 100,
+  deductibilityStatus: 'LIKELY_DEDUCTIBLE',
+  paidAmount: 4840.00,
+  fiscalPeriod: '2026_Q3'
+});
+
+// Calidad fiscal antes de registrar en investment_assets -> debe avisar de ASSET_OVER_THRESHOLD
+let qCheckAsset = runFiscalQualityChecks(testFiscalPhone, 2026, 3);
+assert(qCheckAsset.incidents.some(i => i.errorCode === 'ASSET_OVER_THRESHOLD'), "CASO 9: Calidad fiscal detecta gasto > 3.005,06€ como bien de inversión");
+
+// Registrar en la tabla de bienes de inversión
+saveInvestmentAsset(testFiscalPhone, {
+  purchaseInvoiceId: 'PINV-004',
+  description: 'Hormigonera industrial 350L y generador diésel',
+  purchaseDate: '2026-09-05',
+  supplierName: 'Maquinaria de Construcción Madrid S.L.',
+  purchaseBase: 4000.00,
+  vatAmount: 840.00,
+  totalAmount: 4840.00
+});
+let assetsList = listInvestmentAssets(testFiscalPhone);
+assert(assetsList.length === 1, "CASO 9: Activo inventariado en investment_assets");
+
+// CASO 10: Detección de factura duplicada
+const dupInv = dbSaveInvoiceFiscal(testFiscalPhone, {
+  id: 'INV-DUP-TEST',
+  invoice_number: 'F-2026-001', // Duplicada a propósito
+  issue_date: '2026-09-10',
+  client_name: 'Cliente Duplicado',
+  client_tax_id: '11223344X',
+  tax_base: 100.00,
+  tax_rate: 21.00,
+  tax_amount: 21.00,
+  total_amount: 121.00,
+  fiscal_period: '2026_Q3'
+});
+let qCheckDup = runFiscalQualityChecks(testFiscalPhone, 2026, 3);
+assert(qCheckDup.criticalCount >= 1, "CASO 10: Detecta incidencia crítica ante duplicidad");
+assert(qCheckDup.incidents.some(i => i.errorCode === 'DUPLICATE_INVOICE_NUMBER'), "CASO 10: Error DUPLICATE_INVOICE_NUMBER detectado");
+assert(qCheckDup.isValid === false, "CASO 10: Marca el periodo como NO VÁLIDO para enviar");
+// Limpiar la duplicada para continuar
+cleanDb.prepare('DELETE FROM invoices WHERE id = ?').run('INV-DUP-TEST');
+
+// CASO 11: Factura > 400€ sin NIF de cliente
+const noNifInv = dbSaveInvoiceFiscal(testFiscalPhone, {
+  id: 'INV-NONIF-TEST',
+  invoice_number: 'F-2026-999',
+  issue_date: '2026-09-12',
+  client_name: 'Particular Desconocido',
+  client_tax_id: '', // Sin NIF
+  tax_base: 500.00,
+  tax_rate: 21.00,
+  tax_amount: 105.00,
+  total_amount: 605.00,
+  fiscal_period: '2026_Q3'
+});
+let qCheckNoNif = runFiscalQualityChecks(testFiscalPhone, 2026, 3);
+assert(qCheckNoNif.incidents.some(i => i.errorCode === 'MISSING_CUSTOMER_NIF'), "CASO 11: Detecta factura > 400€ sin NIF de cliente");
+cleanDb.prepare('DELETE FROM invoices WHERE id = ?').run('INV-NONIF-TEST');
+
+// CASO 12: Aislamiento estricto multi-inquilino (Multi-Tenancy)
+// Crear datos para Empresa B
+dbSaveCompanyFiscal(testFiscalPhoneB, {
+  name: 'Fontanería Hermanos Pérez S.L.',
+  cif: 'B99112233'
+});
+dbSaveInvoiceFiscal(testFiscalPhoneB, {
+  id: 'INV-EMP-B-1',
+  invoice_number: 'FB-2026-01',
+  issue_date: '2026-07-25',
+  client_name: 'Cliente Empresa B',
+  client_tax_id: '55443322K',
+  tax_base: 9999.00,
+  tax_rate: 21.00,
+  tax_amount: 2099.79,
+  total_amount: 12098.79,
+  fiscal_period: '2026_Q3'
+});
+
+const sumCompanyA = getQuarterSummary(testFiscalPhone, 2026, 3);
+const sumCompanyB = getQuarterSummary(testFiscalPhoneB, 2026, 3);
+assert(sumCompanyA.summary.issuedTaxBase !== sumCompanyB.summary.issuedTaxBase, "CASO 12: Bases imponibles de A y B son distintas");
+assert(sumCompanyA.invoices.every(inv => inv.id !== 'INV-EMP-B-1'), "CASO 12: Empresa A no ve ninguna factura de Empresa B");
+assert(sumCompanyB.invoices.length === 1 && sumCompanyB.summary.issuedTaxBase === 9999, "CASO 12: Empresa B contiene exclusivamente sus 9.999€");
+
+// CASO 13: Cierre trimestral completo, generación de ZIP y Excel normalizado AEAT
+const pkgZip = await buildGestoriaPackageZip(testFiscalPhone, 2026, 3);
+assert(pkgZip.fileName.includes('Cierre_Fiscal_2026_Q3'), "CASO 13: Nombre de archivo ZIP normalizado");
+assert(pkgZip.zipBuffer && pkgZip.zipBuffer.length > 500, "CASO 13: Buffer del archivo ZIP generado con éxito");
+assert(fs.existsSync(pkgZip.zipPath), "CASO 13: Archivo ZIP guardado físicamente en disco");
+
+// Verificar hojas y contenido del Excel
+const excelBuffer = await generateNormalizedExcel(testFiscalPhone, 2026, 3);
+assert(excelBuffer && excelBuffer.length > 1000, "CASO 13: Excel normalizado generado con éxito (>1KB)");
+
+// Verificar CSVs con BOM UTF-8 y delimitador punto y coma
+const csvEmitidas = generateIssuedInvoicesCSV(pkgZip.quarterData);
+assert(csvEmitidas.startsWith('\uFEFF'), "CASO 13: CSV Emitidas comienza con UTF-8 BOM");
+assert(csvEmitidas.includes('NUMERO_FACTURA;FECHA_EXPEDICION;NIF_DESTINATARIO'), "CASO 13: CSV Emitidas con cabeceras normalizadas y delimitador ';'");
+
+const csvRecibidas = generateReceivedInvoicesCSV(pkgZip.quarterData);
+assert(csvRecibidas.startsWith('\uFEFF'), "CASO 13: CSV Recibidas comienza con UTF-8 BOM");
+assert(csvRecibidas.includes('REGISTRO_INTERNO;FACTURA_PROVEEDOR;FECHA_EMISION'), "CASO 13: CSV Recibidas con cabeceras oficiales");
+
+// Verificar PDF de cierre
+const pdfBuffer = await generateGestoriaSummaryPDF(testFiscalPhone, 2026, 3);
+assert(pdfBuffer && pdfBuffer.length > 1000, "CASO 13: PDF de Informe de Cierre generado con éxito");
+
+// CASO 14: Envío protegido a gestoría (Nivel C) con confirmación explícita
+// 1. Detección de intención en router determinístico
+const intentSummary = detectIntent("prepárame lo de la gestoría");
+assert(intentSummary?.intent === 'FISCAL_QUARTER_SUMMARY', "CASO 14: Detecta 'prepárame lo de la gestoría' como FISCAL_QUARTER_SUMMARY");
+
+const intentSend = detectIntent("enviar a mi gestoría");
+assert(intentSend?.intent === 'SEND_TO_GESTORIA', "CASO 14: Detecta 'enviar a mi gestoría' como SEND_TO_GESTORIA");
+
+// 2. Comprobar que requiere confirmación estricta (Nivel C)
+const actionProposed = createProposedAction('C', 'send_gestoria_package', { quarter: 3, year: 2026 }, 'Enviar paquete a gestoría');
+assert(actionProposed.level === 'C', "CASO 14: Enviar a la gestoría es Nivel C (Acción Crítica)");
+
+const evalNo = evaluateConfirmationResponse(actionProposed, "no, espera");
+assert(evalNo.status === 'REJECTED', "CASO 14: 'no, espera' descarta el envío");
+
+const evalSoft = evaluateConfirmationResponse(actionProposed, "vale");
+assert(evalSoft.status === 'NEED_STRONG_CONFIRMATION', "CASO 14: 'vale' no es suficiente en Nivel C, exige CONFIRMAR");
+
+const evalYes = evaluateConfirmationResponse(actionProposed, "CONFIRMAR");
+assert(evalYes.status === 'APPROVED', "CASO 14: 'CONFIRMAR' aprueba la acción");
+
+// 3. Ejecutar envío seguro simulado
+const sendResult = await sendFiscalPackageToGestoria({
+  businessId: testFiscalPhone,
+  year: 2026,
+  quarter: 3
+});
+assert(sendResult.success === true, "CASO 14: Envío a gestoría registrado satisfactoriamente");
+
+// 4. Verificar auditoría y cambio de estado en la base de datos
+const periodRecord = getOrCreateFiscalPeriod(testFiscalPhone, 2026, 3);
+assert(periodRecord.status === 'SENT', "CASO 14: El período fiscal pasa a estado SENT");
+
+const logs = listAuditLogs(testFiscalPhone, { entityType: 'FISCAL_PERIOD' });
+assert(logs.some(l => l.action === 'SEND_PACKAGE_GESTORIA'), "CASO 14: Acción registrada en audit_logs de forma inmutable");
+
+// Limpieza final de la prueba
+cleanDb.prepare('DELETE FROM invoices WHERE company_phone = ? OR company_phone = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM purchase_invoices WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM expense_payments WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM investment_assets WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM fiscal_periods WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM fiscal_incidents WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM audit_logs WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
+cleanDb.prepare('DELETE FROM companies WHERE phone = ? OR phone = ?').run(testFiscalPhone, testFiscalPhoneB);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

@@ -123,6 +123,8 @@ Tu función es:
       pon 'action: "update_work_task"', rellena 'taskQuery': "demolición", 'isDone': true, y 'clientName': "Juan" si lo menciona.
     - PLAZOS O FECHAS DE OBRA: Si el profesional indica fechas de inicio o final estimado de una obra (ej: "la obra de Juan empieza el 2 de septiembre y termina el 15 de octubre"):
       pon 'action: "update_work_dates"', rellena 'clientName': "Juan", 'startDate': "2 de septiembre", 'estimatedEndDate': "15 de octubre".
+    - FACTURA RECIBIDA / GASTO / COMPRA DE MATERIAL: Si el profesional describe una compra de material, ticket de gasto o factura de proveedor (ej: "he comprado 40 sacos de cemento en Bricomart por 242€ factura F-9923 CIF A12345678", "apunta gasto de 50€ de gasolina", "factura de proveedor Salvador Escoda 300€ mas IVA"):
+      pon 'action: "purchase_invoice"' y rellena 'purchaseInvoiceInfo': { "supplierName": "...", "supplierTaxId": "...", "invoiceNumber": "...", "issueDate": "YYYY-MM-DD", "category": "MATERIALES|COMBUSTIBLE|HERRAMIENTAS|SUBCONTRATA|VARIOS", "totalAmount": 242, "taxBase": 200, "vatRate": 21, "vatAmount": 42, "description": "..." }.
     - VACIAR O BORRAR LISTA DE COMPRAS: Si pide borrar o vaciar la lista (ej: "borrar lista de la compra", "vaciar compras", "limpiar lista"):
       pon 'action: "clear_shopping_list"'.
    - Si el profesional menciona un cliente o número concreto para modificar un presupuesto (ej: "en el de José Luis...", "en el 8629..."):
@@ -143,12 +145,24 @@ Tu función es:
 
 FORMATO DE RESPUESTA (JSON estricto):
 {
-  "action": "budget", // "budget" | "list_budgets" | "invoice" | "advance_invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "accept_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates"
+  "action": "budget", // "budget" | "list_budgets" | "invoice" | "advance_invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "accept_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates" | "purchase_invoice"
   "taskQuery": null,
   "isDone": true,
   "onlyMissing": false,
   "startDate": null,
   "estimatedEndDate": null,
+  "purchaseInvoiceInfo": {
+    "supplierName": null,
+    "supplierTaxId": null,
+    "invoiceNumber": null,
+    "issueDate": null,
+    "category": "MATERIALES",
+    "totalAmount": 0,
+    "taxBase": 0,
+    "vatRate": 21,
+    "vatAmount": 0,
+    "description": null
+  },
   "shoppingItems": [
     {
       "description": "azulejo gris",
@@ -299,3 +313,211 @@ export async function updateBudgetWithGemini(currentBudget, userMessage, apiKey)
 
   return result;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multimodal API Call (Imágenes y Documentos de Facturas / Tickets)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Prompt del auditor de compras para Gemini
+ */
+export const GEMINI_PURCHASE_INVOICE_PROMPT = `Eres un auditor fiscal especializado en análisis de facturas de compra, tickets y justificantes de gastos de profesionales españoles de la construcción y reformas (RD 1619/2012 y Orden EHA/3786/2008).
+
+Tu función es extraer con rigor los datos de la factura recibida o ticket de compra.
+
+REGLAS DE EXTRACCIÓN:
+1. Responde ÚNICAMENTE en JSON válido según el esquema.
+2. Identifica:
+   - supplierName: Nombre o razón social del emisor / proveedor (ej: "Bricomart", "Obramat", "Leroy Merlin", "Suministros Daganzo", "Repsol").
+   - supplierTaxId: CIF/NIF del proveedor (ej: "A-28000000", "B-12345678"). Si es un ticket simplificado donde no figura el NIF, pon null.
+   - invoiceNumber: Serie y número de factura o ticket (ej: "F-2026/89", "T-01-9982"). Si no hay número, pon null.
+   - issueDate: Fecha en formato YYYY-MM-DD. Si no tiene año, asume el año en curso.
+   - category: 'MATERIALES' | 'HERRAMIENTAS' | 'SUBCONTRATA' | 'COMBUSTIBLE' | 'VEHICULO' | 'SUMINISTROS' | 'ALQUILER' | 'SEGUROS' | 'RESTAURANTE' | 'VARIOS'.
+   - taxBase: Base imponible sin IVA (número decimal).
+   - vatRate: Tipo de IVA porcentual (21, 10, 4 o 0). Suministros generales al 21%.
+   - vatAmount: Cuota de IVA (número decimal).
+   - totalAmount: Total factura / ticket pagado (número decimal).
+   - irpfRetention: Retención IRPF si la hubiera (subcontratas profesionales 15% o alquiler 19%). Si no hay, 0.
+   - paymentMethod: 'Tarjeta' | 'Transferencia' | 'Efectivo' | 'Bizum' (lo que indique el ticket o 'Tarjeta' por defecto).
+   - isInvestmentAsset: true si supera 3.005,06 € en base imponible o es maquinaria/activo duradero.
+   - deductibilityHint: 'LIKELY_DEDUCTIBLE' (para compras directas de obra), 'NEEDS_REVIEW' (gasolina, vehículos, comidas o tickets sin CIF), 'NOT_DEDUCTIBLE'.
+   - description: Breve resumen de los materiales o conceptos comprados.
+   - assistantFeedback: Confirmación breve en español para el instalador.
+
+ESQUEMA JSON:
+{
+  "supplierName": "Obramat",
+  "supplierTaxId": "A81234567",
+  "invoiceNumber": "F-2026-4412",
+  "issueDate": "2026-09-15",
+  "category": "MATERIALES",
+  "taxBase": 100.00,
+  "vatRate": 21,
+  "vatAmount": 21.00,
+  "irpfRetention": 0,
+  "totalAmount": 121.00,
+  "paymentMethod": "Tarjeta",
+  "isInvestmentAsset": false,
+  "deductibilityHint": "LIKELY_DEDUCTIBLE",
+  "description": "4 sacos de mortero y tubería",
+  "assistantFeedback": "Factura de Obramat registrada por 121,00 €"
+}`;
+
+/**
+ * Llama a Gemini con soporte multimodal (imágenes de facturas o tickets).
+ * @param {object} params
+ * @param {Buffer|string} params.imageBuffer - Buffer de la imagen
+ * @param {string} params.mimeType - 'image/jpeg', 'image/png', 'application/pdf'
+ * @param {string} params.prompt - Texto opcional de acompañamiento
+ * @param {string} params.systemInstruction - Instrucción de sistema
+ * @param {string} params.apiKey
+ * @returns {Promise<object>}
+ */
+export async function callGeminiMultimodal({
+  imageBuffer,
+  mimeType = 'image/jpeg',
+  prompt = 'Analiza este documento y extrae los datos fiscales de la factura o ticket.',
+  systemInstruction = GEMINI_PURCHASE_INVOICE_PROMPT,
+  apiKey
+}) {
+  if (!apiKey) throw new Error('API key de Gemini no configurada');
+
+  const url = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const parts = [];
+
+  if (imageBuffer) {
+    const base64Data = Buffer.isBuffer(imageBuffer) ? imageBuffer.toString('base64') : imageBuffer;
+    parts.push({
+      inlineData: {
+        data: base64Data,
+        mimeType: mimeType || 'image/jpeg'
+      }
+    });
+  }
+
+  if (prompt) {
+    parts.push({ text: prompt });
+  }
+
+  const body = {
+    contents: [{ role: 'user', parts }],
+    systemInstruction: { parts: [{ text: systemInstruction }] },
+    generationConfig: {
+      responseMimeType: 'application/json',
+      temperature: 0.1,
+      maxOutputTokens: 2048
+    }
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(18000)
+  });
+
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({}));
+    throw new Error(errData.error?.message || `HTTP ${response.status}`);
+  }
+
+  const data = await response.json();
+  const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!jsonText) throw new Error('Respuesta vacía de Gemini Multimodal');
+  return JSON.parse(jsonText);
+}
+
+/**
+ * Extrae datos de factura recibida o gasto desde texto, audio o imagen de WhatsApp.
+ * @param {string|{ buffer: Buffer, mimeType?: string, caption?: string }} input
+ * @param {string} apiKey
+ * @returns {Promise<object>}
+ */
+export async function parsePurchaseInvoiceWithGemini(input, apiKey) {
+  if (typeof input === 'string') {
+    return callGeminiAPI(
+      `Analiza el siguiente texto de un profesional de obra y extrae los datos del gasto o factura recibida:\n\n"${input}"`,
+      GEMINI_PURCHASE_INVOICE_PROMPT,
+      apiKey
+    );
+  } else if (input && (input.buffer || input.imageBuffer)) {
+    const buf = input.buffer || input.imageBuffer;
+    const prompt = input.caption
+      ? `Analiza este ticket o factura recibida. Comentario del profesional: "${input.caption}"`
+      : 'Analiza este ticket o factura de compra y extrae todos los datos mercantiles y fiscales.';
+    return callGeminiMultimodal({
+      imageBuffer: buf,
+      mimeType: input.mimeType || 'image/jpeg',
+      prompt,
+      systemInstruction: GEMINI_PURCHASE_INVOICE_PROMPT,
+      apiKey
+    });
+  }
+  throw new Error('Entrada no válida para parsePurchaseInvoiceWithGemini');
+}
+
+/**
+ * Validador determinístico de backend para facturas recibidas (Anti-Alucinaciones).
+ * Asegura cuadratura matemática estricta y asigna estado contable antes de insertar en SQLite.
+ *
+ * @param {object} raw - Datos crudos devueltos por Gemini
+ * @param {string} businessId - Teléfono de la empresa
+ * @param {string|null} attachmentPath - Ruta de la imagen guardada en disco
+ * @returns {object} Factura normalizada lista para db_service.savePurchaseInvoice
+ */
+export function validateAndNormalizePurchaseInvoice(raw, businessId, attachmentPath = null) {
+  const round2 = n => Math.round((Number(n) || 0) * 100) / 100;
+
+  let total = round2(raw.totalAmount);
+  let rate = round2(raw.vatRate) || 21;
+  let base = round2(raw.taxBase);
+  let vat = round2(raw.vatAmount);
+  let retention = round2(raw.irpfRetention);
+
+  // Si se dispone del total pero no de la base ni IVA, se calcula determinísticamente
+  if (total > 0 && base === 0 && vat === 0) {
+    base = round2(total / (1 + rate / 100));
+    vat = round2(total - base);
+  } else if (base > 0 && vat === 0) {
+    vat = round2(base * (rate / 100));
+    if (total === 0) total = round2(base + vat - retention);
+  }
+
+  // Cuadratura matemática determinística (Base + IVA - Retención = Total)
+  if (Math.abs(round2(base + vat - retention) - total) > 0.02) {
+    vat = round2(total - base + retention);
+  }
+
+  const supplierTaxId = raw.supplierTaxId ? String(raw.supplierTaxId).trim().toUpperCase() : null;
+  const isInvestment = base > 3005.06 || Boolean(raw.isInvestmentAsset);
+
+  // Clasificación de deducibilidad
+  let deductibilityStatus = raw.deductibilityHint || 'LIKELY_DEDUCTIBLE';
+  const cat = String(raw.category || 'MATERIALES').toUpperCase();
+  if (['COMBUSTIBLE', 'GASOLINA', 'RESTAURANTE', 'DIETAS', 'VEHICULO', 'PEAJE'].includes(cat) || !supplierTaxId) {
+    deductibilityStatus = 'NEEDS_REVIEW';
+  }
+
+  return {
+    businessId,
+    supplierName: raw.supplierName || 'Proveedor',
+    supplierTaxId,
+    invoiceNumber: raw.invoiceNumber || `T-${Date.now().toString().slice(-6)}`,
+    issueDate: raw.issueDate || new Date().toISOString().split('T')[0],
+    category: cat,
+    description: raw.description || 'Compra de suministros o materiales',
+    taxBase: base,
+    vatRate: rate,
+    vatAmount: vat,
+    irpfRetention: retention,
+    totalAmount: total,
+    vatDeductible: deductibilityStatus !== 'NOT_DEDUCTIBLE',
+    deductiblePercentage: deductibilityStatus === 'NOT_DEDUCTIBLE' ? 0 : 100,
+    deductibilityStatus,
+    paidAmount: total, // Por defecto se asume pagado al momento de recibir el ticket
+    isInvestmentAsset: isInvestment,
+    attachmentPath: attachmentPath || null,
+    assistantFeedback: raw.assistantFeedback
+  };
+}
+

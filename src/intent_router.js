@@ -22,8 +22,14 @@ import {
   getWorkMemory,
   getMonthlyRevenue,
   listAppointmentsWeek,
-  getDashboard
+  getDashboard,
+  getCompany
 } from './db_service.js';
+
+import {
+  getQuarterSummary,
+  formatQuarterWhatsAppSummary
+} from './fiscal_service.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UTILIDADES INTERNAS
@@ -112,6 +118,25 @@ function extractMonthYear(text) {
   return { month: now.getMonth() + 1, year: now.getFullYear() };
 }
 
+/** Extrae trimestre y año de un texto en español */
+function extractQuarterYear(text) {
+  const n = norm(text);
+  const now = new Date();
+  let year = now.getFullYear();
+  const yearMatch = text.match(/\b(202\d)\b/);
+  if (yearMatch) {
+    year = parseInt(yearMatch[1], 10);
+  }
+
+  let quarter = null;
+  if (/primer\s+trimestre|1t\b|1\s*º?\s*trimestre/i.test(n)) quarter = 1;
+  else if (/segundo\s+trimestre|2t\b|2\s*º?\s*trimestre/i.test(n)) quarter = 2;
+  else if (/tercer\s+trimestre|3t\b|3\s*º?\s*trimestre/i.test(n)) quarter = 3;
+  else if (/cuarto\s+trimestre|4t\b|4\s*º?\s*trimestre/i.test(n)) quarter = 4;
+
+  return { quarter, year };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DETECTOR DE INTENCIONES
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,6 +149,43 @@ function extractMonthYear(text) {
 export function detectIntent(text) {
   if (!text || typeof text !== 'string') return null;
   const n = norm(text);
+
+  // ── CIERRE FISCAL / GESTORÍA / RESUMEN TRIMESTRAL ──────────────────────────
+  // "prepárame lo de la gestoría", "¿cómo llevo el trimestre?", "¿cuánto IVA llevo?", "resumen trimestre"
+  if (matches(n, [
+    /preparame\s+(?:lo\s+de\s+)?la\s+gestoria/,
+    /lo\s+de\s+la\s+gestoria/,
+    /papeles\s+(?:para|de)\s+la\s+gestoria/,
+    /como\s+(?:llevo|va)\s+el\s+trimestre/,
+    /resumen\s+(?:del?\s+)?trimestre/,
+    /cierre\s+(?:del?\s+)?trimestre/,
+    /cuanto\s+iva\s+llevo/,
+    /cuanto\s+iva\s+tengo\s+que\s+pagar/,
+    /liquidacion\s+(?:de\s+)?iva/,
+    /libros?\s+(?:de\s+)?(?:iva|facturas?|registro)/,
+    /modelo\s+303/,
+    /modelo\s+130/,
+    /saca(?:me)?\s+el\s+trimestre/,
+    /exportar\s+trimestre/,
+    /informe\s+(?:de\s+)?cierre/
+  ])) {
+    const { quarter, year } = extractQuarterYear(text);
+    return { intent: 'FISCAL_QUARTER_SUMMARY', params: { quarter, year } };
+  }
+
+  // ── ENVIAR A LA GESTORÍA POR CORREO (Acción Protegida Nivel C) ─────────────
+  // "enviar a mi gestoría", "mándaselo a mi gestor", "enviar papeles a mi gestoría"
+  if (matches(n, [
+    /enviar?\s+(?:lo\s+)?a\s+(?:mi\s+)?gestor(?:ia)?/,
+    /mandar?\s+(?:lo\s+)?a\s+(?:mi\s+)?gestor(?:ia)?/,
+    /enviaselo\s+a\s+(?:mi\s+)?gestor(?:ia)?/,
+    /mandaselo\s+a\s+(?:mi\s+)?gestor(?:ia)?/,
+    /mandale\s+(?:los\s+papeles|el\s+trimestre|las\s+facturas)\s+a\s+(?:mi\s+)?gestor(?:ia)?/,
+    /enviar\s+trimestre\s+a\s+(?:mi\s+)?gestor(?:ia)?/
+  ])) {
+    const { quarter, year } = extractQuarterYear(text);
+    return { intent: 'SEND_TO_GESTORIA', params: { quarter, year } };
+  }
 
   // ── DASHBOARD / RESUMEN GLOBAL ────────────────────────────────────────────
   // "resumen", "estado", "qué tal va todo", "dashboard", "cómo estoy"
@@ -595,6 +657,21 @@ export async function resolveIntent(intentResult, phone, session) {
 
   try {
     switch (intent) {
+
+      case 'FISCAL_QUARTER_SUMMARY': {
+        const { quarter, year } = params;
+        return formatQuarterWhatsAppSummary(cleanPhone, year, quarter);
+      }
+
+      case 'SEND_TO_GESTORIA': {
+        const { quarter, year } = params;
+        const quarterData = getQuarterSummary(cleanPhone, year, quarter);
+        const company = getCompany(cleanPhone);
+        if (!company.gestoriaEmail) {
+          return '⚠️ *No tienes configurado el correo de tu gestoría.*\n\nEscribe *"mi gestoría es correo@ejemplo.com"* para registrarlo y poder enviar los libros oficiales.';
+        }
+        return `🔒 *Confirmación de seguridad requerida (Nivel C):*\n\nVas a enviar por correo electrónico el paquete oficial de cierre de *${quarterData.period.label}* a tu gestoría en *${company.gestoriaEmail}* con los libros de IVA, IRPF, incidencias y PDF.\n\nPor favor, responde *"CONFIRMAR"* para proceder o *"CANCELAR"* para descartar.`;
+      }
 
       case 'DASHBOARD': {
         const data = getDashboard(cleanPhone);
