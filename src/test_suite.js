@@ -1105,6 +1105,7 @@ import {
   getMonthlyRevenue,
   listAppointmentsWeek,
   getDashboard,
+  getCompany,
   saveInvoice as dbSaveInvoice,
   saveAppointment as dbSaveAppointment
 } from './db_service.js';
@@ -1198,6 +1199,22 @@ assert(agendaReply.includes('Agenda — próximos 7 días'), "resolveIntent(WEEK
 
 const statsReply = await resolveIntent({ intent: 'MONTHLY_STATS', params: { month: currentMonth, year: currentYear } }, testPhoneIntent, {});
 assert(statsReply.includes('Total facturado'), "resolveIntent(MONTHLY_STATS) resume finanzas del mes");
+
+// 4. Intenciones determinísticas de configuración de empresa (Bizum, IBAN, Perfil)
+assert(detectIntent("mi bizum es 611223344")?.intent === 'SET_BIZUM', "Detecta 'mi bizum es 611223344' como SET_BIZUM");
+assert(detectIntent("pon de bizum 600123456")?.params?.bizum === '600123456', "Extrae número de Bizum correctamente");
+assert(detectIntent("mi iban es ES21 1465 0100 72 2030876293")?.intent === 'SET_IBAN', "Detecta IBAN como SET_IBAN");
+assert(detectIntent("ver mis datos")?.intent === 'SHOW_COMPANY', "Detecta 'ver mis datos' como SHOW_COMPANY");
+assert(detectIntent("configuracion")?.intent === 'SHOW_COMPANY', "Detecta 'configuracion' como SHOW_COMPANY");
+
+const setBizumReply = await resolveIntent({ intent: 'SET_BIZUM', params: { bizum: '611223344' } }, testPhoneIntent, {});
+assert(setBizumReply.includes('Bizum actualizado con éxito'), "resolveIntent(SET_BIZUM) confirma actualización");
+assert(setBizumReply.includes('611223344'), "resolveIntent(SET_BIZUM) incluye el número guardado");
+assert(getCompany(testPhoneIntent).bizum === '611223344', "Bizum persiste en SQLite");
+
+const showCompanyReply = await resolveIntent({ intent: 'SHOW_COMPANY', params: {} }, testPhoneIntent, {});
+assert(showCompanyReply.includes('DATOS DE TU EMPRESA'), "resolveIntent(SHOW_COMPANY) muestra cabecera");
+assert(showCompanyReply.includes('611223344'), "resolveIntent(SHOW_COMPANY) muestra el Bizum activo");
 
 // Limpieza de datos de prueba
 cleanDb.prepare('DELETE FROM invoices WHERE company_phone = ?').run(testPhoneIntent);

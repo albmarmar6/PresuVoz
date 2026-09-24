@@ -23,7 +23,8 @@ import {
   getMonthlyRevenue,
   listAppointmentsWeek,
   getDashboard,
-  getCompany
+  getCompany,
+  saveCompany
 } from './db_service.js';
 
 import {
@@ -286,6 +287,28 @@ export function detectIntent(text) {
     if (clientName.length > 1 && !/^(?:nuevo|anterior|ultimo|primero|mas\s+reciente)$/.test(clientName)) {
       return { intent: 'CLIENT_LOOKUP', params: { clientName } };
     }
+  }
+
+  // ── CONFIGURACIÓN / DATOS DE EMPRESA / BIZUM / IBAN ────────────────────────
+  // "mi bizum es 612345678", "pon de bizum 612345678", "bizum 612345678", "cambia el bizum a 612345678"
+  const bizumMatch = n.match(/(?:(?:mi|el)\s+)?bizum\s*(?:es|de|al|a)?\s*[:\s]*(\+?34\s*)?([67]\d{8})/);
+  if (bizumMatch && bizumMatch[2]) {
+    return { intent: 'SET_BIZUM', params: { bizum: bizumMatch[2] } };
+  }
+
+  // "mi iban es ES...", "pon de iban ES...", "iban ES..."
+  const ibanMatch = text.match(/\b(ES\d{2}[ \d]{20,28})\b/i);
+  if (ibanMatch && ibanMatch[1] && (n.includes('iban') || n.includes('cuenta'))) {
+    return { intent: 'SET_IBAN', params: { iban: ibanMatch[1].replace(/\s+/g, '').toUpperCase() } };
+  }
+
+  // "mis datos", "ver mi empresa", "ver configuracion", "mi perfil", "datos de la empresa"
+  if (matches(n, [
+    /^(?:mis\s+datos|mi\s+empresa|ver\s+mi\s+empresa|ver\s+mis\s+datos|mi\s+perfil|ver\s+perfil|ver\s+configuracion|configuracion)$/,
+    /datos\s+de\s+(?:mi\s+)?empresa/,
+    /como\s+estan?\s+mis\s+datos/
+  ])) {
+    return { intent: 'SHOW_COMPANY', params: {} };
   }
 
   // "buscar Juan", "encontrar García"
@@ -728,6 +751,39 @@ export async function resolveIntent(intentResult, phone, session) {
         const found = findClientsByName(cleanPhone, clientName);
         if (found.length === 0) return null; // Dejar pasar a Gemini — quizás el usuario quiere crear algo
         return formatClientLookup(clientName, found);
+      }
+
+      case 'SET_BIZUM': {
+        const { bizum } = params;
+        const updated = saveCompany(cleanPhone, { bizum });
+        if (session) session.company = updated;
+        return `✅ *¡Bizum actualizado con éxito!*\n\n📱 *Bizum configurado:* ${updated.bizum}\n\nTus clientes verán este número en las condiciones de pago de tus presupuestos y recibos.`;
+      }
+
+      case 'SET_IBAN': {
+        const { iban } = params;
+        const updated = saveCompany(cleanPhone, { iban });
+        if (session) session.company = updated;
+        return `✅ *¡IBAN bancario actualizado con éxito!*\n\n🏦 *IBAN configurado:* ${updated.iban}\n\nTus facturas y presupuestos oficiales incluirán esta cuenta bancaria.`;
+      }
+
+      case 'SHOW_COMPANY': {
+        const comp = getCompany(cleanPhone);
+        return [
+          '🏢 *DATOS DE TU EMPRESA / PERFIL:*',
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          `🛠️ *Oficio / Especialidad:* ${comp.trade || 'No indicado'}`,
+          `📛 *Empresa:* ${comp.name || 'No indicado'}`,
+          `🆔 *CIF:* ${comp.cif || 'No indicado'}`,
+          `📍 *Dirección:* ${comp.address || 'No indicada'}`,
+          `🏦 *IBAN:* ${comp.iban || 'No configurado'}`,
+          `📱 *Bizum:* ${comp.bizum || 'No configurado'}`,
+          `📞 *Teléfono:* ${comp.phone || 'No indicado'}`,
+          `✉️ *Email:* ${comp.email || 'No indicado'}`,
+          comp.gestoriaEmail ? `📊 *Gestoría:* ${comp.gestoriaEmail}` : '',
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          '💡 _Puedes cambiar cualquier dato diciendo por ejemplo: "mi Bizum es 611223344" o "cambia mi IBAN a ES21..."_'
+        ].filter(Boolean).join('\n');
       }
 
       default:

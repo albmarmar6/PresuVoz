@@ -131,10 +131,12 @@ const ALLOWED_NUMBERS = (process.env.ALLOWED_NUMBERS || '')
   .filter(Boolean);
 
 const GEMINI_MODELS = [
-  'gemini-3.8-flash',
-  'gemini-3.7-flash',
+  'gemini-3-flash-preview',
+  'gemini-flash-lite-latest',
   'gemini-3.6-flash',
-  'gemini-3.5-flash-lite'
+  'gemini-3.5-flash-lite',
+  'gemini-3.7-flash',
+  'gemini-3.8-flash'
 ];
 
 // Almacén en memoria de mensajes de WhatsApp para responder a solicitudes 'retry' (evita 'Esperando mensaje')
@@ -197,9 +199,10 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
   if (typeof payload === 'string') {
     parts.push({ text: payload });
   } else if (payload && payload.audioBuffer) {
+    const cleanMime = (payload.mimeType || 'audio/ogg').split(';')[0].trim();
     parts.push({
       inlineData: {
-        mimeType: payload.mimeType || 'audio/ogg',
+        mimeType: cleanMime,
         data: payload.audioBuffer.toString('base64')
       }
     });
@@ -2094,16 +2097,18 @@ async function startWhatsAppGateway() {
     let aiResult;
     if (taskData.isAudio) {
       console.log(`🎙️ Enviando audio a Gemini (${taskData.audioBuffer?.length} bytes)...`);
-      try {
-        const sentAudioNotice = await sock.sendMessage(remoteJid, {
-          text: '🎙️ _Escuchando tu nota de voz y procesando los datos... Te aviso en unos segundos._'
-        });
-        if (sentAudioNotice?.key?.id) botSentMessageIds.add(sentAudioNotice.key.id);
-      } catch (noticeErr) {}
+      if (!isRetry) {
+        try {
+          const sentAudioNotice = await sock.sendMessage(remoteJid, {
+            text: '🎙️ _Escuchando tu nota de voz y procesando los datos... Te aviso en unos segundos._'
+          });
+          if (sentAudioNotice?.key?.id) botSentMessageIds.add(sentAudioNotice.key.id);
+        } catch (noticeErr) {}
+      }
       aiResult = await callGemini({
         audioBuffer: taskData.audioBuffer,
         mimeType: taskData.audioMimeType || 'audio/ogg',
-        promptText: `${contextPrompt}\n\nEl profesional está dictando una nota de voz. Identifica su intención: si es agendar cita/visita, consultar agenda, cancelar cita, configurar datos de su empresa, consultar empresa, registrar cobro, consultar saldo, facturar, factura de anticipo, exportar trimestre, o crear/modificar presupuesto.`
+        promptText: `${contextPrompt}\n\nEl profesional está dictando una nota de voz. Identifica su intención: si es configurar datos de su perfil o empresa (Bizum, IBAN, CIF, nombre comercial, dirección, oficio), consultar datos de empresa, agendar cita/visita, consultar agenda, cancelar cita, registrar cobro, consultar saldo, facturar, factura de anticipo, exportar trimestre, o crear/modificar presupuesto.`
       }, GEMINI_UPDATE_PROMPT);
     } else {
       console.log(`\n💬 Enviando texto a Gemini: "${taskData.rawUserText}"`);
@@ -2113,9 +2118,11 @@ async function startWhatsAppGateway() {
       );
     }
 
-    if (isRetry) {
+    console.log(`🤖 Intención detectada por Gemini: action="${aiResult?.action}"`, JSON.stringify(aiResult).substring(0, 160));
+
+    if (isRetry && (!aiResult?.action || aiResult?.action === 'budget')) {
       const sentRetryNote = await sock.sendMessage(remoteJid, {
-        text: '🎉 *¡Tu petición guardada en stand-by ha sido procesada con éxito!*\nAquí tienes el documento generado:'
+        text: '🎉 *¡Tu petición guardada en espera ha sido procesada con éxito!*\nAquí tienes el documento generado:'
       });
       if (sentRetryNote?.key?.id) botSentMessageIds.add(sentRetryNote.key.id);
     }
@@ -2265,22 +2272,31 @@ async function startWhatsAppGateway() {
           }
         }
       }
+
+      // Si la IA detectó la intención de configurar pero el usuario aún no indicó el valor concreto
+      if (Object.keys(cleanInfo).length === 0) {
+        const feedbackMsg = aiResult.assistantFeedback || '¿Qué dato de tu perfil o empresa deseas añadir o modificar? Puedes indicarme por ejemplo:\n• *Bizum:* _"Mi Bizum es 611223344"_\n• *IBAN:* _"Mi IBAN es ES21..."_\n• *Nombre:* _"Mi empresa es Reformas..."_\n• *CIF o Dirección*';
+        const sentConf = await sock.sendMessage(remoteJid, { text: feedbackMsg });
+        if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
+        return;
+      }
+
       const updated = saveCompany(taskData.senderNumber, cleanInfo);
       session.company = updated;
 
       const confText = [
         '✅ *¡Datos de tu empresa actualizados con éxito!*',
         '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        `🛠️ *Oficio / Especialidad:* ${updated.trade}`,
-        `📛 *Empresa:* ${updated.name}`,
-        `🆔 *CIF:* ${updated.cif}`,
-        `📍 *Dirección:* ${updated.address}`,
-        `🏦 *IBAN:* ${updated.iban}`,
-        `📱 *Bizum:* ${updated.bizum}`,
-        `📞 *Teléfono:* ${updated.phone}`,
-        `✉️ *Email:* ${updated.email}`,
+        `🛠️ *Oficio / Especialidad:* ${updated.trade || 'No indicado'}`,
+        `📛 *Empresa:* ${updated.name || 'No indicado'}`,
+        `🆔 *CIF:* ${updated.cif || 'No indicado'}`,
+        `📍 *Dirección:* ${updated.address || 'No indicada'}`,
+        `🏦 *IBAN:* ${updated.iban || 'No configurado'}`,
+        `📱 *Bizum:* ${updated.bizum || 'No configurado'}`,
+        `📞 *Teléfono:* ${updated.phone || 'No indicado'}`,
+        `✉️ *Email:* ${updated.email || 'No indicado'}`,
         '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        '📄 _Tus nuevos presupuestos, facturas y recibos oficiales se emitirán con estos datos fiscales y terminología especializada._'
+        '📄 _Tus nuevos presupuestos, facturas y recibos oficiales se emitirán con estos datos fiscales y opciones de cobro._'
       ].join('\n');
 
       const sentConf = await sock.sendMessage(remoteJid, { text: confText });
