@@ -23,7 +23,22 @@ console.log(`📦 Copia de seguridad guardada en: ${backupPath}`);
 // 2. Conectar y limpiar todas las tablas
 const db = new DatabaseSync(DB_PATH);
 
-const tables = ['budgets', 'invoices', 'payments', 'appointments', 'companies'];
+const tables = [
+  'budgets',
+  'invoices',
+  'payments',
+  'appointments',
+  'shopping_items',
+  'messages',
+  'companies',
+  'business_tax_profiles',
+  'purchase_invoices',
+  'expense_payments',
+  'investment_assets',
+  'fiscal_periods',
+  'fiscal_incidents',
+  'audit_logs'
+];
 
 console.log('🗑️  Borrando datos de la base de datos...');
 for (const table of tables) {
