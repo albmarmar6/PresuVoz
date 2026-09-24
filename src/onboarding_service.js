@@ -103,9 +103,8 @@ export function formatCompanySummary(comp) {
     `• *Dirección:* ${comp.address}`,
     `• *IVA por defecto:* ${comp.defaultTaxRate}%`,
     `• *IRPF:* ${comp.irpfRate ? comp.irpfRate + '%' : '0% (No aplica)'}`,
-    `• *Serie facturas:* ${comp.invoiceSeries || '2026-'}`,
-    `• *IBAN:* ${comp.iban || 'No configurado'}`,
-    `• *Bizum:* ${comp.bizum || comp.phone || 'No configurado'}`,
+    `• *IBAN:* ${comp.iban ? comp.iban : 'No configurado (puedes añadirlo cuando quieras)'}`,
+    `• *Bizum:* ${comp.bizum ? comp.bizum : 'No configurado'}`,
     '━━━━━━━━━━━━━━━━━━━━━━━━━',
     '💪 *¡A partir de ahora la IA trabaja contigo codo con codo!*',
     '🎙️ Puedes dictarme una obra en una nota de voz o escribir *"presupuesto para María de una reforma de baño"* y te lo preparo en segundos con tus datos oficiales.'
@@ -154,8 +153,8 @@ export function processOnboardingStep(phone, rawInput) {
       let owner = '';
       let company = '';
 
-      const matchBoth = input.match(/(?:me llamo|soy)\s+([^,;\n]+?)(?:,|\s+y\s+|\s+con\s+)(?:mi empresa es|empresa|negocio)\s+([^,;\n]+)/i);
-      const matchInverted = input.match(/(?:empresa|negocio)\s+([^,;\n]+?)(?:,|\s+y\s+)(?:me llamo|soy)\s+([^,;\n]+)/i);
+      const matchBoth = input.match(/(?:(?:me llamo|soy)\s+)?([^,;\n]+?)(?:,|\s+y\s+|\s+con\s+)(?:mi empresa es|la empresa se llama|empresa|negocio)\s+([^,;\n]+)/i);
+      const matchInverted = input.match(/(?:(?:la\s+)?empresa|negocio)\s+([^,;\n]+?)(?:,|\s+y\s+)(?:me llamo|soy)\s+([^,;\n]+)/i);
 
       if (matchBoth) {
         owner = matchBoth[1].trim();
@@ -562,18 +561,20 @@ export function processOnboardingStep(phone, rawInput) {
       let iban = null;
       let bizum = null;
 
-      const ibanMatch = input.match(/\b(ES\d{2}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4})\b/i);
-      if (ibanMatch) {
-        iban = ibanMatch[1].replace(/[\s-]/g, '').replace(/(.{4})/g, '$1 ').trim();
+      if (!isSkip) {
+        const ibanMatch = input.match(/\b(ES\d{2}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4})\b/i);
+        if (ibanMatch) {
+          iban = ibanMatch[1].replace(/[\s-]/g, '').replace(/(.{4})/g, '$1 ').trim();
+        }
+
+        const bizumMatch = input.match(/(?:bizum|m[oó]vil|tel[eé]fono)?[:\s]*([67]\d{8})\b/i);
+        if (bizumMatch) {
+          bizum = bizumMatch[1];
+        }
       }
 
-      const bizumMatch = input.match(/(?:bizum|m[oó]vil|tel[eé]fono)?[:\s]*([67]\d{8})\b/i);
-      if (bizumMatch) {
-        bizum = bizumMatch[1];
-      }
-
-      data.iban = iban || data.iban || null;
-      data.bizum = bizum || data.bizum || phone;
+      data.iban = iban || null;
+      data.bizum = bizum || null;
 
       // Finalizar Onboarding
       const updated = saveCompany(phone, {
@@ -593,7 +594,7 @@ export function processOnboardingStep(phone, rawInput) {
         defaultTaxRate: data.defaultTaxRate || 10,
         defaultAdvance: data.defaultAdvance || 30,
         iban: iban || null,
-        bizum: bizum || phone,
+        bizum: bizum || null,
         onboardingStep: null,
         onboardingDataJson: null
       });

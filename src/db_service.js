@@ -318,8 +318,8 @@ export const DEFAULT_COMPANY = {
   invoiceSeries: '2026-',
   phone: '601 02 23 67',
   email: 'presupuestos@presuvoz.app',
-  iban: 'ES91 2100 0418 4502 0005 1332',
-  bizum: '601 02 23 67',
+  iban: null,
+  bizum: null,
   logoPath: null,
   gestoriaEmail: null,
   defaultTaxRate: 10,
@@ -355,8 +355,8 @@ export function getCompany(phone) {
     invoiceSeries: row.invoice_series || DEFAULT_COMPANY.invoiceSeries,
     phone: row.phone_contact || cleanPhone || DEFAULT_COMPANY.phone,
     email: row.email || DEFAULT_COMPANY.email,
-    iban: row.iban || DEFAULT_COMPANY.iban,
-    bizum: row.bizum || cleanPhone || DEFAULT_COMPANY.bizum,
+    iban: row.iban ? row.iban : null,
+    bizum: row.bizum ? row.bizum : null,
     logoPath: row.logo_path || null,
     gestoriaEmail: row.gestoria_email || null,
     defaultTaxRate: row.default_tax_rate || 10,
@@ -387,8 +387,8 @@ export function saveCompany(phone, data = {}) {
   const invoiceSeries = data.invoiceSeries !== undefined ? data.invoiceSeries : existing.invoiceSeries;
   const phoneContact = data.phone !== undefined ? data.phone : (existing.phone || cleanPhone);
   const email = data.email !== undefined ? data.email : existing.email;
-  const iban = data.iban !== undefined ? data.iban : existing.iban;
-  const bizum = data.bizum !== undefined ? data.bizum : (existing.bizum || cleanPhone);
+  const iban = data.iban !== undefined ? data.iban : (existing.iban || null);
+  const bizum = data.bizum !== undefined ? data.bizum : (existing.bizum || null);
   const logoPath = data.logoPath !== undefined ? data.logoPath : existing.logoPath;
   const gestoriaEmail = data.gestoriaEmail !== undefined ? data.gestoriaEmail : existing.gestoriaEmail;
   const defaultTaxRate = data.defaultTaxRate !== undefined ? data.defaultTaxRate : existing.defaultTaxRate;

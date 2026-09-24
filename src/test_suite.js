@@ -1039,6 +1039,25 @@ assert(customInv.financials.irpfRatePercentage === 15, "Aplica el 15% de IRPF co
 assert(customInv.financials.irpfAmount === 150, "Calcula 150€ de retención de IRPF (1000 * 15%)");
 assert(customInv.financials.totalAmount === 1060, "Ajusta el total a pagar descontando el IRPF (1210 - 150 = 1060)");
 
+// Test omisión bancaria con "luego" (sin números ni defaults ficticios)
+const skipPhone = '34699999999';
+dbSaveCompany(skipPhone, {
+  name: 'Reformas Manolo S.L',
+  ownerName: 'Manolo',
+  cif: 'B12345678',
+  onboardingStep: 'BANK_ACCOUNT',
+  onboardingDataJson: JSON.stringify({ ownerName: 'Manolo', companyName: 'Reformas Manolo S.L', cif: 'B12345678' })
+});
+const rSkip = processOnboardingStep(skipPhone, "luego");
+assert(rSkip.handled === true, "Omisión de cuenta procesada");
+assert(rSkip.completed === true, "Onboarding finaliza al omitir con 'luego'");
+assert(rSkip.message.includes("• *IBAN:* No configurado"), "IBAN se muestra como 'No configurado' sin números ficticios");
+assert(rSkip.message.includes("• *Bizum:* No configurado"), "Bizum se muestra como 'No configurado' sin números ni teléfono");
+const compSkipped = dbGetCompany(skipPhone);
+assert(compSkipped.iban === null, "El IBAN queda null en base de datos al responder 'luego'");
+assert(compSkipped.bizum === null, "El Bizum queda null en base de datos al responder 'luego'");
+cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(skipPhone);
+
 // Limpieza test
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(onboardPhone);
 

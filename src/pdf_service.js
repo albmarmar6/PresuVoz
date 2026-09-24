@@ -390,9 +390,11 @@ export function generateInvoicePDF(invoice) {
       doc.fontSize(7.5).fillColor(darkColor).font('Helvetica')
         .text(`• Titular: ${invoice.company?.name || 'PresuVoz Reformas S.L.'}`, 50, bankY + 22)
         .text(`• Forma: Transferencia bancaria`, 50, bankY + 33)
-        .text(`• IBAN: ${invoice.company?.iban || 'ES91 2100 0418 4502 0005 1332'}`, 50, bankY + 44)
-        .text(`• Concepto: Pago ${invoice.id || 'Factura'}`, 50, bankY + 55)
-        .text(`• O pago por Bizum al ${invoice.company?.bizum || invoice.company?.phone || '601 02 23 67'}`, 50, bankY + 66);
+        .text(`• IBAN: ${invoice.company?.iban || 'Consultar con el emisor'}`, 50, bankY + 44)
+        .text(`• Concepto: Pago ${invoice.id || 'Factura'}`, 50, bankY + 55);
+      if (invoice.company?.bizum) {
+        doc.text(`• O pago por Bizum al ${invoice.company.bizum}`, 50, bankY + 66);
+      }
 
       // 7. Pie de página legal según RD 1619/2012 y Ley del IVA
       const legalNote = invoice.type === 'ANTICIPO'
