@@ -1150,6 +1150,94 @@ cleanDb.prepare('DELETE FROM invoices WHERE company_phone = ?').run(testPhoneInt
 cleanDb.prepare('DELETE FROM appointments WHERE company_phone = ?').run(testPhoneIntent);
 cleanDb.prepare('DELETE FROM budgets WHERE company_phone = ?').run(testPhoneIntent);
 
+// -----------------------------------------------------------------------------
+// CASO 21: Persistencia de Mensajes (messages), Deduplicación y Estados de Conversación
+// -----------------------------------------------------------------------------
+console.log("\nTEST 21: Persistencia de Mensajes (messages), Deduplicación y Estados de Conversación");
+import {
+  recordIncomingMessage,
+  updateMessageStatus,
+  getMessageByWhatsappId,
+  isMessageAlreadyProcessed,
+  listRecentMessages
+} from './db_service.js';
+import {
+  getConversationState,
+  setConversationState
+} from './whatsapp_gateway.js';
+
+const testWamId = `wamid.test_${Date.now()}`;
+const testChatId = '34611223344@s.whatsapp.net';
+const testSenderPhone = '34611223344';
+
+// 1. Registro inicial (RECEIVED)
+const recorded = recordIncomingMessage({
+  whatsappMessageId: testWamId,
+  businessId: testSenderPhone,
+  chatId: testChatId,
+  senderPhone: testSenderPhone,
+  content: 'Quiero un presupuesto para reformar el baño',
+  status: 'RECEIVED'
+});
+
+assert(recorded !== null, "Registra el mensaje entrante en la tabla messages");
+assert(recorded.whatsappMessageId === testWamId, "Guarda el whatsapp_message_id correctamente");
+assert(recorded.status === 'RECEIVED', "Estado inicial es RECEIVED");
+assert(recorded.content === 'Quiero un presupuesto para reformar el baño', "Guarda el contenido del mensaje");
+assert(isMessageAlreadyProcessed(testWamId) === false, "En estado RECEIVED aún no se considera procesado");
+
+// 2. Transición a QUEUED
+updateMessageStatus(testWamId, 'QUEUED');
+const queuedMsg = getMessageByWhatsappId(testWamId);
+assert(queuedMsg.status === 'QUEUED', "Transición de estado a QUEUED correcta");
+assert(isMessageAlreadyProcessed(testWamId) === false, "En estado QUEUED no se considera procesado todavía");
+
+// 3. Transición a PROCESSING
+updateMessageStatus(testWamId, 'PROCESSING');
+const processingMsg = getMessageByWhatsappId(testWamId);
+assert(processingMsg.status === 'PROCESSING', "Transición de estado a PROCESSING correcta");
+assert(isMessageAlreadyProcessed(testWamId) === true, "En estado PROCESSING se activa la protección anti-duplicados");
+
+// 4. Transición final a PROCESSED
+updateMessageStatus(testWamId, 'PROCESSED');
+const processedMsg = getMessageByWhatsappId(testWamId);
+assert(processedMsg.status === 'PROCESSED', "Transición final a PROCESSED exitosa");
+assert(isMessageAlreadyProcessed(testWamId) === true, "En estado PROCESSED se descartan reenvíos de la API");
+
+// 5. Manejo de estado FAILED con posibilidad de reintento
+const failedWamId = `wamid.fail_${Date.now()}`;
+recordIncomingMessage({
+  whatsappMessageId: failedWamId,
+  businessId: testSenderPhone,
+  chatId: testChatId,
+  senderPhone: testSenderPhone,
+  content: 'Audio corrupto',
+  status: 'RECEIVED'
+});
+updateMessageStatus(failedWamId, 'FAILED');
+const failedMsg = getMessageByWhatsappId(failedWamId);
+assert(failedMsg.status === 'FAILED', "Registra estado FAILED ante fallos");
+assert(isMessageAlreadyProcessed(failedWamId) === false, "Un mensaje FAILED permite reintento (no se bloquea)");
+
+// 6. Auditoría de mensajes recientes del chat
+const recentList = listRecentMessages(testChatId, 10);
+assert(recentList.length >= 2, "listRecentMessages recupera los mensajes del chat");
+assert(recentList.some(m => m.whatsappMessageId === testWamId), "La lista incluye el mensaje procesado");
+
+// 7. Estados de la conversación (IDLE -> PROCESSING -> WAITING_FOR_INPUT)
+setConversationState(testChatId, 'IDLE');
+assert(getConversationState(testChatId) === 'IDLE', "Estado de conversación inicial: IDLE");
+
+setConversationState(testChatId, 'PROCESSING');
+assert(getConversationState(testChatId) === 'PROCESSING', "Estado de conversación pasa a PROCESSING durante la tarea");
+
+setConversationState(testChatId, 'WAITING_FOR_INPUT');
+assert(getConversationState(testChatId) === 'WAITING_FOR_INPUT', "Estado pasa a WAITING_FOR_INPUT al esperar respuesta");
+
+// Limpieza de prueba
+cleanDb.prepare('DELETE FROM messages WHERE chat_id = ?').run(testChatId);
+setConversationState(testChatId, 'IDLE');
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

@@ -59,7 +59,10 @@ import {
   renameClientBudget,
   getMonthlyRevenue,
   listAppointmentsWeek,
-  getDashboard
+  getDashboard,
+  recordIncomingMessage,
+  updateMessageStatus,
+  isMessageAlreadyProcessed
 } from './db_service.js';
 import {
   PERMISSION_LEVELS,
@@ -120,6 +123,23 @@ const GEMINI_MODELS = [
 
 // Almacén en memoria de mensajes de WhatsApp para responder a solicitudes 'retry' (evita 'Esperando mensaje')
 const messageStore = new Map();
+
+// ─── Control de Estados de Conversación y Cola FIFO por Chat ───
+// Estados de la conversación: 'IDLE' | 'PROCESSING' | 'WAITING_FOR_INPUT'
+export const conversationStates = new Map(); // remoteJid -> 'IDLE' | 'PROCESSING' | 'WAITING_FOR_INPUT'
+export const chatQueues = new Map();         // remoteJid -> Array of pending queue items
+export const chatDebounceTimers = new Map(); // remoteJid -> NodeJS.Timeout
+export const chatPendingBatches = new Map(); // remoteJid -> Array of text messages in burst
+
+export function getConversationState(remoteJid) {
+  return conversationStates.get(remoteJid) || 'IDLE';
+}
+
+export function setConversationState(remoteJid, state) {
+  conversationStates.set(remoteJid, state);
+  console.log(`💬 [Conversación: ${String(remoteJid).split('@')[0]}] Estado -> ${state}`);
+}
+
 function storeMessage(keyId, message) {
   if (!keyId || !message) return;
   if (messageStore.size > 2000) {
@@ -696,6 +716,8 @@ async function startWhatsAppGateway() {
   const recentMessageTexts = new Map();
   const activeProcessingJids = new Set();
   
+
+
   // Memoria multi-presupuesto y facturas por chat conectada a SQLite
   const userSessions = new Map();
 
@@ -2496,6 +2518,798 @@ async function startWhatsAppGateway() {
     }
   }
 
+
+  async function executeMessageDispatch(sock, remoteJid, senderNumber, item) {
+    const { msg, messageContent, rawUserText, isAudio, isImage, isText, imageMsg, audioMsg, wamId, allWamIds } = item;
+
+    if (wamId) updateMessageStatus(wamId, 'PROCESSING');
+    if (allWamIds) {
+      allWamIds.forEach(id => updateMessageStatus(id, 'PROCESSING'));
+    }
+    setConversationState(remoteJid, 'PROCESSING');
+
+    let isSuccess = false;
+    try {
+      const session = getUserSession(remoteJid, senderNumber);
+
+      // Si recibimos una imagen para el logotipo de la empresa
+      if (isImage) {
+        const caption = (imageMsg.caption || '').trim().toLowerCase();
+        if (caption.includes('logo') || caption === 'foto' || caption === 'logotipo' || caption === 'mi logo' || caption === '') {
+          try {
+            console.log(`🖼️ Imagen de logotipo recibida de ${senderNumber}...`);
+            const buffer = await downloadMediaMessage(
+              { key: msg.key, message: messageContent },
+              'buffer',
+              {},
+              { logger, reuploadRequest: sock.updateMediaMessage }
+            );
+            const logosDir = path.resolve('data', 'logos');
+            if (!fs.existsSync(logosDir)) fs.mkdirSync(logosDir, { recursive: true });
+            const logoPath = path.join(logosDir, `${senderNumber}.png`);
+            fs.writeFileSync(logoPath, buffer);
+
+            saveCompany(senderNumber, { logoPath });
+            session.company = getCompany(senderNumber);
+
+            const sentLogo = await sock.sendMessage(remoteJid, {
+              text: `✅ *¡Logotipo de empresa guardado con éxito!*\n\n🖼️ A partir de ahora aparecerá en la cabecera de todos tus nuevos presupuestos, facturas y recibos oficiales en PDF.`
+            });
+            if (sentLogo?.key?.id) botSentMessageIds.add(sentLogo.key.id);
+          } catch (logoErr) {
+            console.error('❌ Error guardando logotipo:', logoErr.message);
+            const sentErr = await sock.sendMessage(remoteJid, {
+              text: `⚠️ *No se pudo guardar el logotipo:* ${logoErr.message}`
+            });
+            if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+          }
+          return;
+        }
+      }
+
+      // 0.1 Interceptor de Desambiguación de Clientes Homónimos (Cero Suposiciones)
+      if (isText && session.pendingDisambiguation) {
+        const dis = session.pendingDisambiguation;
+        const norm = rawUserText.trim().toLowerCase();
+
+        // 1. Si el usuario cancela
+        if (norm === 'cancelar' || norm === 'ninguno' || norm === 'ninguna' || norm === 'no' || norm === 'descartar') {
+          session.pendingDisambiguation = null;
+          const sentCancel = await sock.sendMessage(remoteJid, {
+            text: '👍 *Operación cancelada.* No se ha modificado ninguna obra.'
+          });
+          if (sentCancel?.key?.id) botSentMessageIds.add(sentCancel.key.id);
+          return;
+        }
+
+        // 2. Si pide renombrar un candidato en particular
+        // ej: "renombrar el 1 a Alberto Martín Centro", "el 1 y llámalo Alberto Centro", "el 2 ponle Alberto Constitución"
+        let renameTargetCandidate = null;
+        let renameNewName = null;
+        const renameInDisMatch = rawUserText.match(/(?:renombrar\s+(?:el\s+)?([1-9]\d*)|(?:el\s+)?([1-9]\d*)\s+(?:y\s+)?(?:ll[aá]malo|ponle))\s+(?:a|por|como)?\s*(.+)/i);
+        if (renameInDisMatch) {
+          const num = parseInt(renameInDisMatch[1] || renameInDisMatch[2], 10);
+          if (num >= 1 && num <= dis.candidates.length) {
+            renameTargetCandidate = dis.candidates[num - 1];
+            renameNewName = renameInDisMatch[3].trim();
+          }
+        }
+
+        // 3. Identificar candidato por número (1, 2, 3...) o por texto (dirección o ID)
+        let selectedCandidate = null;
+        const numMatch = rawUserText.match(/^([1-9]\d*)$/);
+        if (numMatch) {
+          const idx = parseInt(numMatch[1], 10) - 1;
+          if (idx >= 0 && idx < dis.candidates.length) {
+            selectedCandidate = dis.candidates[idx];
+          }
+        } else if (renameTargetCandidate) {
+          selectedCandidate = renameTargetCandidate;
+        } else {
+          // Búsqueda por coincidencia en ID o dirección
+          selectedCandidate = dis.candidates.find(c =>
+            norm.includes(c.id.toLowerCase()) ||
+            (c.clientAddress && norm.includes(c.clientAddress.toLowerCase())) ||
+            (c.clientAddress && c.clientAddress.toLowerCase().includes(norm))
+          );
+        }
+
+        if (selectedCandidate) {
+          session.pendingDisambiguation = null;
+
+          // Si el usuario pidió renombrar al elegir el candidato
+          if (renameNewName) {
+            renameClientBudget(session.phone || remoteJid, selectedCandidate.id, renameNewName);
+            selectedCandidate.clientName = renameNewName;
+            const sentRen = await sock.sendMessage(remoteJid, {
+              text: `🏷️ *Cliente renombrado a "${renameNewName}"* para diferenciarlo.`
+            });
+            if (sentRen?.key?.id) botSentMessageIds.add(sentRen.key.id);
+          }
+
+          // Ejecutar la acción original con el presupuesto específico del cliente seleccionado
+          if (dis.actionType === 'query_work_status') {
+            await handleQueryWorkStatus(sock, remoteJid, session, selectedCandidate.id, dis.originalPayload?.onlyMissing);
+            return;
+          } else if (dis.actionType === 'update_work_task') {
+            await handleUpdateWorkTask(sock, remoteJid, session, selectedCandidate.id, dis.originalPayload?.taskQuery, dis.originalPayload?.isDone);
+            return;
+          } else if (dis.actionType === 'add_shopping_items') {
+            await handleAddShoppingItems(sock, remoteJid, session, dis.originalPayload?.items || [], selectedCandidate.clientName, selectedCandidate.id);
+            return;
+          } else if (dis.actionType === 'list_shopping_items') {
+            await handleListShoppingItems(sock, remoteJid, session, selectedCandidate.clientName, selectedCandidate.id);
+            return;
+          } else if (dis.actionType === 'mark_shopping_items') {
+            await handleMarkShoppingItemBought(sock, remoteJid, session, dis.originalPayload?.query, selectedCandidate.clientName, selectedCandidate.id);
+            return;
+          } else if (dis.actionType === 'rename_client') {
+            if (dis.originalPayload?.newName) {
+              await handleRenameClient(sock, remoteJid, session, selectedCandidate.id, dis.originalPayload.newName);
+            }
+            return;
+          }
+        } else {
+          const sentClarify = await sock.sendMessage(remoteJid, {
+            text: `⚠️ No he podido identificar tu elección. Por favor, responde con el número (*1* o *${dis.candidates.length}*) o escribe *"cancelar"*.`
+          });
+          if (sentClarify?.key?.id) botSentMessageIds.add(sentClarify.key.id);
+          return;
+        }
+      }
+
+      // 0. Interceptor de Permisos y Confirmaciones (Nivel B y C)
+      if (isText && session.pendingAction) {
+        const evalResult = evaluateConfirmationResponse(session.pendingAction, rawUserText);
+
+        if (evalResult.status === 'APPROVED') {
+          const act = session.pendingAction;
+          session.pendingAction = null;
+
+          if (act.type === 'remind_budget' || act.type === 'remind_invoice') {
+            const clientName = act.data.clientName || 'el cliente';
+            const lines = [
+              `✍️ *¡Mensaje preparado para ${clientName}! (Listo para copiar y pegar)*`,
+              '━━━━━━━━━━━━━━━━━━━━━━━━━',
+              `${act.data.clientMessage}`,
+              '━━━━━━━━━━━━━━━━━━━━━━━━━',
+              '📋 _El bot nunca envía mensajes a tus clientes directamente. Solo tienes que copiar el texto superior y enviárselo desde tu propio WhatsApp._'
+            ];
+
+            if (act.data.directWaUrl) {
+              lines.push('');
+              lines.push('👉 *O pulsa aquí para abrir su WhatsApp con el texto ya escrito (1 clic):*');
+              lines.push(act.data.directWaUrl);
+            }
+
+            const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+            if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+            return;
+          }
+
+          if (act.type === 'schedule_appointment') {
+            await handleScheduleAppointment(sock, remoteJid, session, act.data.appointmentInfo || {});
+            return;
+          }
+
+          if (act.type === 'cancel_appointment') {
+            await handleCancelAppointment(sock, remoteJid, session, act.data.query);
+            return;
+          }
+
+          if (act.type === 'clear_shopping_list') {
+            const phone = session.phone || String(remoteJid).replace(/\D/g, '');
+            const res = clearShoppingList(phone);
+            const sentClr = await sock.sendMessage(remoteJid, {
+              text: `🗑️ *Lista de compras vaciada con éxito.* Se han eliminado ${res.deletedCount} materiales de tu lista.`
+            });
+            if (sentClr?.key?.id) botSentMessageIds.add(sentClr.key.id);
+            return;
+          }
+        } else if (evalResult.status === 'REJECTED') {
+          session.pendingAction = null;
+          const sentRej = await sock.sendMessage(remoteJid, {
+            text: '👍 *Acción descartada.* No se ha enviado ningún mensaje ni se han modificado datos.'
+          });
+          if (sentRej?.key?.id) botSentMessageIds.add(sentRej.key.id);
+          return;
+        } else if (evalResult.status === 'NEED_STRONG_CONFIRMATION') {
+          const sentReq = await sock.sendMessage(remoteJid, {
+            text: '🔒 *Confirmación de seguridad requerida (Nivel C):*\n\nEsta acción modificará tu agenda o datos financieros. Por favor, responde exactamente *"CONFIRMAR"* para proceder o *"CANCELAR"* para descartar.'
+          });
+          if (sentReq?.key?.id) botSentMessageIds.add(sentReq.key.id);
+          return;
+        }
+      }
+
+      // Comando directo para invocar al Secretario Digital / Resumen del día
+      if (/^(?:secretario|briefing|resumen(?:\s+(?:del?\s+)?d[ií]a)?|agenda\s+de\s+hoy|mi\s+d[ií]a)$/i.test(rawUserText)) {
+        const briefingText = generateDailyBriefing(senderNumber);
+
+        // Comprobar si hay presupuestos fríos (>= 2 días) o facturas pendientes (>= 7 días) para sugerir acción (Nivel B)
+        const pendingBudgets = getBudgetsPendingFollowUp(senderNumber);
+        const urgentBudget = pendingBudgets.find(b => b.daysWaiting >= 2);
+
+        let extraText = '';
+        if (urgentBudget) {
+          const proposal = buildBudgetFollowUpProposal(urgentBudget);
+          session.pendingAction = createProposedAction('B', 'remind_budget', {
+            clientName: urgentBudget.clientName,
+            clientPhone: urgentBudget.clientPhone,
+            totalAmount: urgentBudget.totalAmount,
+            clientMessage: proposal.clientMessage,
+            directWaUrl: proposal.directWaUrl
+          }, proposal.promptMessage);
+
+          extraText = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n👉 *Sugerencia del Secretario (Nivel B):*\n${proposal.promptMessage}\n\n_(Responde *"Sí"* para preparar el recordatorio o *"No"* para descartar)_`;
+        } else {
+          const unpaidInvoices = getUnpaidInvoices(senderNumber);
+          const urgentInv = unpaidInvoices.find(i => i.daysPending >= 7);
+          if (urgentInv) {
+            const proposal = buildInvoiceFollowUpProposal(urgentInv, session.company);
+            session.pendingAction = createProposedAction('B', 'remind_invoice', {
+              clientName: urgentInv.clientName,
+              clientPhone: urgentInv.clientPhone,
+              totalAmount: urgentInv.totalAmount,
+              clientMessage: proposal.clientMessage,
+              directWaUrl: proposal.directWaUrl
+            }, proposal.promptMessage);
+
+            extraText = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n👉 *Sugerencia del Secretario (Nivel B):*\n${proposal.promptMessage}\n\n_(Responde *"Sí"* para preparar el mensaje de cobro o *"No"* para descartar)_`;
+          }
+        }
+
+        const sentBriefing = await sock.sendMessage(remoteJid, { text: briefingText + extraText });
+        if (sentBriefing?.key?.id) botSentMessageIds.add(sentBriefing.key.id);
+        return;
+      }
+
+      // 0. Si el profesional está en medio del onboarding conversacional guiado
+      const onboardingState = getOnboardingState(senderNumber);
+      if (onboardingState.step) {
+        const stepResult = processOnboardingStep(senderNumber, rawUserText);
+        if (stepResult.handled) {
+          session.company = getCompany(senderNumber);
+          const sentStep = await sock.sendMessage(remoteJid, { text: stepResult.message });
+          if (sentStep?.key?.id) botSentMessageIds.add(sentStep.key.id);
+          return;
+        }
+      }
+
+      // 1. Detección de saludo inicial / Onboarding para profesionales no configurados
+      const isGreeting = /^(?:hola|buenas|buenos\s+d[ií]as|buenas\s+tardes|buenas\s+noches|hey|qu[eé]\s+tal|empezar|inicio|ayuda)$/i.test(rawUserText);
+      const isExplicitOnboarding = /^(?:onboarding|configurar todo|configurar perfil|reiniciar onboarding|registro)$/i.test(rawUserText);
+
+      if ((isGreeting && session.company && session.company.isConfigured === false) || isExplicitOnboarding) {
+        const welcomeText = startOnboarding(senderNumber);
+        session.company = getCompany(senderNumber);
+        const sentWelcome = await sock.sendMessage(remoteJid, { text: welcomeText });
+        if (sentWelcome?.key?.id) botSentMessageIds.add(sentWelcome.key.id);
+        return;
+      }
+
+      // 2. Comando directo para configurar oficio o especialidad
+      const tradeDirectMatch = rawUserText.match(/^(?:soy|mi oficio es|mi gremio es|somos|oficio|gremio|cambiar oficio a|cambiar gremio a)\s+([a-záéíóúñ\s/]+)$/i);
+      if (tradeDirectMatch) {
+        const rawTrade = tradeDirectMatch[1].trim().toLowerCase();
+        let normalizedTrade = 'Reformas y Construcción';
+        let defaultTax = 10;
+
+        if (/electri/i.test(rawTrade)) {
+          normalizedTrade = 'Electricidad y Telecomunicaciones';
+          defaultTax = 21;
+        } else if (/fontan|plomer/i.test(rawTrade)) {
+          normalizedTrade = 'Fontanería y Saneamiento';
+          defaultTax = 21;
+        } else if (/albañil|obra|construc|reforma/i.test(rawTrade)) {
+          normalizedTrade = 'Albañilería y Reformas';
+          defaultTax = 10;
+        } else if (/carpinter/i.test(rawTrade)) {
+          normalizedTrade = 'Carpintería y Madera';
+          defaultTax = 21;
+        } else if (/clima|aire|calefac/i.test(rawTrade)) {
+          normalizedTrade = 'Climatización y Calefacción';
+          defaultTax = 21;
+        } else if (/pint/i.test(rawTrade)) {
+          normalizedTrade = 'Pintura y Revestimientos';
+          defaultTax = 21;
+        } else if (/cerraj/i.test(rawTrade)) {
+          normalizedTrade = 'Cerrajería y C. Metálica';
+          defaultTax = 21;
+        } else {
+          normalizedTrade = rawTrade.charAt(0).toUpperCase() + rawTrade.slice(1);
+        }
+
+        const updated = saveCompany(senderNumber, { trade: normalizedTrade, defaultTaxRate: defaultTax });
+        session.company = updated;
+
+        const sentTrade = await sock.sendMessage(remoteJid, {
+          text: `🛠️ *¡Oficio configurado con éxito: ${normalizedTrade}!* 🎉\n━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `• A partir de ahora, la IA adaptará las mediciones, capítulos y terminología técnica oficial a tu sector (*${normalizedTrade}*).\n` +
+            `• Tipo de IVA por defecto: *${defaultTax}%* (modificable en cualquier presupuesto).\n\n` +
+            `💡 _Para completar tus datos fiscales (Nombre, CIF, IBAN) di: "Configurar empresa Nombre..., CIF..." o consúltalos con "mi empresa"._`
+        });
+        if (sentTrade?.key?.id) botSentMessageIds.add(sentTrade.key.id);
+        return;
+      }
+
+      // Comando directo para consultar ficha y datos fiscales de la empresa
+      if (/^(?:mi empresa|mis datos|datos empresa|perfil|datos fiscales)$/i.test(rawUserText)) {
+        const companyText = formatCompanyForWhatsApp(session.company);
+        const sentComp = await sock.sendMessage(remoteJid, { text: companyText });
+        if (sentComp?.key?.id) botSentMessageIds.add(sentComp.key.id);
+        return;
+      }
+
+      // Comando directo para configurar datos de la empresa: ej. "configurar empresa CIF B-12345678, Nombre Reformas Pepe..."
+      const configCompanyMatch = rawUserText.match(/^(?:configurar empresa|cambiar empresa|datos empresa|modificar empresa)\s+(.+)$/i);
+      if (configCompanyMatch) {
+        const configText = configCompanyMatch[1];
+        const newCompanyData = {};
+
+        const cifMatch = configText.match(/\b([ABCDEFGHJKLMNPQRSUVW][0-9]{7}[0-9A-J]|[0-9]{8}[TRWAGMYFPDXBNJZSQVHLCKE])\b/i);
+        if (cifMatch) newCompanyData.cif = cifMatch[1].toUpperCase();
+
+        const ibanMatch = configText.match(/\b(ES\d{2}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4})\b/i);
+        if (ibanMatch) newCompanyData.iban = ibanMatch[1].replace(/[\s-]/g, '').replace(/(.{4})/g, '$1 ').trim();
+
+        const bizumMatch = configText.match(/(?:bizum|m[oó]vil)[:\s]+([67]\d{8})\b/i);
+        if (bizumMatch) newCompanyData.bizum = bizumMatch[1];
+
+        const emailMatch = configText.match(/\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/);
+        if (emailMatch) newCompanyData.email = emailMatch[1];
+
+        const nameMatch = configText.match(/(?:nombre|empresa|raz[oó]n social)[:\s]+([^,;\n]+)/i);
+        if (nameMatch) newCompanyData.name = nameMatch[1].trim();
+
+        const dirMatch = configText.match(/(?:direcci[oó]n|calle|ubicaci[oó]n)[:\s]+([^,;\n]+)/i);
+        if (dirMatch) newCompanyData.address = dirMatch[1].trim();
+
+        const tradeMatch = configText.match(/(?:oficio|gremio|especialidad|profesi[oó]n)[:\s]+([^,;\n]+)/i);
+        if (tradeMatch) newCompanyData.trade = tradeMatch[1].trim();
+
+        if (!newCompanyData.name && !cifMatch && !ibanMatch) {
+          newCompanyData.name = configText.trim();
+        }
+
+        const updated = saveCompany(senderNumber, newCompanyData);
+        session.company = updated;
+
+        const confText = [
+          '✅ *¡Datos de tu empresa actualizados con éxito!*',
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          `🛠️ *Oficio / Especialidad:* ${updated.trade}`,
+          `📛 *Empresa:* ${updated.name}`,
+          `🆔 *CIF:* ${updated.cif}`,
+          `📍 *Dirección:* ${updated.address}`,
+          `🏦 *IBAN:* ${updated.iban}`,
+          `📱 *Bizum:* ${updated.bizum}`,
+          `📞 *Teléfono:* ${updated.phone}`,
+          `✉️ *Email:* ${updated.email}`,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          '📄 _Todos tus próximos presupuestos, facturas y recibos oficiales se emitirán con estos datos._'
+        ].join('\n');
+
+        const sentConf = await sock.sendMessage(remoteJid, { text: confText });
+        if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
+        return;
+      }
+
+      // Comando directo para configurar email de la gestoría: ej. "mi gestoría es gestoria@ejemplo.com"
+      const configGestoriaMatch = rawUserText.match(/^(?:mi gestor[ií]a es|email gestor[ií]a|configurar gestor[ií]a)\s+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/i);
+      if (configGestoriaMatch) {
+        const gestoriaEmail = configGestoriaMatch[1].trim().toLowerCase();
+        const updated = saveCompany(senderNumber, { gestoriaEmail });
+        session.company = updated;
+        const sentConf = await sock.sendMessage(remoteJid, {
+          text: `✅ *¡Email de tu gestoría guardado con éxito!*\n\n📧 *Gestoría:* ${gestoriaEmail}\n\nA partir de ahora, cuando quieras enviar tus facturas solo di: *"Enviar trimestre a mi gestoría"* o *"gestoría"* y se le remitirá el Excel y el PDF en 1 clic.`
+        });
+        if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
+        return;
+      }
+
+      // Comando directo para exportar el trimestre para la gestoría: ej. "gestoría", "trimestre", "3T", "exportar 3T"
+      const quarterCmdMatch = rawUserText.match(/^(?:(?:exportar|cerrar|sacar|enviar|mandar|resumen)?\s*(?:el\s+)?(?:trimestre|gestor[ií]a|modelo\s*303|informe\s*fiscal)|1t|2t|3t|4t)(?:\s+(?:del?\s+)?(1t|2t|3t|4t|\d{4}))?(?:\s+(?:del?\s+)?(\d{4}))?$/i);
+      if (quarterCmdMatch) {
+        let qInput = null;
+        let yInput = null;
+
+        const directQ = rawUserText.match(/\b([1-4]t)\b/i);
+        if (directQ) qInput = directQ[1];
+        else if (quarterCmdMatch[1] && /[1-4]t/i.test(quarterCmdMatch[1])) qInput = quarterCmdMatch[1];
+
+        const yearMatch = rawUserText.match(/\b(202[4-9])\b/);
+        if (yearMatch) yInput = yearMatch[1];
+
+        const shouldEmail = /enviar|mandar/i.test(rawUserText);
+
+        await handleQuarterExport(sock, remoteJid, session, qInput, yInput, shouldEmail);
+        return;
+      }
+
+      // Comando directo para listar o consultar presupuestos (todos, pendientes de firma, aceptados, borradores)
+      const budgetListFilter = detectBudgetListIntent(rawUserText);
+      if (budgetListFilter) {
+        await handleListBudgets(sock, remoteJid, session, budgetListFilter);
+        return;
+      }
+
+      // Comando directo para obtener el enlace de firma digital de un presupuesto: ej. "enlace alberto", "enlace PRE-2026-6136", "link"
+      const signingLinkMatch = rawUserText.match(/^(?:enlace|link|url|firma|firmar)(?:\s+(?:de|del)?\s*(.+))?$/i);
+      if (signingLinkMatch && !/^(?:firmar|firma)\s+(?:presupuesto|obra)$/i.test(rawUserText)) {
+        await handleSendSigningLink(sock, remoteJid, session, signingLinkMatch[1] || '');
+        return;
+      }
+
+      // Iniciar presupuesto nuevo
+      if (/^(presupuesto nuevo|nuevo presupuesto|nuevo|otro cliente|empezar de nuevo|#nuevo)$/i.test(rawUserText)) {
+        session.activeBudgetId = null;
+        const sentReset = await sock.sendMessage(remoteJid, {
+          text: '🔄 *Listo para un nuevo presupuesto.*\n\nEnvíame un audio o mensaje con los trabajos y el cliente de la nueva obra.'
+        });
+        if (sentReset?.key?.id) botSentMessageIds.add(sentReset.key.id);
+        console.log(`🔄 Sesión puesta en modo NUEVO presupuesto para ${remoteJid}`);
+        return;
+      }
+
+      // Comando directo para registrar cobro: ej. "cobro 1500", "pago 1000 Jose Luis Bizum", "anticipo 800 transferencia"
+      const paymentCmdMatch = rawUserText.match(/^(?:cobro|pago|cobrado|pagado|ingreso|anticipo)\s+(\d+(?:[.,]\d+)?)\s*(?:€|euros?)?(?:\s+(?:de|por|en|para)?\s*(.+))?$/i);
+      if (paymentCmdMatch) {
+        if (session.budgets.size === 0) {
+          const sentNoBudg = await sock.sendMessage(remoteJid, {
+            text: '📂 *No tienes ningún presupuesto activo para registrar cobros.*\n\nPrimero crea una obra y luego podrás apuntar los anticipos y pagos.'
+          });
+          if (sentNoBudg?.key?.id) botSentMessageIds.add(sentNoBudg.key.id);
+          return;
+        }
+
+        const rawAmount = paymentCmdMatch[1].replace(',', '.');
+        const amount = parseFloat(rawAmount);
+        const rest = (paymentCmdMatch[2] || '').trim();
+
+        let method = 'Bizum';
+        if (/transferencia|banco|cuenta/i.test(rest)) method = 'Transferencia';
+        else if (/efectivo|met[aá]lico|mano/i.test(rest)) method = 'Efectivo';
+        else if (/bizum/i.test(rest)) method = 'Bizum';
+
+        const cleanQuery = rest.replace(/bizum|transferencia|efectivo|met[aá]lico|en\s+mano/gi, '').trim();
+        const target = findBudgetInSession(session, cleanQuery);
+
+        await handlePaymentRegistration(sock, remoteJid, session, target, {
+          amount,
+          method,
+          concept: 'Entrega a cuenta de trabajos'
+        });
+        return;
+      }
+
+      // Comando directo para consultar saldo o deuda: ej. "¿cuánto me debe José Luis?", "deuda José Luis", "saldo"
+      const balanceCmdMatch = rawUserText.match(/^(?:[¿?]?(?:cu[aá]nto\s+me\s+debe|deuda|saldo|pagos|estado\s+de\s+cuenta)\s*(?:de\s+)?(.+)?)$/i);
+      if (balanceCmdMatch) {
+        const query = (balanceCmdMatch[1] || '').replace(/[?¿]/g, '').trim();
+        const target = findBudgetInSession(session, query);
+        await handleQueryBalance(sock, remoteJid, session, target);
+        return;
+      }
+
+      // Comando directo para aceptar presupuesto: ej. "aceptar", "aceptado", "presupuesto aceptado", "aceptar José Luis", "firmado"
+      const acceptCmdMatch = rawUserText.match(/^(?:aceptar|aceptado|firmado|aprobar|confirmar)\s*(?:el\s+)?(?:presupuesto)?(?:\s+(?:de\s+)?(.+))?$/i);
+      if (acceptCmdMatch && !/^(?:citas|visitas|agenda)/i.test(rawUserText)) {
+        const query = (acceptCmdMatch[1] || '').trim();
+        const target = findBudgetInSession(session, query);
+        await handleAcceptBudget(sock, remoteJid, session, target);
+        return;
+      }
+
+      // Comando directo para Factura de Anticipo con IVA: "factura de anticipo", "facturar anticipo", "factura anticipo Juan"
+      const advanceInvCmdMatch = rawUserText.match(/^(?:factura\s+(?:de\s+)?anticipo|facturar\s+anticipo|emitir\s+factura\s+(?:de\s+)?anticipo)(?:\s+(?:de\s+|del\s+presupuesto\s+|de\s+la\s+obra\s+de\s+|el\s+presupuesto\s+)?(.+))?$/i);
+      if (advanceInvCmdMatch) {
+        if (session.budgets.size === 0) {
+          const sentNoBudget = await sock.sendMessage(remoteJid, {
+            text: '📂 *No tienes ningún presupuesto registrado todavía.*\n\nPrimero genera un presupuesto y podrás emitir la factura de anticipo.'
+          });
+          if (sentNoBudget?.key?.id) botSentMessageIds.add(sentNoBudget.key.id);
+          return;
+        }
+
+        const query = advanceInvCmdMatch[1] ? advanceInvCmdMatch[1].trim() : '';
+        const target = findBudgetInSession(session, query);
+        await handleAdvanceInvoice(sock, remoteJid, session, target);
+        return;
+      }
+
+      // Comando directo para facturar: "factura", "facturar", "factura de José Luis", "facturar 5129"
+      const invoiceCmdMatch = rawUserText.match(/^(?:factura|facturar|emitir factura)(?:\s+(?:de\s+|del\s+presupuesto\s+|de\s+la\s+obra\s+de\s+|el\s+presupuesto\s+)?(.+))?$/i);
+      if (invoiceCmdMatch) {
+        if (session.budgets.size === 0) {
+          const sentNoBudget = await sock.sendMessage(remoteJid, {
+            text: '📂 *No tienes ningún presupuesto para facturar todavía.*\n\nPrimero genera un presupuesto con una obra y luego podrás emitir su factura oficial.'
+          });
+          if (sentNoBudget?.key?.id) botSentMessageIds.add(sentNoBudget.key.id);
+          return;
+        }
+
+        const query = invoiceCmdMatch[1] ? invoiceCmdMatch[1].trim() : '';
+        const target = findBudgetInSession(session, query);
+        await emitInvoiceForBudget(sock, remoteJid, session, target);
+        return;
+      }
+
+      // Comando directo para consultar agenda: ej. "agenda", "mis citas", "visitas", "citas hoy", "citas mañana"
+      const isAgendaCmd = /^(?:agenda|mis citas|visitas|citas|mis visitas)(?:\s+(hoy|ma[ñn]ana|todas|pr[oó]ximas))?$/i.test(rawUserText)
+        || /^(?:citas hoy|visitas hoy|agenda hoy)$/i.test(rawUserText)
+        || /^(?:citas ma[ñn]ana|visitas ma[ñn]ana|agenda ma[ñn]ana)$/i.test(rawUserText);
+
+      if (isAgendaCmd) {
+        let filter = 'upcoming';
+        if (/hoy/i.test(rawUserText)) filter = 'today';
+        else if (/ma[ñn]ana/i.test(rawUserText)) filter = 'tomorrow';
+        else if (/toda/i.test(rawUserText)) filter = 'all';
+
+        await handleListAppointments(sock, remoteJid, session, filter);
+        return;
+      }
+
+      // Comando directo para cancelar cita: ej. "cancelar cita Juan", "anular visita Pedro"
+      const cancelCmdMatch = rawUserText.match(/^(?:cancelar|anular|borrar)\s+(?:la\s+)?(?:cita|visita)(?:\s+(?:con|de)?\s*(.+))?$/i);
+      if (cancelCmdMatch) {
+        const query = (cancelCmdMatch[1] || '').trim();
+        if (!query) {
+          const sentNeedQuery = await sock.sendMessage(remoteJid, {
+            text: '⚠️ *Indica el nombre del cliente o referencia de la cita* que deseas anular (ej: *"cancelar cita Juan"*).'
+          });
+          if (sentNeedQuery?.key?.id) botSentMessageIds.add(sentNeedQuery.key.id);
+        } else {
+          await handleCancelAppointment(sock, remoteJid, session, query);
+        }
+        return;
+      }
+
+      // Comando directo para consultar lista de compras / materiales: ej. "lista de la compra", "¿qué tengo que comprar?", "¿qué tengo que comprar para Carlos?"
+      const listShoppingMatch = rawUserText.match(/^(?:lista\s+de\s+(?:la\s+)?compras?|materiales\s+pendientes|qu[eé]\s+(?:tengo\s+que|hay\s+que)\s+comprar|ver\s+compras?|mis\s+compras|materiales)(?:\s+(?:de|para|en\s+la\s+obra\s+de)\s+(.+))?$/i);
+      if (listShoppingMatch) {
+        const clientFilter = (listShoppingMatch[1] || '').trim() || null;
+        await handleListShoppingItems(sock, remoteJid, session, clientFilter);
+        return;
+      }
+
+      // Comando directo para marcar material como comprado: ej. "ya compré el cemento", "comprado azulejo", "tachar cable de Carlos"
+      const boughtCmdMatch = rawUserText.match(/^(?:ya\s+compr[eé]|comprad[oa]s?|tachad[oa]s?|tachar)\s+(.+)$/i);
+      if (boughtCmdMatch) {
+        const fullQuery = boughtCmdMatch[1].trim();
+        let clientQuery = null;
+        let itemQuery = fullQuery;
+        const deMatch = fullQuery.match(/^(.+?)\s+(?:de|para)\s+(.+)$/i);
+        if (deMatch) {
+          itemQuery = deMatch[1].trim();
+          clientQuery = deMatch[2].trim();
+        }
+        await handleMarkShoppingItemBought(sock, remoteJid, session, itemQuery, clientQuery);
+        return;
+      }
+
+      // Comando directo para vaciar o borrar la lista de compras: ej. "vaciar lista de compras", "borrar lista de la compra"
+      if (/^(?:borrar|vaciar|limpiar)\s+(?:la\s+)?lista\s+de\s+(?:la\s+)?compras?$/i.test(rawUserText)) {
+        await handleClearShoppingList(sock, remoteJid, session);
+        return;
+      }
+
+      // Comando directo para consultar qué falta en una obra (Modo Obra - Faltantes)
+      const missingWorkMatch = rawUserText.match(/^(?:qu[eé]\s+(?:nos\s+)?falta\s+(?:en\s+la\s+obra\s+de|en|para)\s+|qu[eé]\s+falta\s+(?:de|en|para)\s+)(.+)$/i);
+      if (missingWorkMatch) {
+        const clientFilter = (missingWorkMatch[1] || '').replace(/[?¿!¡]/g, '').trim();
+        await handleQueryWorkStatus(sock, remoteJid, session, clientFilter, true);
+        return;
+      }
+
+      // Comando directo para consultar estado o modo obra completo
+      const modeWorkMatch = rawUserText.match(/^(?:modo\s+obra|estado\s+(?:de\s+la\s+)?obra|ficha\s+(?:de\s+la\s+)?obra|memoria\s+obra|c[oó]mo\s+va\s+la\s+obra\s+de)\s+(.+)$/i);
+      if (modeWorkMatch) {
+        const clientFilter = (modeWorkMatch[1] || '').replace(/[?¿!¡]/g, '').trim();
+        await handleQueryWorkStatus(sock, remoteJid, session, clientFilter, false);
+        return;
+      }
+
+      // Comando directo para marcar tarea/partida como realizada o completada
+      const taskDoneMatch = rawUserText.match(/^(?:ya\s+(?:hemos\s+)?terminad[oa]|terminad[oa]|hech[oa]|lista)\s+(?:la\s+|el\s+)?(demolici[oó]n|fontaner[ií]a|alicatado|pintura|sanitarios?|electricidad|carpinter[ií]a|solado|tabiquer[ií]a|[a-záéíóúñ\s]+?)\s+(?:de|en\s+la\s+obra\s+de)\s+(.+)$/i);
+      if (taskDoneMatch) {
+        const taskQuery = (taskDoneMatch[1] || '').trim();
+        const clientFilter = (taskDoneMatch[2] || '').trim();
+        await handleUpdateWorkTask(sock, remoteJid, session, clientFilter, taskQuery, true);
+        return;
+      }
+
+      const markTaskExplicitMatch = rawUserText.match(/^(?:marca[r]?|poner)\s+(?:la\s+|el\s+)?(.+?)\s+(?:de|para)\s+(.+?)\s+como\s+(?:hech[oa]|list[oa]|terminad[oa])$/i);
+      if (markTaskExplicitMatch) {
+        const taskQuery = (markTaskExplicitMatch[1] || '').trim();
+        const clientFilter = (markTaskExplicitMatch[2] || '').trim();
+        await handleUpdateWorkTask(sock, remoteJid, session, clientFilter, taskQuery, true);
+        return;
+      }
+
+      // Comando directo para renombrar cliente o añadir distintivo:
+      // ej: "renombrar cliente Alberto Martín a Alberto Martín (Centro)", "cambiar nombre de cliente Alberto a Alberto Centro"
+      const renameCmdMatch = rawUserText.match(/^(?:renombrar\s+cliente|ponerle\s+distintivo\s+a|cambiar\s+nombre\s+(?:de\s+)?cliente)\s+(.+?)\s+(?:a|por|como)\s+(.+)$/i);
+      if (renameCmdMatch) {
+        const targetQuery = renameCmdMatch[1].trim();
+        const newName = renameCmdMatch[2].trim();
+        await handleRenameClient(sock, remoteJid, session, targetQuery, newName);
+        return;
+      }
+
+      // 3. Router de Intenciones Determinístico (Resuelve con SQLite sin pasar por Gemini)
+      if (!isAudio && rawUserText) {
+        const detected = detectIntent(rawUserText);
+        if (detected) {
+          console.log(`⚡ [IntentRouter] Intención detectada: ${detected.intent}`, detected.params);
+          const resolvedReply = await resolveIntent(detected, senderNumber, session);
+          if (resolvedReply) {
+            const sentIntentMsg = await sock.sendMessage(remoteJid, { text: resolvedReply });
+            if (sentIntentMsg?.key?.id) botSentMessageIds.add(sentIntentMsg.key.id);
+            return;
+          }
+        }
+      }
+
+      // Preparar payload de IA (audio o texto)
+      let audioBuffer = null;
+      if (isAudio) {
+        try {
+          console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
+          audioBuffer = await downloadMediaMessage(
+            { key: msg.key, message: messageContent },
+            'buffer',
+            {},
+            { logger, reuploadRequest: sock.updateMediaMessage }
+          );
+        } catch (dlErr) {
+          console.error('❌ Error descargando audio:', dlErr.message);
+          const sentDlErr = await sock.sendMessage(remoteJid, {
+            text: '⚠️ *No se pudo descargar la nota de voz.* Por favor, vuelve a enviarla.'
+          });
+          if (sentDlErr?.key?.id) botSentMessageIds.add(sentDlErr.key.id);
+          return;
+        }
+      }
+
+      // Debounce anti-duplicados por contenido idéntico en <5s (evita dobles envíos por sincronización Baileys/WhatsApp)
+      const contentKey = isAudio 
+        ? `audio_${audioBuffer?.length || ''}`
+        : `text_${rawUserText.trim().toLowerCase()}`;
+      
+      if (contentKey && contentKey !== 'text_') {
+        const lastMsg = recentMessageTexts.get(remoteJid);
+        const nowMs = Date.now();
+        if (lastMsg && lastMsg.key === contentKey && (nowMs - lastMsg.time) < 5000) {
+          console.log(`   ⏭️ Mensaje con contenido idéntico en <5s para ${remoteJid} ignorado (debounce anti-duplicados).`);
+          return;
+        }
+        recentMessageTexts.set(remoteJid, { key: contentKey, time: nowMs });
+        if (recentMessageTexts.size > 2000) {
+          const oldestKey = recentMessageTexts.keys().next().value;
+          recentMessageTexts.delete(oldestKey);
+        }
+      }
+
+      // Evitar procesamientos paralelos concurrentes para el mismo chat (bloqueo por JID)
+      if (activeProcessingJids.has(remoteJid)) {
+        console.log(`   ⏳ Ya hay un procesamiento de IA en curso para ${remoteJid}. Omitiendo evento concurrente.`);
+        return;
+      }
+
+      const taskData = {
+        isAudio,
+        audioBuffer,
+        audioMimeType: audioMsg?.mimetype || 'audio/ogg',
+        rawUserText,
+        senderNumber
+      };
+
+      try {
+        activeProcessingJids.add(remoteJid);
+        await handleAiProcessing(sock, remoteJid, session, taskData, false);
+      } catch (err) {
+        console.error('❌ Error procesando mensaje de WhatsApp:', err.message);
+        const isOverload = /429|503|quota|exhausted|overload|demand|busy|unavailable|high demand|saturad/i.test(err.message || '');
+        if (isOverload) {
+          const alreadyQueued = aiStandbyQueue.some(item =>
+            item.remoteJid === remoteJid &&
+            ((taskData.rawUserText && item.taskData.rawUserText === taskData.rawUserText) ||
+             (taskData.isAudio && item.taskData.isAudio && item.taskData.audioBuffer?.length === taskData.audioBuffer?.length))
+          );
+          if (alreadyQueued) {
+            console.log(`⏳ Petición idéntica ya en cola stand-by para ${remoteJid}. No se duplica.`);
+            return;
+          }
+          aiStandbyQueue.push({
+            id: Date.now(),
+            remoteJid,
+            session,
+            taskData,
+            attempts: 0,
+            processing: false,
+            nextRetryAt: Date.now() + 5000
+          });
+          console.log(`⏳ Petición guardada en cola stand-by para ${remoteJid} por alta demanda de Gemini.`);
+          const sentStandby = await sock.sendMessage(remoteJid, {
+            text: `⏳ *Servidores de IA con alta demanda temporal*\n\nHe dejado tu ${isAudio ? 'nota de voz' : 'mensaje'} guardado en *cola de espera (stand-by)*. El bot reintentará procesarlo automáticamente en segundo plano hasta que se genere tu presupuesto, sin que tengas que volver a grabar ni enviar nada.\n\n_En cuanto esté listo, te llegará aquí el presupuesto._`
+          });
+          if (sentStandby?.key?.id) botSentMessageIds.add(sentStandby.key.id);
+        } else {
+          const sentErr = await sock.sendMessage(remoteJid, {
+            text: `⚠️ *No se ha podido procesar el presupuesto*\n\nHa habido una incidencia temporal (${err.message.substring(0, 80)}...). Por favor, reenvía tu solicitud.`
+          });
+          if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+        }
+      } finally {
+        activeProcessingJids.delete(remoteJid);
+        await sock.sendPresenceUpdate('paused', remoteJid);
+      }
+      isSuccess = true;
+    } catch (err) {
+      console.error(`❌ Error en executeMessageDispatch para ${remoteJid}:`, err);
+      if (wamId) updateMessageStatus(wamId, 'FAILED');
+      if (allWamIds) {
+        allWamIds.forEach(id => updateMessageStatus(id, 'FAILED'));
+      }
+      throw err;
+    } finally {
+      if (isSuccess) {
+        if (wamId) updateMessageStatus(wamId, 'PROCESSED');
+        if (allWamIds) {
+          allWamIds.forEach(id => updateMessageStatus(id, 'PROCESSED'));
+        }
+      }
+    }
+  }
+
+  async function processChatQueue(sock, remoteJid, senderNumber) {
+    if (activeProcessingJids.has(remoteJid)) {
+      return;
+    }
+    activeProcessingJids.add(remoteJid);
+    setConversationState(remoteJid, 'PROCESSING');
+
+    try {
+      while (true) {
+        const queue = chatQueues.get(remoteJid);
+        if (!queue || queue.length === 0) break;
+        const nextItem = queue.shift();
+        try {
+          await executeMessageDispatch(sock, remoteJid, senderNumber, nextItem);
+        } catch (itemErr) {
+          console.error(`❌ Error en cola procesando mensaje para ${remoteJid}:`, itemErr.message);
+        }
+      }
+    } finally {
+      activeProcessingJids.delete(remoteJid);
+      const session = getUserSession(remoteJid, senderNumber);
+      const onboardingState = getOnboardingState(senderNumber);
+      if (session.pendingAction || onboardingState?.step || session.pendingDisambiguation) {
+        setConversationState(remoteJid, 'WAITING_FOR_INPUT');
+      } else {
+        setConversationState(remoteJid, 'IDLE');
+      }
+      await sock.sendPresenceUpdate('paused', remoteJid);
+    }
+  }
+
+  function enqueueChatMessage(sock, remoteJid, senderNumber, item) {
+    if (!chatQueues.has(remoteJid)) {
+      chatQueues.set(remoteJid, []);
+    }
+    if (item.wamId) updateMessageStatus(item.wamId, 'QUEUED');
+    if (item.allWamIds) {
+      item.allWamIds.forEach(id => updateMessageStatus(id, 'QUEUED'));
+    }
+    chatQueues.get(remoteJid).push(item);
+    console.log(`📥 [Cola Chat: ${senderNumber}] Mensaje encolado (posición ${chatQueues.get(remoteJid).length}). Estado mensaje: QUEUED`);
+    processChatQueue(sock, remoteJid, senderNumber).catch(err => {
+      console.error(`❌ Error en processChatQueue para ${remoteJid}:`, err);
+    });
+  }
+
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     // Aceptar tanto 'notify' (mensajes de terceros) como 'append' (mensajes a ti mismo desde tu móvil)
     if (type !== 'notify' && type !== 'append') return;
@@ -2592,720 +3406,91 @@ async function startWhatsAppGateway() {
         continue;
       }
 
-      const session = getUserSession(remoteJid, senderNumber);
-
-      // Si recibimos una imagen para el logotipo de la empresa
-      if (isImage) {
-        const caption = (imageMsg.caption || '').trim().toLowerCase();
-        if (caption.includes('logo') || caption === 'foto' || caption === 'logotipo' || caption === 'mi logo' || caption === '') {
-          try {
-            console.log(`🖼️ Imagen de logotipo recibida de ${senderNumber}...`);
-            const buffer = await downloadMediaMessage(
-              { key: msg.key, message: messageContent },
-              'buffer',
-              {},
-              { logger, reuploadRequest: sock.updateMediaMessage }
-            );
-            const logosDir = path.resolve('data', 'logos');
-            if (!fs.existsSync(logosDir)) fs.mkdirSync(logosDir, { recursive: true });
-            const logoPath = path.join(logosDir, `${senderNumber}.png`);
-            fs.writeFileSync(logoPath, buffer);
-
-            saveCompany(senderNumber, { logoPath });
-            session.company = getCompany(senderNumber);
-
-            const sentLogo = await sock.sendMessage(remoteJid, {
-              text: `✅ *¡Logotipo de empresa guardado con éxito!*\n\n🖼️ A partir de ahora aparecerá en la cabecera de todos tus nuevos presupuestos, facturas y recibos oficiales en PDF.`
-            });
-            if (sentLogo?.key?.id) botSentMessageIds.add(sentLogo.key.id);
-          } catch (logoErr) {
-            console.error('❌ Error guardando logotipo:', logoErr.message);
-            const sentErr = await sock.sendMessage(remoteJid, {
-              text: `⚠️ *No se pudo guardar el logotipo:* ${logoErr.message}`
-            });
-            if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-          }
+      // 1. Persistencia y tracking en SQLite (Tabla messages)
+      const wamId = msg.key?.id;
+      if (wamId) {
+        if (isMessageAlreadyProcessed(wamId)) {
+          console.log(`   ⏭️ Ignorado mensaje ya procesado en base de datos [id: ${wamId}]`);
           continue;
         }
-      }
-
-      // 0.1 Interceptor de Desambiguación de Clientes Homónimos (Cero Suposiciones)
-      if (isText && session.pendingDisambiguation) {
-        const dis = session.pendingDisambiguation;
-        const norm = rawUserText.trim().toLowerCase();
-
-        // 1. Si el usuario cancela
-        if (norm === 'cancelar' || norm === 'ninguno' || norm === 'ninguna' || norm === 'no' || norm === 'descartar') {
-          session.pendingDisambiguation = null;
-          const sentCancel = await sock.sendMessage(remoteJid, {
-            text: '👍 *Operación cancelada.* No se ha modificado ninguna obra.'
-          });
-          if (sentCancel?.key?.id) botSentMessageIds.add(sentCancel.key.id);
-          continue;
-        }
-
-        // 2. Si pide renombrar un candidato en particular
-        // ej: "renombrar el 1 a Alberto Martín Centro", "el 1 y llámalo Alberto Centro", "el 2 ponle Alberto Constitución"
-        let renameTargetCandidate = null;
-        let renameNewName = null;
-        const renameInDisMatch = rawUserText.match(/(?:renombrar\s+(?:el\s+)?([1-9]\d*)|(?:el\s+)?([1-9]\d*)\s+(?:y\s+)?(?:ll[aá]malo|ponle))\s+(?:a|por|como)?\s*(.+)/i);
-        if (renameInDisMatch) {
-          const num = parseInt(renameInDisMatch[1] || renameInDisMatch[2], 10);
-          if (num >= 1 && num <= dis.candidates.length) {
-            renameTargetCandidate = dis.candidates[num - 1];
-            renameNewName = renameInDisMatch[3].trim();
-          }
-        }
-
-        // 3. Identificar candidato por número (1, 2, 3...) o por texto (dirección o ID)
-        let selectedCandidate = null;
-        const numMatch = rawUserText.match(/^([1-9]\d*)$/);
-        if (numMatch) {
-          const idx = parseInt(numMatch[1], 10) - 1;
-          if (idx >= 0 && idx < dis.candidates.length) {
-            selectedCandidate = dis.candidates[idx];
-          }
-        } else if (renameTargetCandidate) {
-          selectedCandidate = renameTargetCandidate;
-        } else {
-          // Búsqueda por coincidencia en ID o dirección
-          selectedCandidate = dis.candidates.find(c =>
-            norm.includes(c.id.toLowerCase()) ||
-            (c.clientAddress && norm.includes(c.clientAddress.toLowerCase())) ||
-            (c.clientAddress && c.clientAddress.toLowerCase().includes(norm))
-          );
-        }
-
-        if (selectedCandidate) {
-          session.pendingDisambiguation = null;
-
-          // Si el usuario pidió renombrar al elegir el candidato
-          if (renameNewName) {
-            renameClientBudget(session.phone || remoteJid, selectedCandidate.id, renameNewName);
-            selectedCandidate.clientName = renameNewName;
-            const sentRen = await sock.sendMessage(remoteJid, {
-              text: `🏷️ *Cliente renombrado a "${renameNewName}"* para diferenciarlo.`
-            });
-            if (sentRen?.key?.id) botSentMessageIds.add(sentRen.key.id);
-          }
-
-          // Ejecutar la acción original con el presupuesto específico del cliente seleccionado
-          if (dis.actionType === 'query_work_status') {
-            await handleQueryWorkStatus(sock, remoteJid, session, selectedCandidate.id, dis.originalPayload?.onlyMissing);
-            continue;
-          } else if (dis.actionType === 'update_work_task') {
-            await handleUpdateWorkTask(sock, remoteJid, session, selectedCandidate.id, dis.originalPayload?.taskQuery, dis.originalPayload?.isDone);
-            continue;
-          } else if (dis.actionType === 'add_shopping_items') {
-            await handleAddShoppingItems(sock, remoteJid, session, dis.originalPayload?.items || [], selectedCandidate.clientName, selectedCandidate.id);
-            continue;
-          } else if (dis.actionType === 'list_shopping_items') {
-            await handleListShoppingItems(sock, remoteJid, session, selectedCandidate.clientName, selectedCandidate.id);
-            continue;
-          } else if (dis.actionType === 'mark_shopping_items') {
-            await handleMarkShoppingItemBought(sock, remoteJid, session, dis.originalPayload?.query, selectedCandidate.clientName, selectedCandidate.id);
-            continue;
-          } else if (dis.actionType === 'rename_client') {
-            if (dis.originalPayload?.newName) {
-              await handleRenameClient(sock, remoteJid, session, selectedCandidate.id, dis.originalPayload.newName);
-            }
-            continue;
-          }
-        } else {
-          const sentClarify = await sock.sendMessage(remoteJid, {
-            text: `⚠️ No he podido identificar tu elección. Por favor, responde con el número (*1* o *${dis.candidates.length}*) o escribe *"cancelar"*.`
-          });
-          if (sentClarify?.key?.id) botSentMessageIds.add(sentClarify.key.id);
-          continue;
-        }
-      }
-
-      // 0. Interceptor de Permisos y Confirmaciones (Nivel B y C)
-      if (isText && session.pendingAction) {
-        const evalResult = evaluateConfirmationResponse(session.pendingAction, rawUserText);
-
-        if (evalResult.status === 'APPROVED') {
-          const act = session.pendingAction;
-          session.pendingAction = null;
-
-          if (act.type === 'remind_budget' || act.type === 'remind_invoice') {
-            const clientName = act.data.clientName || 'el cliente';
-            const lines = [
-              `✍️ *¡Mensaje preparado para ${clientName}! (Listo para copiar y pegar)*`,
-              '━━━━━━━━━━━━━━━━━━━━━━━━━',
-              `${act.data.clientMessage}`,
-              '━━━━━━━━━━━━━━━━━━━━━━━━━',
-              '📋 _El bot nunca envía mensajes a tus clientes directamente. Solo tienes que copiar el texto superior y enviárselo desde tu propio WhatsApp._'
-            ];
-
-            if (act.data.directWaUrl) {
-              lines.push('');
-              lines.push('👉 *O pulsa aquí para abrir su WhatsApp con el texto ya escrito (1 clic):*');
-              lines.push(act.data.directWaUrl);
-            }
-
-            const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
-            if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
-            continue;
-          }
-
-          if (act.type === 'schedule_appointment') {
-            await handleScheduleAppointment(sock, remoteJid, session, act.data.appointmentInfo || {});
-            continue;
-          }
-
-          if (act.type === 'cancel_appointment') {
-            await handleCancelAppointment(sock, remoteJid, session, act.data.query);
-            continue;
-          }
-
-          if (act.type === 'clear_shopping_list') {
-            const phone = session.phone || String(remoteJid).replace(/\D/g, '');
-            const res = clearShoppingList(phone);
-            const sentClr = await sock.sendMessage(remoteJid, {
-              text: `🗑️ *Lista de compras vaciada con éxito.* Se han eliminado ${res.deletedCount} materiales de tu lista.`
-            });
-            if (sentClr?.key?.id) botSentMessageIds.add(sentClr.key.id);
-            continue;
-          }
-        } else if (evalResult.status === 'REJECTED') {
-          session.pendingAction = null;
-          const sentRej = await sock.sendMessage(remoteJid, {
-            text: '👍 *Acción descartada.* No se ha enviado ningún mensaje ni se han modificado datos.'
-          });
-          if (sentRej?.key?.id) botSentMessageIds.add(sentRej.key.id);
-          continue;
-        } else if (evalResult.status === 'NEED_STRONG_CONFIRMATION') {
-          const sentReq = await sock.sendMessage(remoteJid, {
-            text: '🔒 *Confirmación de seguridad requerida (Nivel C):*\n\nEsta acción modificará tu agenda o datos financieros. Por favor, responde exactamente *"CONFIRMAR"* para proceder o *"CANCELAR"* para descartar.'
-          });
-          if (sentReq?.key?.id) botSentMessageIds.add(sentReq.key.id);
-          continue;
-        }
-      }
-
-      // Comando directo para invocar al Secretario Digital / Resumen del día
-      if (/^(?:secretario|briefing|resumen(?:\s+(?:del?\s+)?d[ií]a)?|agenda\s+de\s+hoy|mi\s+d[ií]a)$/i.test(rawUserText)) {
-        const briefingText = generateDailyBriefing(senderNumber);
-
-        // Comprobar si hay presupuestos fríos (>= 2 días) o facturas pendientes (>= 7 días) para sugerir acción (Nivel B)
-        const pendingBudgets = getBudgetsPendingFollowUp(senderNumber);
-        const urgentBudget = pendingBudgets.find(b => b.daysWaiting >= 2);
-
-        let extraText = '';
-        if (urgentBudget) {
-          const proposal = buildBudgetFollowUpProposal(urgentBudget);
-          session.pendingAction = createProposedAction('B', 'remind_budget', {
-            clientName: urgentBudget.clientName,
-            clientPhone: urgentBudget.clientPhone,
-            totalAmount: urgentBudget.totalAmount,
-            clientMessage: proposal.clientMessage,
-            directWaUrl: proposal.directWaUrl
-          }, proposal.promptMessage);
-
-          extraText = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n👉 *Sugerencia del Secretario (Nivel B):*\n${proposal.promptMessage}\n\n_(Responde *"Sí"* para preparar el recordatorio o *"No"* para descartar)_`;
-        } else {
-          const unpaidInvoices = getUnpaidInvoices(senderNumber);
-          const urgentInv = unpaidInvoices.find(i => i.daysPending >= 7);
-          if (urgentInv) {
-            const proposal = buildInvoiceFollowUpProposal(urgentInv, session.company);
-            session.pendingAction = createProposedAction('B', 'remind_invoice', {
-              clientName: urgentInv.clientName,
-              clientPhone: urgentInv.clientPhone,
-              totalAmount: urgentInv.totalAmount,
-              clientMessage: proposal.clientMessage,
-              directWaUrl: proposal.directWaUrl
-            }, proposal.promptMessage);
-
-            extraText = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n👉 *Sugerencia del Secretario (Nivel B):*\n${proposal.promptMessage}\n\n_(Responde *"Sí"* para preparar el mensaje de cobro o *"No"* para descartar)_`;
-          }
-        }
-
-        const sentBriefing = await sock.sendMessage(remoteJid, { text: briefingText + extraText });
-        if (sentBriefing?.key?.id) botSentMessageIds.add(sentBriefing.key.id);
-        continue;
-      }
-
-      // 0. Si el profesional está en medio del onboarding conversacional guiado
-      const onboardingState = getOnboardingState(senderNumber);
-      if (onboardingState.step) {
-        const stepResult = processOnboardingStep(senderNumber, rawUserText);
-        if (stepResult.handled) {
-          session.company = getCompany(senderNumber);
-          const sentStep = await sock.sendMessage(remoteJid, { text: stepResult.message });
-          if (sentStep?.key?.id) botSentMessageIds.add(sentStep.key.id);
-          continue;
-        }
-      }
-
-      // 1. Detección de saludo inicial / Onboarding para profesionales no configurados
-      const isGreeting = /^(?:hola|buenas|buenos\s+d[ií]as|buenas\s+tardes|buenas\s+noches|hey|qu[eé]\s+tal|empezar|inicio|ayuda)$/i.test(rawUserText);
-      const isExplicitOnboarding = /^(?:onboarding|configurar todo|configurar perfil|reiniciar onboarding|registro)$/i.test(rawUserText);
-
-      if ((isGreeting && session.company && session.company.isConfigured === false) || isExplicitOnboarding) {
-        const welcomeText = startOnboarding(senderNumber);
-        session.company = getCompany(senderNumber);
-        const sentWelcome = await sock.sendMessage(remoteJid, { text: welcomeText });
-        if (sentWelcome?.key?.id) botSentMessageIds.add(sentWelcome.key.id);
-        continue;
-      }
-
-      // 2. Comando directo para configurar oficio o especialidad
-      const tradeDirectMatch = rawUserText.match(/^(?:soy|mi oficio es|mi gremio es|somos|oficio|gremio|cambiar oficio a|cambiar gremio a)\s+([a-záéíóúñ\s/]+)$/i);
-      if (tradeDirectMatch) {
-        const rawTrade = tradeDirectMatch[1].trim().toLowerCase();
-        let normalizedTrade = 'Reformas y Construcción';
-        let defaultTax = 10;
-
-        if (/electri/i.test(rawTrade)) {
-          normalizedTrade = 'Electricidad y Telecomunicaciones';
-          defaultTax = 21;
-        } else if (/fontan|plomer/i.test(rawTrade)) {
-          normalizedTrade = 'Fontanería y Saneamiento';
-          defaultTax = 21;
-        } else if (/albañil|obra|construc|reforma/i.test(rawTrade)) {
-          normalizedTrade = 'Albañilería y Reformas';
-          defaultTax = 10;
-        } else if (/carpinter/i.test(rawTrade)) {
-          normalizedTrade = 'Carpintería y Madera';
-          defaultTax = 21;
-        } else if (/clima|aire|calefac/i.test(rawTrade)) {
-          normalizedTrade = 'Climatización y Calefacción';
-          defaultTax = 21;
-        } else if (/pint/i.test(rawTrade)) {
-          normalizedTrade = 'Pintura y Revestimientos';
-          defaultTax = 21;
-        } else if (/cerraj/i.test(rawTrade)) {
-          normalizedTrade = 'Cerrajería y C. Metálica';
-          defaultTax = 21;
-        } else {
-          normalizedTrade = rawTrade.charAt(0).toUpperCase() + rawTrade.slice(1);
-        }
-
-        const updated = saveCompany(senderNumber, { trade: normalizedTrade, defaultTaxRate: defaultTax });
-        session.company = updated;
-
-        const sentTrade = await sock.sendMessage(remoteJid, {
-          text: `🛠️ *¡Oficio configurado con éxito: ${normalizedTrade}!* 🎉\n━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-            `• A partir de ahora, la IA adaptará las mediciones, capítulos y terminología técnica oficial a tu sector (*${normalizedTrade}*).\n` +
-            `• Tipo de IVA por defecto: *${defaultTax}%* (modificable en cualquier presupuesto).\n\n` +
-            `💡 _Para completar tus datos fiscales (Nombre, CIF, IBAN) di: "Configurar empresa Nombre..., CIF..." o consúltalos con "mi empresa"._`
+        recordIncomingMessage({
+          whatsappMessageId: wamId,
+          businessId: senderNumber,
+          chatId: remoteJid,
+          senderPhone: senderNumber,
+          content: isAudio ? '[Nota de voz]' : (isImage ? `[Imagen: ${imageMsg?.caption || ''}]` : rawUserText),
+          status: 'RECEIVED'
         });
-        if (sentTrade?.key?.id) botSentMessageIds.add(sentTrade.key.id);
-        continue;
       }
 
-      // Comando directo para consultar ficha y datos fiscales de la empresa
-      if (/^(?:mi empresa|mis datos|datos empresa|perfil|datos fiscales)$/i.test(rawUserText)) {
-        const companyText = formatCompanyForWhatsApp(session.company);
-        const sentComp = await sock.sendMessage(remoteJid, { text: companyText });
-        if (sentComp?.key?.id) botSentMessageIds.add(sentComp.key.id);
-        continue;
-      }
-
-      // Comando directo para configurar datos de la empresa: ej. "configurar empresa CIF B-12345678, Nombre Reformas Pepe..."
-      const configCompanyMatch = rawUserText.match(/^(?:configurar empresa|cambiar empresa|datos empresa|modificar empresa)\s+(.+)$/i);
-      if (configCompanyMatch) {
-        const configText = configCompanyMatch[1];
-        const newCompanyData = {};
-
-        const cifMatch = configText.match(/\b([ABCDEFGHJKLMNPQRSUVW][0-9]{7}[0-9A-J]|[0-9]{8}[TRWAGMYFPDXBNJZSQVHLCKE])\b/i);
-        if (cifMatch) newCompanyData.cif = cifMatch[1].toUpperCase();
-
-        const ibanMatch = configText.match(/\b(ES\d{2}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4})\b/i);
-        if (ibanMatch) newCompanyData.iban = ibanMatch[1].replace(/[\s-]/g, '').replace(/(.{4})/g, '$1 ').trim();
-
-        const bizumMatch = configText.match(/(?:bizum|m[oó]vil)[:\s]+([67]\d{8})\b/i);
-        if (bizumMatch) newCompanyData.bizum = bizumMatch[1];
-
-        const emailMatch = configText.match(/\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/);
-        if (emailMatch) newCompanyData.email = emailMatch[1];
-
-        const nameMatch = configText.match(/(?:nombre|empresa|raz[oó]n social)[:\s]+([^,;\n]+)/i);
-        if (nameMatch) newCompanyData.name = nameMatch[1].trim();
-
-        const dirMatch = configText.match(/(?:direcci[oó]n|calle|ubicaci[oó]n)[:\s]+([^,;\n]+)/i);
-        if (dirMatch) newCompanyData.address = dirMatch[1].trim();
-
-        const tradeMatch = configText.match(/(?:oficio|gremio|especialidad|profesi[oó]n)[:\s]+([^,;\n]+)/i);
-        if (tradeMatch) newCompanyData.trade = tradeMatch[1].trim();
-
-        if (!newCompanyData.name && !cifMatch && !ibanMatch) {
-          newCompanyData.name = configText.trim();
-        }
-
-        const updated = saveCompany(senderNumber, newCompanyData);
-        session.company = updated;
-
-        const confText = [
-          '✅ *¡Datos de tu empresa actualizados con éxito!*',
-          '━━━━━━━━━━━━━━━━━━━━━━━━━',
-          `🛠️ *Oficio / Especialidad:* ${updated.trade}`,
-          `📛 *Empresa:* ${updated.name}`,
-          `🆔 *CIF:* ${updated.cif}`,
-          `📍 *Dirección:* ${updated.address}`,
-          `🏦 *IBAN:* ${updated.iban}`,
-          `📱 *Bizum:* ${updated.bizum}`,
-          `📞 *Teléfono:* ${updated.phone}`,
-          `✉️ *Email:* ${updated.email}`,
-          '━━━━━━━━━━━━━━━━━━━━━━━━━',
-          '📄 _Todos tus próximos presupuestos, facturas y recibos oficiales se emitirán con estos datos._'
-        ].join('\n');
-
-        const sentConf = await sock.sendMessage(remoteJid, { text: confText });
-        if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
-        continue;
-      }
-
-      // Comando directo para configurar email de la gestoría: ej. "mi gestoría es gestoria@ejemplo.com"
-      const configGestoriaMatch = rawUserText.match(/^(?:mi gestor[ií]a es|email gestor[ií]a|configurar gestor[ií]a)\s+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/i);
-      if (configGestoriaMatch) {
-        const gestoriaEmail = configGestoriaMatch[1].trim().toLowerCase();
-        const updated = saveCompany(senderNumber, { gestoriaEmail });
-        session.company = updated;
-        const sentConf = await sock.sendMessage(remoteJid, {
-          text: `✅ *¡Email de tu gestoría guardado con éxito!*\n\n📧 *Gestoría:* ${gestoriaEmail}\n\nA partir de ahora, cuando quieras enviar tus facturas solo di: *"Enviar trimestre a mi gestoría"* o *"gestoría"* y se le remitirá el Excel y el PDF en 1 clic.`
-        });
-        if (sentConf?.key?.id) botSentMessageIds.add(sentConf.key.id);
-        continue;
-      }
-
-      // Comando directo para exportar el trimestre para la gestoría: ej. "gestoría", "trimestre", "3T", "exportar 3T"
-      const quarterCmdMatch = rawUserText.match(/^(?:(?:exportar|cerrar|sacar|enviar|mandar|resumen)?\s*(?:el\s+)?(?:trimestre|gestor[ií]a|modelo\s*303|informe\s*fiscal)|1t|2t|3t|4t)(?:\s+(?:del?\s+)?(1t|2t|3t|4t|\d{4}))?(?:\s+(?:del?\s+)?(\d{4}))?$/i);
-      if (quarterCmdMatch) {
-        let qInput = null;
-        let yInput = null;
-
-        const directQ = rawUserText.match(/\b([1-4]t)\b/i);
-        if (directQ) qInput = directQ[1];
-        else if (quarterCmdMatch[1] && /[1-4]t/i.test(quarterCmdMatch[1])) qInput = quarterCmdMatch[1];
-
-        const yearMatch = rawUserText.match(/\b(202[4-9])\b/);
-        if (yearMatch) yInput = yearMatch[1];
-
-        const shouldEmail = /enviar|mandar/i.test(rawUserText);
-
-        await handleQuarterExport(sock, remoteJid, session, qInput, yInput, shouldEmail);
-        continue;
-      }
-
-      // Comando directo para listar o consultar presupuestos (todos, pendientes de firma, aceptados, borradores)
-      const budgetListFilter = detectBudgetListIntent(rawUserText);
-      if (budgetListFilter) {
-        await handleListBudgets(sock, remoteJid, session, budgetListFilter);
-        continue;
-      }
-
-      // Comando directo para obtener el enlace de firma digital de un presupuesto: ej. "enlace alberto", "enlace PRE-2026-6136", "link"
-      const signingLinkMatch = rawUserText.match(/^(?:enlace|link|url|firma|firmar)(?:\s+(?:de|del)?\s*(.+))?$/i);
-      if (signingLinkMatch && !/^(?:firmar|firma)\s+(?:presupuesto|obra)$/i.test(rawUserText)) {
-        await handleSendSigningLink(sock, remoteJid, session, signingLinkMatch[1] || '');
-        continue;
-      }
-
-      // Iniciar presupuesto nuevo
-      if (/^(presupuesto nuevo|nuevo presupuesto|nuevo|otro cliente|empezar de nuevo|#nuevo)$/i.test(rawUserText)) {
-        session.activeBudgetId = null;
-        const sentReset = await sock.sendMessage(remoteJid, {
-          text: '🔄 *Listo para un nuevo presupuesto.*\n\nEnvíame un audio o mensaje con los trabajos y el cliente de la nueva obra.'
-        });
-        if (sentReset?.key?.id) botSentMessageIds.add(sentReset.key.id);
-        console.log(`🔄 Sesión puesta en modo NUEVO presupuesto para ${remoteJid}`);
-        continue;
-      }
-
-      // Comando directo para registrar cobro: ej. "cobro 1500", "pago 1000 Jose Luis Bizum", "anticipo 800 transferencia"
-      const paymentCmdMatch = rawUserText.match(/^(?:cobro|pago|cobrado|pagado|ingreso|anticipo)\s+(\d+(?:[.,]\d+)?)\s*(?:€|euros?)?(?:\s+(?:de|por|en|para)?\s*(.+))?$/i);
-      if (paymentCmdMatch) {
-        if (session.budgets.size === 0) {
-          const sentNoBudg = await sock.sendMessage(remoteJid, {
-            text: '📂 *No tienes ningún presupuesto activo para registrar cobros.*\n\nPrimero crea una obra y luego podrás apuntar los anticipos y pagos.'
-          });
-          if (sentNoBudg?.key?.id) botSentMessageIds.add(sentNoBudg.key.id);
-          continue;
-        }
-
-        const rawAmount = paymentCmdMatch[1].replace(',', '.');
-        const amount = parseFloat(rawAmount);
-        const rest = (paymentCmdMatch[2] || '').trim();
-
-        let method = 'Bizum';
-        if (/transferencia|banco|cuenta/i.test(rest)) method = 'Transferencia';
-        else if (/efectivo|met[aá]lico|mano/i.test(rest)) method = 'Efectivo';
-        else if (/bizum/i.test(rest)) method = 'Bizum';
-
-        const cleanQuery = rest.replace(/bizum|transferencia|efectivo|met[aá]lico|en\s+mano/gi, '').trim();
-        const target = findBudgetInSession(session, cleanQuery);
-
-        await handlePaymentRegistration(sock, remoteJid, session, target, {
-          amount,
-          method,
-          concept: 'Entrega a cuenta de trabajos'
-        });
-        continue;
-      }
-
-      // Comando directo para consultar saldo o deuda: ej. "¿cuánto me debe José Luis?", "deuda José Luis", "saldo"
-      const balanceCmdMatch = rawUserText.match(/^(?:[¿?]?(?:cu[aá]nto\s+me\s+debe|deuda|saldo|pagos|estado\s+de\s+cuenta)\s*(?:de\s+)?(.+)?)$/i);
-      if (balanceCmdMatch) {
-        const query = (balanceCmdMatch[1] || '').replace(/[?¿]/g, '').trim();
-        const target = findBudgetInSession(session, query);
-        await handleQueryBalance(sock, remoteJid, session, target);
-        continue;
-      }
-
-      // Comando directo para aceptar presupuesto: ej. "aceptar", "aceptado", "presupuesto aceptado", "aceptar José Luis", "firmado"
-      const acceptCmdMatch = rawUserText.match(/^(?:aceptar|aceptado|firmado|aprobar|confirmar)\s*(?:el\s+)?(?:presupuesto)?(?:\s+(?:de\s+)?(.+))?$/i);
-      if (acceptCmdMatch && !/^(?:citas|visitas|agenda)/i.test(rawUserText)) {
-        const query = (acceptCmdMatch[1] || '').trim();
-        const target = findBudgetInSession(session, query);
-        await handleAcceptBudget(sock, remoteJid, session, target);
-        continue;
-      }
-
-      // Comando directo para Factura de Anticipo con IVA: "factura de anticipo", "facturar anticipo", "factura anticipo Juan"
-      const advanceInvCmdMatch = rawUserText.match(/^(?:factura\s+(?:de\s+)?anticipo|facturar\s+anticipo|emitir\s+factura\s+(?:de\s+)?anticipo)(?:\s+(?:de\s+|del\s+presupuesto\s+|de\s+la\s+obra\s+de\s+|el\s+presupuesto\s+)?(.+))?$/i);
-      if (advanceInvCmdMatch) {
-        if (session.budgets.size === 0) {
-          const sentNoBudget = await sock.sendMessage(remoteJid, {
-            text: '📂 *No tienes ningún presupuesto registrado todavía.*\n\nPrimero genera un presupuesto y podrás emitir la factura de anticipo.'
-          });
-          if (sentNoBudget?.key?.id) botSentMessageIds.add(sentNoBudget.key.id);
-          continue;
-        }
-
-        const query = advanceInvCmdMatch[1] ? advanceInvCmdMatch[1].trim() : '';
-        const target = findBudgetInSession(session, query);
-        await handleAdvanceInvoice(sock, remoteJid, session, target);
-        continue;
-      }
-
-      // Comando directo para facturar: "factura", "facturar", "factura de José Luis", "facturar 5129"
-      const invoiceCmdMatch = rawUserText.match(/^(?:factura|facturar|emitir factura)(?:\s+(?:de\s+|del\s+presupuesto\s+|de\s+la\s+obra\s+de\s+|el\s+presupuesto\s+)?(.+))?$/i);
-      if (invoiceCmdMatch) {
-        if (session.budgets.size === 0) {
-          const sentNoBudget = await sock.sendMessage(remoteJid, {
-            text: '📂 *No tienes ningún presupuesto para facturar todavía.*\n\nPrimero genera un presupuesto con una obra y luego podrás emitir su factura oficial.'
-          });
-          if (sentNoBudget?.key?.id) botSentMessageIds.add(sentNoBudget.key.id);
-          continue;
-        }
-
-        const query = invoiceCmdMatch[1] ? invoiceCmdMatch[1].trim() : '';
-        const target = findBudgetInSession(session, query);
-        await emitInvoiceForBudget(sock, remoteJid, session, target);
-        continue;
-      }
-
-      // Comando directo para consultar agenda: ej. "agenda", "mis citas", "visitas", "citas hoy", "citas mañana"
-      const isAgendaCmd = /^(?:agenda|mis citas|visitas|citas|mis visitas)(?:\s+(hoy|ma[ñn]ana|todas|pr[oó]ximas))?$/i.test(rawUserText)
-        || /^(?:citas hoy|visitas hoy|agenda hoy)$/i.test(rawUserText)
-        || /^(?:citas ma[ñn]ana|visitas ma[ñn]ana|agenda ma[ñn]ana)$/i.test(rawUserText);
-
-      if (isAgendaCmd) {
-        let filter = 'upcoming';
-        if (/hoy/i.test(rawUserText)) filter = 'today';
-        else if (/ma[ñn]ana/i.test(rawUserText)) filter = 'tomorrow';
-        else if (/toda/i.test(rawUserText)) filter = 'all';
-
-        await handleListAppointments(sock, remoteJid, session, filter);
-        continue;
-      }
-
-      // Comando directo para cancelar cita: ej. "cancelar cita Juan", "anular visita Pedro"
-      const cancelCmdMatch = rawUserText.match(/^(?:cancelar|anular|borrar)\s+(?:la\s+)?(?:cita|visita)(?:\s+(?:con|de)?\s*(.+))?$/i);
-      if (cancelCmdMatch) {
-        const query = (cancelCmdMatch[1] || '').trim();
-        if (!query) {
-          const sentNeedQuery = await sock.sendMessage(remoteJid, {
-            text: '⚠️ *Indica el nombre del cliente o referencia de la cita* que deseas anular (ej: *"cancelar cita Juan"*).'
-          });
-          if (sentNeedQuery?.key?.id) botSentMessageIds.add(sentNeedQuery.key.id);
-        } else {
-          await handleCancelAppointment(sock, remoteJid, session, query);
-        }
-        continue;
-      }
-
-      // Comando directo para consultar lista de compras / materiales: ej. "lista de la compra", "¿qué tengo que comprar?", "¿qué tengo que comprar para Carlos?"
-      const listShoppingMatch = rawUserText.match(/^(?:lista\s+de\s+(?:la\s+)?compras?|materiales\s+pendientes|qu[eé]\s+(?:tengo\s+que|hay\s+que)\s+comprar|ver\s+compras?|mis\s+compras|materiales)(?:\s+(?:de|para|en\s+la\s+obra\s+de)\s+(.+))?$/i);
-      if (listShoppingMatch) {
-        const clientFilter = (listShoppingMatch[1] || '').trim() || null;
-        await handleListShoppingItems(sock, remoteJid, session, clientFilter);
-        continue;
-      }
-
-      // Comando directo para marcar material como comprado: ej. "ya compré el cemento", "comprado azulejo", "tachar cable de Carlos"
-      const boughtCmdMatch = rawUserText.match(/^(?:ya\s+compr[eé]|comprad[oa]s?|tachad[oa]s?|tachar)\s+(.+)$/i);
-      if (boughtCmdMatch) {
-        const fullQuery = boughtCmdMatch[1].trim();
-        let clientQuery = null;
-        let itemQuery = fullQuery;
-        const deMatch = fullQuery.match(/^(.+?)\s+(?:de|para)\s+(.+)$/i);
-        if (deMatch) {
-          itemQuery = deMatch[1].trim();
-          clientQuery = deMatch[2].trim();
-        }
-        await handleMarkShoppingItemBought(sock, remoteJid, session, itemQuery, clientQuery);
-        continue;
-      }
-
-      // Comando directo para vaciar o borrar la lista de compras: ej. "vaciar lista de compras", "borrar lista de la compra"
-      if (/^(?:borrar|vaciar|limpiar)\s+(?:la\s+)?lista\s+de\s+(?:la\s+)?compras?$/i.test(rawUserText)) {
-        await handleClearShoppingList(sock, remoteJid, session);
-        continue;
-      }
-
-      // Comando directo para consultar qué falta en una obra (Modo Obra - Faltantes)
-      const missingWorkMatch = rawUserText.match(/^(?:qu[eé]\s+(?:nos\s+)?falta\s+(?:en\s+la\s+obra\s+de|en|para)\s+|qu[eé]\s+falta\s+(?:de|en|para)\s+)(.+)$/i);
-      if (missingWorkMatch) {
-        const clientFilter = (missingWorkMatch[1] || '').replace(/[?¿!¡]/g, '').trim();
-        await handleQueryWorkStatus(sock, remoteJid, session, clientFilter, true);
-        continue;
-      }
-
-      // Comando directo para consultar estado o modo obra completo
-      const modeWorkMatch = rawUserText.match(/^(?:modo\s+obra|estado\s+(?:de\s+la\s+)?obra|ficha\s+(?:de\s+la\s+)?obra|memoria\s+obra|c[oó]mo\s+va\s+la\s+obra\s+de)\s+(.+)$/i);
-      if (modeWorkMatch) {
-        const clientFilter = (modeWorkMatch[1] || '').replace(/[?¿!¡]/g, '').trim();
-        await handleQueryWorkStatus(sock, remoteJid, session, clientFilter, false);
-        continue;
-      }
-
-      // Comando directo para marcar tarea/partida como realizada o completada
-      const taskDoneMatch = rawUserText.match(/^(?:ya\s+(?:hemos\s+)?terminad[oa]|terminad[oa]|hech[oa]|lista)\s+(?:la\s+|el\s+)?(demolici[oó]n|fontaner[ií]a|alicatado|pintura|sanitarios?|electricidad|carpinter[ií]a|solado|tabiquer[ií]a|[a-záéíóúñ\s]+?)\s+(?:de|en\s+la\s+obra\s+de)\s+(.+)$/i);
-      if (taskDoneMatch) {
-        const taskQuery = (taskDoneMatch[1] || '').trim();
-        const clientFilter = (taskDoneMatch[2] || '').trim();
-        await handleUpdateWorkTask(sock, remoteJid, session, clientFilter, taskQuery, true);
-        continue;
-      }
-
-      const markTaskExplicitMatch = rawUserText.match(/^(?:marca[r]?|poner)\s+(?:la\s+|el\s+)?(.+?)\s+(?:de|para)\s+(.+?)\s+como\s+(?:hech[oa]|list[oa]|terminad[oa])$/i);
-      if (markTaskExplicitMatch) {
-        const taskQuery = (markTaskExplicitMatch[1] || '').trim();
-        const clientFilter = (markTaskExplicitMatch[2] || '').trim();
-        await handleUpdateWorkTask(sock, remoteJid, session, clientFilter, taskQuery, true);
-        continue;
-      }
-
-      // Comando directo para renombrar cliente o añadir distintivo:
-      // ej: "renombrar cliente Alberto Martín a Alberto Martín (Centro)", "cambiar nombre de cliente Alberto a Alberto Centro"
-      const renameCmdMatch = rawUserText.match(/^(?:renombrar\s+cliente|ponerle\s+distintivo\s+a|cambiar\s+nombre\s+(?:de\s+)?cliente)\s+(.+?)\s+(?:a|por|como)\s+(.+)$/i);
-      if (renameCmdMatch) {
-        const targetQuery = renameCmdMatch[1].trim();
-        const newName = renameCmdMatch[2].trim();
-        await handleRenameClient(sock, remoteJid, session, targetQuery, newName);
-        continue;
-      }
-
-      // 3. Router de Intenciones Determinístico (Resuelve con SQLite sin pasar por Gemini)
-      if (!isAudio && rawUserText) {
-        const detected = detectIntent(rawUserText);
-        if (detected) {
-          console.log(`⚡ [IntentRouter] Intención detectada: ${detected.intent}`, detected.params);
-          const resolvedReply = await resolveIntent(detected, senderNumber, session);
-          if (resolvedReply) {
-            const sentIntentMsg = await sock.sendMessage(remoteJid, { text: resolvedReply });
-            if (sentIntentMsg?.key?.id) botSentMessageIds.add(sentIntentMsg.key.id);
-            continue;
-          }
-        }
-      }
-
-      // Preparar payload de IA (audio o texto)
-      let audioBuffer = null;
-      if (isAudio) {
-        try {
-          console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
-          audioBuffer = await downloadMediaMessage(
-            { key: msg.key, message: messageContent },
-            'buffer',
-            {},
-            { logger, reuploadRequest: sock.updateMediaMessage }
-          );
-        } catch (dlErr) {
-          console.error('❌ Error descargando audio:', dlErr.message);
-          const sentDlErr = await sock.sendMessage(remoteJid, {
-            text: '⚠️ *No se pudo descargar la nota de voz.* Por favor, vuelve a enviarla.'
-          });
-          if (sentDlErr?.key?.id) botSentMessageIds.add(sentDlErr.key.id);
-          continue;
-        }
-      }
-
-      // Debounce anti-duplicados por contenido idéntico en <5s (evita dobles envíos por sincronización Baileys/WhatsApp)
-      const contentKey = isAudio 
-        ? `audio_${audioBuffer?.length || ''}`
-        : `text_${rawUserText.trim().toLowerCase()}`;
-      
-      if (contentKey && contentKey !== 'text_') {
-        const lastMsg = recentMessageTexts.get(remoteJid);
-        const nowMs = Date.now();
-        if (lastMsg && lastMsg.key === contentKey && (nowMs - lastMsg.time) < 5000) {
-          console.log(`   ⏭️ Mensaje con contenido idéntico en <5s para ${remoteJid} ignorado (debounce anti-duplicados).`);
-          continue;
-        }
-        recentMessageTexts.set(remoteJid, { key: contentKey, time: nowMs });
-        if (recentMessageTexts.size > 2000) {
-          const oldestKey = recentMessageTexts.keys().next().value;
-          recentMessageTexts.delete(oldestKey);
-        }
-      }
-
-      // Evitar procesamientos paralelos concurrentes para el mismo chat (bloqueo por JID)
-      if (activeProcessingJids.has(remoteJid)) {
-        console.log(`   ⏳ Ya hay un procesamiento de IA en curso para ${remoteJid}. Omitiendo evento concurrente.`);
-        continue;
-      }
-
-      const taskData = {
-        isAudio,
-        audioBuffer,
-        audioMimeType: audioMsg?.mimetype || 'audio/ogg',
+      const currentItem = {
+        msg,
+        messageContent,
         rawUserText,
-        senderNumber
+        isAudio,
+        isImage,
+        isText,
+        imageMsg,
+        audioMsg,
+        wamId,
+        allWamIds: wamId ? [wamId] : []
       };
 
-      try {
-        activeProcessingJids.add(remoteJid);
-        await handleAiProcessing(sock, remoteJid, session, taskData, false);
-      } catch (err) {
-        console.error('❌ Error procesando mensaje de WhatsApp:', err.message);
-        const isOverload = /429|503|quota|exhausted|overload|demand|busy|unavailable|high demand|saturad/i.test(err.message || '');
-        if (isOverload) {
-          const alreadyQueued = aiStandbyQueue.some(item =>
-            item.remoteJid === remoteJid &&
-            ((taskData.rawUserText && item.taskData.rawUserText === taskData.rawUserText) ||
-             (taskData.isAudio && item.taskData.isAudio && item.taskData.audioBuffer?.length === taskData.audioBuffer?.length))
-          );
-          if (alreadyQueued) {
-            console.log(`⏳ Petición idéntica ya en cola stand-by para ${remoteJid}. No se duplica.`);
-            return;
+      const session = getUserSession(remoteJid, senderNumber);
+      const onboardingState = getOnboardingState(senderNumber);
+      const isWaitingForInput = getConversationState(remoteJid) === 'WAITING_FOR_INPUT' ||
+        Boolean(session.pendingAction || onboardingState?.step || session.pendingDisambiguation);
+      const isUrgentSingleWord = isText && /^(?:s[ií]|no|confirmar|cancelar|descartar|1|2|3|4|5|#nuevo|resumen|agenda|estado)$/i.test(rawUserText);
+
+      // Si es audio, imagen, o estamos esperando una respuesta concreta (WAITING_FOR_INPUT), o es comando urgente:
+      if (isAudio || isImage || isWaitingForInput || isUrgentSingleWord) {
+        // Si había una ráfaga previa de texto en debounce, vaciarla primero
+        if (chatPendingBatches.has(remoteJid) && chatPendingBatches.get(remoteJid).length > 0) {
+          if (chatDebounceTimers.has(remoteJid)) {
+            clearTimeout(chatDebounceTimers.get(remoteJid));
+            chatDebounceTimers.delete(remoteJid);
           }
-          aiStandbyQueue.push({
-            id: Date.now(),
-            remoteJid,
-            session,
-            taskData,
-            attempts: 0,
-            processing: false,
-            nextRetryAt: Date.now() + 5000
-          });
-          console.log(`⏳ Petición guardada en cola stand-by para ${remoteJid} por alta demanda de Gemini.`);
-          const sentStandby = await sock.sendMessage(remoteJid, {
-            text: `⏳ *Servidores de IA con alta demanda temporal*\n\nHe dejado tu ${isAudio ? 'nota de voz' : 'mensaje'} guardado en *cola de espera (stand-by)*. El bot reintentará procesarlo automáticamente en segundo plano hasta que se genere tu presupuesto, sin que tengas que volver a grabar ni enviar nada.\n\n_En cuanto esté listo, te llegará aquí el presupuesto._`
-          });
-          if (sentStandby?.key?.id) botSentMessageIds.add(sentStandby.key.id);
-        } else {
-          const sentErr = await sock.sendMessage(remoteJid, {
-            text: `⚠️ *No se ha podido procesar el presupuesto*\n\nHa habido una incidencia temporal (${err.message.substring(0, 80)}...). Por favor, reenvía tu solicitud.`
-          });
-          if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+          const pendingBatch = chatPendingBatches.get(remoteJid);
+          chatPendingBatches.delete(remoteJid);
+          const combinedText = pendingBatch.map(b => b.rawUserText).filter(Boolean).join('\n');
+          const batchedItem = {
+            ...pendingBatch[0],
+            rawUserText: combinedText,
+            allWamIds: pendingBatch.map(b => b.wamId).filter(Boolean)
+          };
+          enqueueChatMessage(sock, remoteJid, senderNumber, batchedItem);
         }
-      } finally {
-        activeProcessingJids.delete(remoteJid);
-        await sock.sendPresenceUpdate('paused', remoteJid);
+
+        enqueueChatMessage(sock, remoteJid, senderNumber, currentItem);
+      } else {
+        // Mensaje de texto conversacional ordinario: aplicar ventana de debounce de 1500ms
+        // para agrupar pensamientos enviados en varias líneas seguidas
+        if (!chatPendingBatches.has(remoteJid)) {
+          chatPendingBatches.set(remoteJid, []);
+        }
+        chatPendingBatches.get(remoteJid).push(currentItem);
+
+        if (chatDebounceTimers.has(remoteJid)) {
+          clearTimeout(chatDebounceTimers.get(remoteJid));
+        }
+
+        const timer = setTimeout(() => {
+          chatDebounceTimers.delete(remoteJid);
+          const batch = chatPendingBatches.get(remoteJid) || [];
+          chatPendingBatches.delete(remoteJid);
+          if (batch.length === 0) return;
+
+          const combinedText = batch.map(b => b.rawUserText).filter(Boolean).join('\n');
+          const primaryItem = {
+            ...batch[0],
+            rawUserText: combinedText,
+            allWamIds: batch.map(b => b.wamId).filter(Boolean)
+          };
+          console.log(`⏱️ [Debounce Chat: ${senderNumber}] Agrupados ${batch.length} mensajes de texto en una sola petición.`);
+          enqueueChatMessage(sock, remoteJid, senderNumber, primaryItem);
+        }, 1500);
+
+        chatDebounceTimers.set(remoteJid, timer);
       }
     }
   });

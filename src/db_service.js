@@ -147,6 +147,20 @@ db.exec(`
     created_at TEXT,
     bought_at TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    whatsapp_message_id TEXT UNIQUE,
+    business_id TEXT,
+    chat_id TEXT,
+    sender_phone TEXT,
+    content TEXT,
+    timestamp TEXT,
+    status TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_messages_wam_id ON messages(whatsapp_message_id);
+  CREATE INDEX IF NOT EXISTS idx_messages_chat_status ON messages(chat_id, status);
 `);
 
 export const DEFAULT_COMPANY = {
@@ -1588,3 +1602,94 @@ export function renameClientBudget(phone, budgetIdOrQuery, newNameWithBadge) {
     clientAddress: budgetRow.client_address
   };
 }
+
+// ─── Métodos de Tracking y Persistencia de Mensajes (Cola y Deduplicación) ───
+
+/**
+ * Registra un mensaje entrante en la tabla messages de SQLite con estado inicial RECEIVED.
+ * Si ya existía por whatsapp_message_id, no lo duplica.
+ */
+export function recordIncomingMessage({
+  id = null,
+  whatsappMessageId,
+  businessId = null,
+  chatId,
+  senderPhone,
+  content = '',
+  status = 'RECEIVED'
+}) {
+  if (!whatsappMessageId) return null;
+  const msgId = id || `msg_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+  const now = new Date().toISOString();
+
+  const stmt = db.prepare(`
+    INSERT INTO messages (id, whatsapp_message_id, business_id, chat_id, sender_phone, content, timestamp, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(whatsapp_message_id) DO NOTHING
+  `);
+
+  stmt.run(msgId, whatsappMessageId, businessId || '', chatId || '', senderPhone || '', content || '', now, status);
+  return getMessageByWhatsappId(whatsappMessageId);
+}
+
+/**
+ * Actualiza el estado de procesamiento de un mensaje en SQLite:
+ * RECEIVED -> QUEUED -> PROCESSING -> PROCESSED (o FAILED)
+ */
+export function updateMessageStatus(whatsappMessageId, status) {
+  if (!whatsappMessageId) return;
+  const stmt = db.prepare('UPDATE messages SET status = ? WHERE whatsapp_message_id = ?');
+  stmt.run(status, whatsappMessageId);
+}
+
+/**
+ * Obtiene un mensaje por su whatsapp_message_id
+ */
+export function getMessageByWhatsappId(whatsappMessageId) {
+  if (!whatsappMessageId) return null;
+  const stmt = db.prepare('SELECT * FROM messages WHERE whatsapp_message_id = ?');
+  const row = stmt.get(whatsappMessageId);
+  if (!row) return null;
+  return {
+    id: row.id,
+    whatsappMessageId: row.whatsapp_message_id,
+    businessId: row.business_id,
+    chatId: row.chat_id,
+    senderPhone: row.sender_phone,
+    content: row.content,
+    timestamp: row.timestamp,
+    status: row.status
+  };
+}
+
+/**
+ * Comprueba si un mensaje ya está siendo procesado o ya fue procesado con éxito
+ * para evitar ejecuciones duplicadas en caso de reenvíos de WhatsApp/API.
+ */
+export function isMessageAlreadyProcessed(whatsappMessageId) {
+  if (!whatsappMessageId) return false;
+  const stmt = db.prepare('SELECT status FROM messages WHERE whatsapp_message_id = ?');
+  const row = stmt.get(whatsappMessageId);
+  if (!row) return false;
+  return row.status === 'PROCESSING' || row.status === 'PROCESSED';
+}
+
+/**
+ * Lista los mensajes recientes de un chat para auditoría y debug
+ */
+export function listRecentMessages(chatId, limit = 50) {
+  if (!chatId) return [];
+  const stmt = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?');
+  const rows = stmt.all(chatId, limit);
+  return rows.map(row => ({
+    id: row.id,
+    whatsappMessageId: row.whatsapp_message_id,
+    businessId: row.business_id,
+    chatId: row.chat_id,
+    senderPhone: row.sender_phone,
+    content: row.content,
+    timestamp: row.timestamp,
+    status: row.status
+  }));
+}
+
