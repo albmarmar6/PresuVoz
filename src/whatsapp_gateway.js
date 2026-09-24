@@ -3430,12 +3430,6 @@ async function startWhatsAppGateway() {
         }
       }
 
-      // Evitar procesamientos paralelos concurrentes para el mismo chat (bloqueo por JID)
-      if (activeProcessingJids.has(remoteJid)) {
-        console.log(`   ⏳ Ya hay un procesamiento de IA en curso para ${remoteJid}. Omitiendo evento concurrente.`);
-        return;
-      }
-
       const taskData = {
         isAudio,
         audioBuffer,
@@ -3445,7 +3439,6 @@ async function startWhatsAppGateway() {
       };
 
       try {
-        activeProcessingJids.add(remoteJid);
         await handleAiProcessing(sock, remoteJid, session, taskData, false);
       } catch (err) {
         console.error('❌ Error procesando mensaje de WhatsApp:', err.message);
@@ -3481,7 +3474,6 @@ async function startWhatsAppGateway() {
           if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
         }
       } finally {
-        activeProcessingJids.delete(remoteJid);
         await sock.sendPresenceUpdate('paused', remoteJid);
       }
       isSuccess = true;
