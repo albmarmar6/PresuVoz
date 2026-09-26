@@ -174,6 +174,94 @@ function storeMessage(keyId, message) {
   messageStore.set(keyId, message);
 }
 
+/**
+ * ─── INGRESS GATEKEEPER: Blindaje Estricto de Entrada ───
+ * Determina si un mensaje recibido en WhatsApp debe ser procesado por el bot o descartado inmediatamente.
+ * 
+ * Reglas Fundamentales de Seguridad:
+ * 1. Grupos (@g.us), difusiones (@broadcast) y canales (@newsletter) NUNCA se procesan.
+ * 2. Mensajes salientes del móvil (fromMe): SOLO se procesan si son Self-Chat (chat consigo mismo).
+ *    Si el usuario escribe a cualquier otra persona o contacto ajeno, el bot lo descarta de inmediato.
+ * 3. Mensajes entrantes de terceros (!fromMe): SOLO se procesan si el remitente está
+ *    explícitamente en ALLOWED_NUMBERS (ej. familiares/testers para sus pruebas). Contactos ajenos se descartan.
+ */
+export function shouldProcessIncomingMessage({ remoteJid, fromMe, myNumber, myLid, allowedNumbers = [] }) {
+  if (!remoteJid || typeof remoteJid !== 'string') {
+    return { process: false, reason: 'INVALID_JID' };
+  }
+
+  // 1. Grupos, listas de difusión y canales: PROHIBIDO TOTALMENTE
+  if (remoteJid.includes('@g.us') || remoteJid.includes('@broadcast') || remoteJid.includes('@newsletter')) {
+    return { process: false, reason: 'GROUP_OR_BROADCAST_IGNORED' };
+  }
+
+  const cleanMyNum = String(myNumber || '').replace(/\D/g, '');
+  const cleanMyLid = String(myLid || '').replace(/\D/g, '');
+  const remoteUser = remoteJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+  const isFromMe = Boolean(fromMe);
+
+  // 2. Comprobar si es Self-Chat (chat consigo mismo por número de teléfono o LID propio)
+  const isSelfChat = isFromMe && (
+    (cleanMyNum && remoteUser === cleanMyNum) ||
+    (cleanMyLid && remoteUser === cleanMyLid)
+  );
+
+  // 3. REGLA INMUTABLE PARA MENSAJES SALIENTES (fromMe):
+  // Si no es self-chat, el profesional está chateando con un contacto ajeno desde su propio móvil.
+  // ¡El bot NUNCA debe interceptar ni responder en conversaciones personales o externas!
+  if (isFromMe && !isSelfChat) {
+    return { process: false, reason: 'OUTGOING_THIRD_PARTY_IGNORED' };
+  }
+
+  // 4. REGLA INMUTABLE PARA MENSAJES ENTRANTES DE TERCEROS (!fromMe):
+  // Solo se procesan si el número remitente está expresamente autorizado.
+  if (!isFromMe) {
+    const isAllowed = allowedNumbers.some(num => num && remoteUser === String(num).replace(/\D/g, ''));
+    if (!isAllowed) {
+      return { process: false, reason: 'UNAUTHORIZED_INCOMING_SENDER' };
+    }
+    return { process: true, reason: 'AUTHORIZED_EXTERNAL_SENDER', senderNumber: remoteUser };
+  }
+
+  // 5. Self-chat autorizado
+  return { process: true, reason: 'SELF_CHAT', senderNumber: cleanMyNum || remoteUser };
+}
+
+/**
+ * ─── EGRESS FIREWALL: Blindaje Absoluto de Salida ───
+ * Verifica si un destinatario tiene permiso para recibir mensajes del bot.
+ * Actúa como cortafuegos central en sock.sendMessage para garantizar que NINGÚN
+ * mensaje o notificación se filtre a contactos no autorizados bajo ninguna circunstancia.
+ */
+export function isAuthorizedEgressRecipient(targetJid, { myNumber, myLid, allowedNumbers = [] }) {
+  if (!targetJid || typeof targetJid !== 'string') {
+    return { allowed: false, reason: 'INVALID_TARGET_JID' };
+  }
+
+  // 1. Grupos, listas de difusión y canales: PROHIBIDO TOTALMENTE
+  if (targetJid.includes('@g.us') || targetJid.includes('@broadcast') || targetJid.includes('@newsletter')) {
+    return { allowed: false, reason: 'GROUP_OR_BROADCAST_TARGET_BLOCKED' };
+  }
+
+  const cleanMyNum = String(myNumber || '').replace(/\D/g, '');
+  const cleanMyLid = String(myLid || '').replace(/\D/g, '');
+  const targetUser = targetJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+
+  // 2. Chat consigo mismo (self-chat por número o por LID)
+  const isSelf = (cleanMyNum && targetUser === cleanMyNum) || (cleanMyLid && targetUser === cleanMyLid);
+  if (isSelf) {
+    return { allowed: true, reason: 'SELF_CHAT' };
+  }
+
+  // 3. Números expresamente autorizados en ALLOWED_NUMBERS
+  const isAllowed = allowedNumbers.some(num => num && targetUser === String(num).replace(/\D/g, ''));
+  if (isAllowed) {
+    return { allowed: true, reason: 'AUTHORIZED_NUMBER' };
+  }
+
+  return { allowed: false, reason: 'UNAUTHORIZED_TARGET' };
+}
+
 // Cola de tareas en espera (stand-by) para Gemini ante saturación o alta demanda temporal (429/503)
 const aiStandbyQueue = [];
 let isProcessingAiQueue = false;
@@ -589,9 +677,27 @@ async function startWhatsAppGateway() {
     }
   });
 
-  // Interceptar todos los envíos para alimentar el almacén de reintentos criptográficos y tolerar caídas transitorias de socket
+  // Interceptar todos los envíos con el Cortafuegos de Salida (Egress Firewall) para garantizar
+  // que jamás salga un mensaje a un destinatario no autorizado o ajeno.
   const _rawSendMessage = sock.sendMessage.bind(sock);
   sock.sendMessage = async (...args) => {
+    const targetJid = args[0];
+    const myNum = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].replace(/\D/g, '');
+    const myLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].replace(/\D/g, '');
+
+    const egressCheck = isAuthorizedEgressRecipient(targetJid, {
+      myNumber: myNum,
+      myLid: myLid,
+      allowedNumbers: ALLOWED_NUMBERS
+    });
+
+    if (!egressCheck.allowed) {
+      console.error(`🛡️ [EGRESS FIREWALL] ¡ENVÍO BLOQUEADO! Destinatario no autorizado (${egressCheck.reason}): ${targetJid}`);
+      const fwLog = `[${new Date().toLocaleTimeString()}] 🛡️ [EGRESS FIREWALL] Envío bloqueado a ${targetJid} (${egressCheck.reason})\n`;
+      try { (await import('fs')).appendFileSync('gateway.log', fwLog); } catch(e) {}
+      return { key: { id: `blocked_${Date.now()}` }, status: 'BLOCKED' };
+    }
+
     let attempts = 0;
     while (attempts < 2) {
       try {
@@ -613,6 +719,21 @@ async function startWhatsAppGateway() {
         }
       }
     }
+  };
+
+  const _rawSendPresence = sock.sendPresenceUpdate.bind(sock);
+  sock.sendPresenceUpdate = async (type, toJid) => {
+    const myNum = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].replace(/\D/g, '');
+    const myLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].replace(/\D/g, '');
+    const egressCheck = isAuthorizedEgressRecipient(toJid, {
+      myNumber: myNum,
+      myLid: myLid,
+      allowedNumbers: ALLOWED_NUMBERS
+    });
+    if (!egressCheck.allowed) {
+      return;
+    }
+    return _rawSendPresence(type, toJid);
   };
 
   sock.ev.on('creds.update', saveCreds);
@@ -647,35 +768,43 @@ async function startWhatsAppGateway() {
           for (const item of acceptedList) {
             const targetJids = new Set();
             const cleanPhone = String(item.companyPhone || '').replace(/\D/g, '');
+            const myNum = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].replace(/\D/g, '');
+            const myLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].replace(/\D/g, '');
 
             // 1. Buscar en sesiones activas el chat del profesional dueño de este presupuesto
             let foundActiveJid = null;
             for (const [activeJid, sess] of userSessions.entries()) {
               if (activeJid.includes('broadcast') || activeJid.includes('@g.us')) continue;
               const sessPhone = String(sess.phone || '').replace(/\D/g, '');
-              const jidUser = String(activeJid.split('@')[0]).replace(/\D/g, '');
-              if ((cleanPhone && (sessPhone === cleanPhone || jidUser === cleanPhone)) ||
-                  (sess.budgets && sess.budgets.has(item.budgetId))) {
-                foundActiveJid = activeJid;
-                // Sincronizar en memoria en tiempo real
-                if (sess.budgets && sess.budgets.has(item.budgetId)) {
-                  const b = sess.budgets.get(item.budgetId);
-                  b.status = 'ACEPTADO';
-                  b.signedAt = item.signedAt;
-                  b.signedEmail = item.signedEmail;
+              const activeUser = String(activeJid.split('@')[0]).replace(/\D/g, '');
+
+              // Coincidencia con el teléfono de la empresa o self-chat
+              const matchesCompany = (cleanPhone && (sessPhone === cleanPhone || activeUser === cleanPhone));
+              const matchesSelf = (cleanPhone && cleanPhone === myNum && (activeUser === myNum || activeUser === myLid));
+
+              if (matchesCompany || matchesSelf) {
+                // Verificar que activeJid es un destinatario autorizado
+                const isAuth = isAuthorizedEgressRecipient(activeJid, { myNumber: myNum, myLid, allowedNumbers: ALLOWED_NUMBERS }).allowed;
+                if (isAuth) {
+                  foundActiveJid = activeJid;
+                  if (sess.budgets && sess.budgets.has(item.budgetId)) {
+                    const b = sess.budgets.get(item.budgetId);
+                    b.status = 'ACEPTADO';
+                    b.signedAt = item.signedAt;
+                    b.signedEmail = item.signedEmail;
+                  }
+                  break;
                 }
-                break;
               }
             }
 
             if (foundActiveJid) {
               targetJids.add(foundActiveJid);
             } else if (cleanPhone) {
-              // Si no hay sesión activa en memoria, enviar a su número directo
-              if (cleanPhone.length >= 9 && cleanPhone.length <= 12) {
-                targetJids.add(`${cleanPhone}@s.whatsapp.net`);
-              } else {
-                targetJids.add(`${cleanPhone}@lid`);
+              // Si no hay sesión activa, enviar a su JID directo si está autorizado
+              const directJid = `${cleanPhone}@s.whatsapp.net`;
+              if (isAuthorizedEgressRecipient(directJid, { myNumber: myNum, myLid, allowedNumbers: ALLOWED_NUMBERS }).allowed) {
+                targetJids.add(directJid);
               }
             }
 
@@ -3807,41 +3936,33 @@ async function startWhatsAppGateway() {
         }
       }
 
-      const remoteJid = msg.key.remoteJid;
-      if (!remoteJid || remoteJid.includes('@broadcast') || remoteJid.includes('@newsletter')) {
-        continue;
-      }
-
-      const senderNumberRaw = remoteJid.replace(/\D/g, '');
-      const isFromMe = msg.key.fromMe;
+      const remoteJid = msg.key?.remoteJid;
+      const isFromMe = Boolean(msg.key?.fromMe);
       const myNumber = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].replace(/\D/g, '');
       const myLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].replace(/\D/g, '');
 
-      // Si el mensaje es "fromMe" (usuario hablándose a sí mismo), el remoteJid puede ser un
-      // LID de dispositivo (ej: 82987509096647@lid) en lugar del número real. Usamos myNumber.
-      const senderNumber = (isFromMe && myNumber && myNumber.length >= 9 && myNumber.length <= 15)
-        ? myNumber
-        : senderNumberRaw;
+      // ─── INGRESS GATEKEEPER: Blindaje Estricto de Entrada ───
+      const ingressCheck = shouldProcessIncomingMessage({
+        remoteJid,
+        fromMe: isFromMe,
+        myNumber,
+        myLid,
+        allowedNumbers: ALLOWED_NUMBERS
+      });
 
-      const logMsg = `[${new Date().toLocaleTimeString()}] 📩 Mensaje detectado [jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]\n`;
-      try { (await import('fs')).appendFileSync('gateway.log', logMsg); } catch(e) {}
-      console.log(`📩 Mensaje detectado [jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]`);
-
-      // Comprobación de seguridad: Modo Seguro
-      if (SAFE_MODE) {
-        const isAllowedNumber = ALLOWED_NUMBERS.includes(senderNumber);
-        const isSelfChat = isFromMe && (
-          (myNumber && remoteJid.includes(myNumber)) ||
-          (myLid && remoteJid.includes(myLid))
-        );
-
-        if (!isSelfChat && !isAllowedNumber) {
-          const ignoreMsg = `   ⏭️ Ignorado por Modo Seguro (${isFromMe ? 'mensaje saliente a contacto ajeno' : 'mensaje de contacto ajeno'})\n`;
+      if (!ingressCheck.process) {
+        if (!remoteJid?.includes('@g.us') && !remoteJid?.includes('@broadcast') && !remoteJid?.includes('@newsletter')) {
+          const ignoreMsg = `[${new Date().toLocaleTimeString()}] 🛡️ [Ingress Gatekeeper] Ignorado [${ingressCheck.reason}]: jid=${remoteJid}, fromMe=${isFromMe}\n`;
           try { (await import('fs')).appendFileSync('gateway.log', ignoreMsg); } catch(e) {}
-          console.log(`   ⏭️ Ignorado por Modo Seguro (${isFromMe ? 'mensaje saliente a contacto ajeno' : 'mensaje de contacto ajeno'})`);
-          continue;
+          console.log(`🛡️ [Ingress Gatekeeper] Ignorado [${ingressCheck.reason}]: jid=${remoteJid}, fromMe=${isFromMe}`);
         }
+        continue;
       }
+
+      const senderNumber = ingressCheck.senderNumber;
+      const logMsg = `[${new Date().toLocaleTimeString()}] 📩 Mensaje autorizado [jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]\n`;
+      try { (await import('fs')).appendFileSync('gateway.log', logMsg); } catch(e) {}
+      console.log(`📩 Mensaje autorizado [jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]`);
 
       // Desempaquetar contenedores de WhatsApp (efímeros, vista única, etc.)
       let messageContent = msg.message;

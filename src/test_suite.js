@@ -1,6 +1,7 @@
 import { PresuVozEngine } from './engine.js';
 import { PresuVozParser } from './parser.js';
 import { generateInvoicePDF } from './pdf_service.js';
+import { shouldProcessIncomingMessage, isAuthorizedEgressRecipient } from './whatsapp_gateway.js';
 
 console.log("==========================================================");
 console.log("🛡️  BATERÍA DE PRUEBAS DE ESTRÉS Y SEGURIDAD PRESUVOZ");
@@ -1801,6 +1802,163 @@ assert(completedList.length === 1 && completedList[0].id === apt1.id, "CASO 15: 
 // Limpieza de datos de prueba
 cleanDb.prepare('DELETE FROM appointments WHERE company_phone = ?').run(testVisitPhone);
 cleanDb.prepare('DELETE FROM audit_logs WHERE business_id = ?').run(testVisitPhone);
+
+// -----------------------------------------------------------------------------
+// TEST 24: Blindaje de Privacidad y Aislamiento de Chats (Gatekeeper & Firewall)
+// -----------------------------------------------------------------------------
+console.log("\nTEST 24: Blindaje de Privacidad y Aislamiento de Chats (Gatekeeper & Firewall)");
+
+const myTestPhone = '34601022367';
+const myTestLid = '82987509096647';
+const allowedTestNumbers = ['34601022367', '34635570845', '34625335687'];
+const unknownContactLid = '78095440715998@lid';
+const unknownContactPhone = '34699999999@s.whatsapp.net';
+const groupJid = '120363401410834758@g.us';
+const broadcastJid = 'status@broadcast';
+
+// 1. Ingress: Self-chat por LID
+const inSelfLid = shouldProcessIncomingMessage({
+  remoteJid: `${myTestLid}@lid`,
+  fromMe: true,
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(inSelfLid.process === true, "CASO 16: Ingress permite Self-Chat por LID propio");
+assert(inSelfLid.reason === 'SELF_CHAT', "CASO 16: Motivo es SELF_CHAT");
+assert(inSelfLid.senderNumber === myTestPhone, "CASO 16: Asigna correctamente el número del profesional");
+
+// 2. Ingress: Self-chat por teléfono directo
+const inSelfPhone = shouldProcessIncomingMessage({
+  remoteJid: `${myTestPhone}@s.whatsapp.net`,
+  fromMe: true,
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(inSelfPhone.process === true, "CASO 16: Ingress permite Self-Chat por número de teléfono propio");
+
+// 3. Ingress: Mensaje saliente personal del profesional a un nuevo contacto (LID)
+const inOutContactLid = shouldProcessIncomingMessage({
+  remoteJid: unknownContactLid,
+  fromMe: true,
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(inOutContactLid.process === false, "CASO 16: Ingress BLOQUEA mensaje saliente personal a contacto externo (LID)");
+assert(inOutContactLid.reason === 'OUTGOING_THIRD_PARTY_IGNORED', "CASO 16: Motivo OUTGOING_THIRD_PARTY_IGNORED");
+
+// 4. Ingress: Mensaje saliente personal del profesional a teléfono ajeno
+const inOutContactPhone = shouldProcessIncomingMessage({
+  remoteJid: unknownContactPhone,
+  fromMe: true,
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(inOutContactPhone.process === false, "CASO 16: Ingress BLOQUEA mensaje saliente personal a número ajeno");
+
+// 5. Ingress: Mensaje entrante de contacto no autorizado (LID desconocido)
+const inInUnknownLid = shouldProcessIncomingMessage({
+  remoteJid: unknownContactLid,
+  fromMe: false,
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(inInUnknownLid.process === false, "CASO 16: Ingress BLOQUEA mensaje entrante de contacto ajeno (LID)");
+assert(inInUnknownLid.reason === 'UNAUTHORIZED_INCOMING_SENDER', "CASO 16: Motivo UNAUTHORIZED_INCOMING_SENDER");
+
+// 6. Ingress: Mensaje entrante de teléfono desconocido
+const inInUnknownPhone = shouldProcessIncomingMessage({
+  remoteJid: unknownContactPhone,
+  fromMe: false,
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(inInUnknownPhone.process === false, "CASO 16: Ingress BLOQUEA mensaje entrante de teléfono desconocido");
+
+// 7. Ingress: Mensaje entrante de tester autorizado (ej. familiar en lista blanca)
+const inInTester = shouldProcessIncomingMessage({
+  remoteJid: '34635570845@s.whatsapp.net',
+  fromMe: false,
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(inInTester.process === true, "CASO 16: Ingress permite mensaje de tester autorizado");
+assert(inInTester.reason === 'AUTHORIZED_EXTERNAL_SENDER', "CASO 16: Motivo AUTHORIZED_EXTERNAL_SENDER");
+assert(inInTester.senderNumber === '34635570845', "CASO 16: SenderNumber coincide con el tester");
+
+// 8. Ingress: Descarte de grupos y difusiones
+const inGroup = shouldProcessIncomingMessage({
+  remoteJid: groupJid,
+  fromMe: false,
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(inGroup.process === false, "CASO 16: Ingress DESCARTA mensajes de grupos (@g.us)");
+assert(inGroup.reason === 'GROUP_OR_BROADCAST_IGNORED', "CASO 16: Motivo GROUP_OR_BROADCAST_IGNORED");
+
+const inBroadcast = shouldProcessIncomingMessage({
+  remoteJid: broadcastJid,
+  fromMe: false,
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(inBroadcast.process === false, "CASO 16: Ingress DESCARTA difusiones (@broadcast)");
+
+// 9. Egress Firewall: Envío saliente permitido a self-chat
+const egSelfLid = isAuthorizedEgressRecipient(`${myTestLid}@lid`, {
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(egSelfLid.allowed === true, "CASO 16: Egress Firewall permite envío a self-chat LID");
+
+const egSelfPhone = isAuthorizedEgressRecipient(`${myTestPhone}@s.whatsapp.net`, {
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(egSelfPhone.allowed === true, "CASO 16: Egress Firewall permite envío a self-chat teléfono");
+
+// 10. Egress Firewall: Envío saliente permitido a número en ALLOWED_NUMBERS
+const egTester = isAuthorizedEgressRecipient('34635570845@s.whatsapp.net', {
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(egTester.allowed === true, "CASO 16: Egress Firewall permite envío a tester autorizado");
+
+// 11. Egress Firewall: BLOQUEO TOTAL a nuevo contacto / contacto ajeno
+const egBlockLid = isAuthorizedEgressRecipient(unknownContactLid, {
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(egBlockLid.allowed === false, "CASO 16: Egress Firewall BLOQUEA envío a contacto ajeno (LID)");
+assert(egBlockLid.reason === 'UNAUTHORIZED_TARGET', "CASO 16: Motivo UNAUTHORIZED_TARGET");
+
+const egBlockPhone = isAuthorizedEgressRecipient(unknownContactPhone, {
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(egBlockPhone.allowed === false, "CASO 16: Egress Firewall BLOQUEA envío a teléfono desconocido");
+
+// 12. Egress Firewall: BLOQUEO TOTAL a grupos (@g.us)
+const egBlockGroup = isAuthorizedEgressRecipient(groupJid, {
+  myNumber: myTestPhone,
+  myLid: myTestLid,
+  allowedNumbers: allowedTestNumbers
+});
+assert(egBlockGroup.allowed === false, "CASO 16: Egress Firewall BLOQUEA envío a grupos WhatsApp");
+assert(egBlockGroup.reason === 'GROUP_OR_BROADCAST_TARGET_BLOCKED', "CASO 16: Motivo GROUP_OR_BROADCAST_TARGET_BLOCKED");
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

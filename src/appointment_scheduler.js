@@ -25,10 +25,23 @@ function getNowInTimezone(tz = 'Europe/Madrid') {
   return { dateStr, timeStr, hour, minute, tomorrowStr, nowIso: now.toISOString() };
 }
 
+function resolveSchedulerTargetJid(phone, userSessions) {
+  if (userSessions && typeof userSessions.entries === 'function') {
+    for (const [activeJid, sess] of userSessions.entries()) {
+      if (activeJid.includes('@g.us') || activeJid.includes('@broadcast') || activeJid.includes('@newsletter')) continue;
+      const sessPhone = String(sess?.phone || '').replace(/\D/g, '');
+      if (sessPhone && sessPhone === String(phone).replace(/\D/g, '')) {
+        return activeJid;
+      }
+    }
+  }
+  return `${phone}@s.whatsapp.net`;
+}
+
 /**
  * Job 1: Recordatorio del día anterior (Víspera)
  */
-export async function runEveningBeforeReminderJob(sock, botSentMessageIds = new Set()) {
+export async function runEveningBeforeReminderJob(sock, userSessions = new Map(), botSentMessageIds = new Set()) {
   if (!sock) return;
   const { tomorrowStr, hour, minute, nowIso } = getNowInTimezone('Europe/Madrid');
 
@@ -56,7 +69,7 @@ export async function runEveningBeforeReminderJob(sock, botSentMessageIds = new 
 
   for (const [phone, appointments] of byCompany.entries()) {
     try {
-      const targetJid = `${phone}@s.whatsapp.net`;
+      const targetJid = resolveSchedulerTargetJid(phone, userSessions);
       const dateParts = tomorrowStr.split('-');
       const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}` : tomorrowStr;
 
@@ -76,6 +89,10 @@ export async function runEveningBeforeReminderJob(sock, botSentMessageIds = new 
       lines.push('💡 _Si necesitas cambiar o retrasar alguna, dímelo ahora y la actualizo._');
 
       const sent = await sock.sendMessage(targetJid, { text: lines.join('\n').trim() });
+      if (sent?.status === 'BLOCKED') {
+        console.warn(`🛡️ [Scheduler] Envío bloqueado por cortafuegos para ${phone}. No se actualizará SQLite.`);
+        continue;
+      }
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
 
       // Marcar como enviado en SQLite para garantizar idempotencia
@@ -97,7 +114,7 @@ export async function runEveningBeforeReminderJob(sock, botSentMessageIds = new 
 /**
  * Job 2: Recordatorio de la mañana (Resumen del día)
  */
-export async function runMorningReminderJob(sock, botSentMessageIds = new Set()) {
+export async function runMorningReminderJob(sock, userSessions = new Map(), botSentMessageIds = new Set()) {
   if (!sock) return;
   const { dateStr, hour, minute, nowIso } = getNowInTimezone('Europe/Madrid');
 
@@ -123,7 +140,7 @@ export async function runMorningReminderJob(sock, botSentMessageIds = new Set())
 
   for (const [phone, appointments] of byCompany.entries()) {
     try {
-      const targetJid = `${phone}@s.whatsapp.net`;
+      const targetJid = resolveSchedulerTargetJid(phone, userSessions);
       const company = getCompany(phone);
       const greetingName = company.ownerName || company.name ? ` ${company.ownerName || company.name}` : '';
 
@@ -143,6 +160,10 @@ export async function runMorningReminderJob(sock, botSentMessageIds = new Set())
       lines.push('💡 _Si surge cualquier imprevisto durante el día, solo avísame._');
 
       const sent = await sock.sendMessage(targetJid, { text: lines.join('\n').trim() });
+      if (sent?.status === 'BLOCKED') {
+        console.warn(`🛡️ [Scheduler] Envío matinal bloqueado por cortafuegos para ${phone}.`);
+        continue;
+      }
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
 
       const aptIds = appointments.map(a => a.id);
@@ -193,7 +214,7 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
 
   for (const [phone, appointments] of byCompany.entries()) {
     try {
-      const targetJid = `${phone}@s.whatsapp.net`;
+      const targetJid = resolveSchedulerTargetJid(phone, userSessions);
       
       const lines = [
         '👋 *Antes de terminar la jornada:*',
@@ -218,6 +239,10 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
       }
 
       const sent = await sock.sendMessage(targetJid, { text: lines.join('\n').trim() });
+      if (sent?.status === 'BLOCKED') {
+        console.warn(`🛡️ [Scheduler] Revisión de fin de jornada bloqueada por cortafuegos para ${phone}.`);
+        continue;
+      }
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
 
       // Marcar en BD needs_outcome_confirmation = 1 y end_of_day_review_sent_at
@@ -256,8 +281,8 @@ export function initAppointmentScheduler(sock, userSessions = new Map(), botSent
 
   const intervalId = setInterval(async () => {
     try {
-      await runMorningReminderJob(sock, botSentMessageIds);
-      await runEveningBeforeReminderJob(sock, botSentMessageIds);
+      await runMorningReminderJob(sock, userSessions, botSentMessageIds);
+      await runEveningBeforeReminderJob(sock, userSessions, botSentMessageIds);
       await runEndOfDayReviewJob(sock, userSessions, botSentMessageIds);
     } catch (err) {
       console.error('❌ [Scheduler] Error en ciclo de reloj:', err.message);
