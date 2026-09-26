@@ -115,10 +115,13 @@ const appointments = [
 for (const a of appointments) {
   try {
     db.prepare(`
-      INSERT OR IGNORE INTO appointments (id, company_phone, client_name, client_phone, client_address, date, time, notes, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-    `).run(a.id, PHONE, a.client_name, a.client_phone, a.client_address, a.date, a.time, a.notes, now, now);
-    console.log(`  📅 Cita: ${a.id} — ${a.client_name} (${a.date} ${a.time})`);
+      INSERT OR IGNORE INTO appointments (
+        id, company_phone, client_name, client_phone, client_address,
+        date, time, notes, status, outcome, scheduled_start, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', 'NONE', ?, ?, ?)
+    `).run(a.id, PHONE, a.client_name, a.client_phone, a.client_address, a.date, a.time, a.notes, `${a.date}T${a.time}:00`, now, now);
+    console.log(`  📅 Cita: ${a.id} — ${a.client_name} (${a.date} ${a.time} - CONFIRMED)`);
   } catch(e) {
     console.warn(`  ⚠️  Cita ${a.id} omitida: ${e.message}`);
   }

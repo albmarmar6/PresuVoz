@@ -92,7 +92,10 @@ Tu función es:
        pon 'action: "schedule_appointment"' y rellena 'appointmentsList' (array con TODOS los objetos de citas), dejando 'appointmentInfo' con el primer elemento. Resuelve fechas relativas a partir de la fecha del contexto.
    - CONSULTAR AGENDA / CITAS: Si el profesional pregunta por sus visitas, citas o agenda (ej: "¿qué citas tengo?", "¿cuál es el estado de mis citas?", "¿qué visitas tengo agendadas?", "¿qué citas tengo hoy?", "agenda de mañana", "mis visitas", "ver agenda"):
      pon 'action: "list_appointments"' y rellena 'appointmentFilter': "today" | "tomorrow" | "all" (por defecto "all" salvo que especifique explícitamente hoy o mañana).
-   - MODIFICAR / CAMBIAR / MOVER CITA: Si el profesional pide cambiar, modificar, mover, adelantar o atrasar una cita existente (ej: "mueve la cita de Juan al martes", "cambia la hora de la visita de María a las 10", "adelanta la cita de Carlos al jueves a las 9"):
+   - CONFIRMAR VISITAS REALIZADAS / FINALIZADAS (Revisión de fin de jornada o general):
+     Si el profesional indica que las visitas se han realizado o terminado (ej: "todas hechas", "las 3 hechas", "Juan y Pedro hechas, María no", "ya está hecha la de Juan", "sí, hecha", "todo listo"):
+     pon 'action: "complete_appointments"', rellena 'completionInfo': { "allCompleted": true|false, "completedQueries": ["Juan"], "uncompletedQueries": ["María"] }. Si además pide reagendar alguna no realizada (ej: "y la de María pásala al jueves a las 18:00"), rellena también 'rescheduleInfo': { "query": "María", "date": "YYYY-MM-DD", "time": "HH:MM" }.
+   - MODIFICAR / CAMBIAR / MOVER / REAGENDAR CITA: Si el profesional pide cambiar, modificar, mover, adelantar o atrasar una cita existente (ej: "mueve la cita de Juan al martes", "cambia la hora de la visita de María a las 10", "adelanta la cita de Carlos al jueves a las 9", "retrasa la visita de María una hora", "pásame la de Juan al viernes a las 18"):
      pon 'action: "update_appointment"' y rellena 'appointmentInfo': { "appointmentQuery": "nombre o referencia de la cita a modificar", "date": "YYYY-MM-DD o null si no cambia", "time": "HH:MM o null si no cambia", "clientAddress": "nueva dirección o null", "notes": "nuevas notas o null" }.
    - CANCELAR CITA / VISITA: Si el profesional pide anular o cancelar una cita (ej: "cancela la cita con Juan", "anula la visita de las 11", "borra la cita con María"):
      pon 'action: "cancel_appointment"' y rellena 'appointmentQuery': "nombre o referencia a cancelar".
@@ -154,12 +157,23 @@ Tu función es:
 
 FORMATO DE RESPUESTA (JSON estricto):
 {
-  "action": "budget", // "budget" | "list_budgets" | "invoice" | "advance_invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "update_appointment" | "accept_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates" | "purchase_invoice"
+  "action": "budget", // "budget" | "list_budgets" | "invoice" | "advance_invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "update_appointment" | "complete_appointments" | "accept_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates" | "purchase_invoice"
   "taskQuery": null,
   "isDone": true,
   "onlyMissing": false,
   "startDate": null,
   "estimatedEndDate": null,
+  "completionInfo": {
+    "allCompleted": false,
+    "completedQueries": [],
+    "uncompletedQueries": []
+  },
+  "rescheduleInfo": {
+    "query": null,
+    "date": null,
+    "time": null,
+    "reason": null
+  },
   "purchaseInvoiceInfo": {
     "supplierName": null,
     "supplierTaxId": null,

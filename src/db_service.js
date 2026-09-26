@@ -92,6 +92,29 @@ try {
   db.exec('ALTER TABLE invoices ADD COLUMN verifactu_hash TEXT;');
 } catch (e) {}
 
+// Migración para entidad de visitas y citas
+const appointmentCols = [
+  'title TEXT',
+  'scheduled_start TEXT',
+  'scheduled_end TEXT',
+  'timezone TEXT DEFAULT "Europe/Madrid"',
+  'outcome TEXT DEFAULT "NONE"',
+  'needs_outcome_confirmation INTEGER DEFAULT 0',
+  'original_scheduled_start TEXT',
+  'reschedule_count INTEGER DEFAULT 0',
+  'reminder_day_sent_at TEXT',
+  'reminder_morning_sent_at TEXT',
+  'end_of_day_review_sent_at TEXT',
+  'completed_at TEXT',
+  'cancelled_at TEXT',
+  'rescheduled_at TEXT'
+];
+for (const colDef of appointmentCols) {
+  try {
+    db.exec(`ALTER TABLE appointments ADD COLUMN ${colDef};`);
+  } catch (e) {}
+}
+
 db.exec(`
 
   CREATE TABLE IF NOT EXISTS budgets (
@@ -170,6 +193,9 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_messages_wam_id ON messages(whatsapp_message_id);
   CREATE INDEX IF NOT EXISTS idx_messages_chat_status ON messages(chat_id, status);
+  CREATE INDEX IF NOT EXISTS idx_appointments_business_date ON appointments(company_phone, date, time);
+  CREATE INDEX IF NOT EXISTS idx_appointments_status ON appointments(company_phone, status);
+  CREATE INDEX IF NOT EXISTS idx_appointments_review ON appointments(company_phone, needs_outcome_confirmation, status);
 
   CREATE TABLE IF NOT EXISTS business_tax_profiles (
     business_id TEXT PRIMARY KEY,
@@ -995,41 +1021,108 @@ export function generateQuarterCSV(company, quarterData) {
 
 // ─── Métodos de Agenda de Citas y Visitas ─────────────────────────────────────
 
+// ─── Métodos de Agenda de Citas y Visitas ─────────────────────────────────────
+
+export function toMadridIso(dateStr, timeStr) {
+  const safeDate = (dateStr || new Date().toISOString().split('T')[0]).trim();
+  const safeTime = (timeStr || '10:00').trim().padStart(5, '0');
+  return `${safeDate}T${safeTime}:00`;
+}
+
+export function calculateDefaultEndTime(dateStr, timeStr, durationMinutes = 60) {
+  const [h, m] = (timeStr || '10:00').split(':').map(Number);
+  const totalMin = (h * 60 + m) + durationMinutes;
+  const endH = String(Math.floor(totalMin / 60) % 24).padStart(2, '0');
+  const endM = String(totalMin % 60).padStart(2, '0');
+  return `${dateStr}T${endH}:${endM}:00`;
+}
+
 export function saveAppointment(phone, appointment = {}) {
   const cleanPhone = String(phone).replace(/\D/g, '');
   const now = new Date().toISOString();
   const currentYear = new Date().getFullYear();
 
   let id = appointment.id;
+  let isNew = false;
+  const existing = id ? getAppointment(id) : null;
   if (!id) {
     const countRow = db.prepare("SELECT COUNT(*) as c FROM appointments WHERE id LIKE ?").get(`CIT-${currentYear}-%`);
     const nextSeq = String((countRow?.c || 0) + 1).padStart(4, '0');
     id = `CIT-${currentYear}-${nextSeq}`;
+    isNew = true;
   }
 
-  const clientName = (appointment.clientName || appointment.client_name || 'Cliente Particular').trim();
-  const clientPhone = (appointment.clientPhone || appointment.client_phone || '').trim();
-  const clientAddress = (appointment.clientAddress || appointment.client_address || '').trim();
-  const date = (appointment.date || now.split('T')[0]).trim();
-  const time = (appointment.time || '10:00').trim();
-  const notes = (appointment.notes || 'Visita técnica y toma de medidas').trim();
-  const status = appointment.status || 'CONFIRMADA';
+  const clientName = (appointment.clientName || appointment.client_name || existing?.clientName || 'Cliente Particular').trim();
+  const clientPhone = (appointment.clientPhone || appointment.client_phone || existing?.clientPhone || '').trim();
+  const clientAddress = (appointment.clientAddress || appointment.client_address || existing?.clientAddress || '').trim();
+  const date = (appointment.date || existing?.date || now.split('T')[0]).trim();
+  const time = (appointment.time || existing?.time || '10:00').trim();
+  const title = (appointment.title || existing?.title || `Visita con ${clientName}`).trim();
+  const notes = (appointment.notes || existing?.notes || 'Visita técnica y toma de medidas').trim();
+  const timezone = appointment.timezone || existing?.timezone || 'Europe/Madrid';
+  
+  // Regla de Oro: Siempre que el empresario crea o agenda, inicia CONFIRMED
+  const status = appointment.status || existing?.status || 'CONFIRMED';
+  const outcome = appointment.outcome || existing?.outcome || 'NONE';
+  const needsOutcomeConfirmation = appointment.needs_outcome_confirmation !== undefined 
+    ? Number(appointment.needs_outcome_confirmation) 
+    : (existing ? (existing.needsOutcomeConfirmation ? 1 : 0) : 0);
+  
+  const scheduledStart = appointment.scheduled_start || (existing?.scheduledStart) || toMadridIso(date, time);
+  const scheduledEnd = appointment.scheduled_end || (existing?.scheduledEnd) || calculateDefaultEndTime(date, time, 60);
+  const originalScheduledStart = appointment.original_scheduled_start || existing?.originalScheduledStart || scheduledStart;
+  const rescheduleCount = appointment.reschedule_count !== undefined 
+    ? Number(appointment.reschedule_count) 
+    : (existing?.rescheduleCount || 0);
 
   const stmt = db.prepare(`
-    INSERT INTO appointments (id, company_phone, client_name, client_phone, client_address, date, time, notes, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO appointments (
+      id, company_phone, client_name, client_phone, client_address,
+      date, time, title, notes, timezone,
+      status, outcome, needs_outcome_confirmation,
+      scheduled_start, scheduled_end, original_scheduled_start, reschedule_count,
+      created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       client_name = excluded.client_name,
       client_phone = excluded.client_phone,
       client_address = excluded.client_address,
       date = excluded.date,
       time = excluded.time,
+      title = excluded.title,
       notes = excluded.notes,
+      timezone = excluded.timezone,
       status = excluded.status,
+      outcome = excluded.outcome,
+      needs_outcome_confirmation = excluded.needs_outcome_confirmation,
+      scheduled_start = excluded.scheduled_start,
+      scheduled_end = excluded.scheduled_end,
+      reschedule_count = excluded.reschedule_count,
       updated_at = excluded.updated_at
   `);
 
-  stmt.run(id, cleanPhone, clientName, clientPhone, clientAddress, date, time, notes, status, now, now);
+  stmt.run(
+    id, cleanPhone, clientName, clientPhone, clientAddress,
+    date, time, title, notes, timezone,
+    status, outcome, needsOutcomeConfirmation,
+    scheduledStart, scheduledEnd, originalScheduledStart, rescheduleCount,
+    now, now
+  );
+
+  if (isNew) {
+    recordAuditLog({
+      businessId: cleanPhone,
+      entityType: 'APPOINTMENT',
+      entityId: id,
+      action: 'CREATE',
+      fieldChanged: 'status',
+      oldValue: null,
+      newValue: 'CONFIRMED',
+      changedBy: 'USER_WHATSAPP',
+      reason: `Visita agendada para ${date} a las ${time} h con ${clientName}`
+    });
+  }
 
   return getAppointment(id);
 }
@@ -1045,13 +1138,268 @@ export function getAppointment(id) {
     clientName: row.client_name,
     clientPhone: row.client_phone,
     clientAddress: row.client_address,
+    title: row.title,
     date: row.date,
     time: row.time,
     notes: row.notes,
-    status: row.status,
+    timezone: row.timezone || 'Europe/Madrid',
+    status: row.status || 'CONFIRMED',
+    outcome: row.outcome || 'NONE',
+    needsOutcomeConfirmation: Boolean(row.needs_outcome_confirmation),
+    scheduledStart: row.scheduled_start,
+    scheduledEnd: row.scheduled_end,
+    originalScheduledStart: row.original_scheduled_start,
+    rescheduleCount: row.reschedule_count || 0,
+    reminderDaySentAt: row.reminder_day_sent_at,
+    reminderMorningSentAt: row.reminder_morning_sent_at,
+    endOfDayReviewSentAt: row.end_of_day_review_sent_at,
+    completedAt: row.completed_at,
+    cancelledAt: row.cancelled_at,
+    rescheduledAt: row.rescheduled_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+/**
+ * Busca visitas que coincidan con un término de búsqueda.
+ * Devuelve un array de coincidencias para que el backend detecte si hay ambigüedad.
+ */
+export function findAppointments(phone, query, options = {}) {
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const q = `%${(query || '').trim().toLowerCase()}%`;
+  const statusFilter = options.includeCancelled ? '' : "AND status != 'CANCELLED'";
+
+  const stmt = db.prepare(`
+    SELECT * FROM appointments
+    WHERE company_phone = ?
+      ${statusFilter}
+      AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ? OR LOWER(client_address) LIKE ?)
+    ORDER BY date ASC, time ASC
+  `);
+
+  return stmt.all(cleanPhone, q, q, q, q).map(r => ({
+    id: r.id,
+    companyPhone: r.company_phone,
+    clientName: r.client_name,
+    clientPhone: r.client_phone,
+    clientAddress: r.client_address,
+    date: r.date,
+    time: r.time,
+    notes: r.notes,
+    status: r.status,
+    scheduledStart: r.scheduled_start
+  }));
+}
+
+/**
+ * Detecta si una visita solapa en horario con otra visita existente del mismo profesional.
+ */
+export function findConflictingAppointments(phone, dateStr, timeStr, excludeId = null) {
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  if (!dateStr || !timeStr) return [];
+
+  const stmt = db.prepare(`
+    SELECT * FROM appointments
+    WHERE company_phone = ?
+      AND date = ?
+      AND time = ?
+      AND status = 'CONFIRMED'
+      AND (? IS NULL OR id != ?)
+  `);
+
+  return stmt.all(cleanPhone, dateStr, timeStr, excludeId, excludeId).map(r => ({
+    id: r.id,
+    clientName: r.client_name,
+    date: r.date,
+    time: r.time,
+    clientAddress: r.client_address
+  }));
+}
+
+/**
+ * Reagenda una visita existente manteniendo el mismo registro en SQLite.
+ * Incrementa reschedule_count, audita en audit_logs y resetea flags de recordatorio.
+ */
+export function rescheduleAppointment(phone, queryOrId, newDate, newTime, reason = 'Reagendamiento solicitado por usuario') {
+  if (!queryOrId || (!newDate && !newTime)) return { success: false, error: 'MISSING_DATA' };
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  
+  const matches = findAppointments(cleanPhone, queryOrId);
+  if (matches.length === 0) return { success: false, error: 'NOT_FOUND' };
+  if (matches.length > 1) return { success: false, error: 'AMBIGUOUS', matches };
+
+  const target = matches[0];
+  const oldRow = getAppointment(target.id);
+  const now = new Date().toISOString();
+
+  const finalDate = (newDate || oldRow.date).trim();
+  const finalTime = (newTime || oldRow.time).trim();
+  const finalStart = toMadridIso(finalDate, finalTime);
+  const finalEnd = calculateDefaultEndTime(finalDate, finalTime, 60);
+  const oldDisplay = `${oldRow.date} ${oldRow.time} h`;
+  const newDisplay = `${finalDate} ${finalTime} h`;
+
+  const stmt = db.prepare(`
+    UPDATE appointments
+    SET date = ?,
+        time = ?,
+        scheduled_start = ?,
+        scheduled_end = ?,
+        status = 'CONFIRMED',
+        outcome = 'NONE',
+        needs_outcome_confirmation = 0,
+        reschedule_count = reschedule_count + 1,
+        rescheduled_at = ?,
+        reminder_day_sent_at = NULL,
+        reminder_morning_sent_at = NULL,
+        end_of_day_review_sent_at = NULL,
+        updated_at = ?
+    WHERE id = ?
+  `);
+
+  stmt.run(finalDate, finalTime, finalStart, finalEnd, now, now, target.id);
+
+  recordAuditLog({
+    businessId: cleanPhone,
+    entityType: 'APPOINTMENT',
+    entityId: target.id,
+    action: 'RESCHEDULE',
+    fieldChanged: 'scheduled_start',
+    oldValue: oldDisplay,
+    newValue: newDisplay,
+    changedBy: 'USER_WHATSAPP',
+    reason
+  });
+
+  return { success: true, appointment: getAppointment(target.id) };
+}
+
+/**
+ * Marca una o varias visitas como COMPLETED con su resultado.
+ */
+export function completeAppointments(phone, queriesOrIds = [], outcome = 'SUCCESSFUL', reason = 'Confirmación de visita realizada') {
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const completed = [];
+  const notFound = [];
+  const now = new Date().toISOString();
+
+  for (const q of queriesOrIds) {
+    const matches = findAppointments(cleanPhone, q);
+    if (matches.length === 1) {
+      const apt = matches[0];
+      db.prepare(`
+        UPDATE appointments
+        SET status = 'COMPLETED',
+            outcome = ?,
+            completed_at = ?,
+            needs_outcome_confirmation = 0,
+            updated_at = ?
+        WHERE id = ?
+      `).run(outcome, now, now, apt.id);
+
+      recordAuditLog({
+        businessId: cleanPhone,
+        entityType: 'APPOINTMENT',
+        entityId: apt.id,
+        action: 'COMPLETE',
+        fieldChanged: 'status',
+        oldValue: apt.status || 'CONFIRMED',
+        newValue: 'COMPLETED',
+        changedBy: 'USER_WHATSAPP',
+        reason
+      });
+
+      completed.push(getAppointment(apt.id));
+    } else {
+      notFound.push(q);
+    }
+  }
+
+  return { completed, notFound };
+}
+
+/**
+ * Modifica campos generales de una cita existente sin borrarla.
+ */
+export function updateAppointment(phone, query, changes = {}) {
+  if (!query && !changes) return null;
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const matches = findAppointments(cleanPhone, query);
+  if (matches.length === 0) return null;
+  if (matches.length > 1) return { ambiguous: true, matches };
+
+  const row = getAppointment(matches[0].id);
+  const now = new Date().toISOString();
+
+  const newDate = changes.date || row.date;
+  const newTime = changes.time || row.time;
+  const newAddress = changes.clientAddress || row.clientAddress;
+  const newNotes = changes.notes || row.notes;
+  const newClientName = changes.clientName || row.clientName;
+  const newClientPhone = changes.clientPhone || row.clientPhone;
+  const newStart = toMadridIso(newDate, newTime);
+  const newEnd = calculateDefaultEndTime(newDate, newTime, 60);
+
+  const updateStmt = db.prepare(`
+    UPDATE appointments
+    SET date = ?, time = ?, scheduled_start = ?, scheduled_end = ?,
+        client_address = ?, notes = ?, client_name = ?, client_phone = ?,
+        updated_at = ?
+    WHERE id = ?
+  `);
+  updateStmt.run(newDate, newTime, newStart, newEnd, newAddress, newNotes, newClientName, newClientPhone, now, row.id);
+
+  recordAuditLog({
+    businessId: cleanPhone,
+    entityType: 'APPOINTMENT',
+    entityId: row.id,
+    action: 'UPDATE',
+    fieldChanged: 'details',
+    oldValue: `${row.date} ${row.time} - ${row.clientAddress}`,
+    newValue: `${newDate} ${newTime} - ${newAddress}`,
+    changedBy: 'USER_WHATSAPP',
+    reason: 'Modificación de detalles de visita'
+  });
+
+  return getAppointment(row.id);
+}
+
+/**
+ * Cancela una visita preservando el registro y la trazabilidad (Soft-cancel).
+ */
+export function cancelAppointment(phone, query, reason = 'Cancelación solicitada por usuario') {
+  if (!query) return null;
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  const matches = findAppointments(cleanPhone, query);
+  if (matches.length === 0) return null;
+  if (matches.length > 1) return { ambiguous: true, matches };
+
+  const row = matches[0];
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    UPDATE appointments
+    SET status = 'CANCELLED',
+        cancelled_at = ?,
+        needs_outcome_confirmation = 0,
+        updated_at = ?
+    WHERE id = ?
+  `).run(now, now, row.id);
+
+  recordAuditLog({
+    businessId: cleanPhone,
+    entityType: 'APPOINTMENT',
+    entityId: row.id,
+    action: 'CANCEL',
+    fieldChanged: 'status',
+    oldValue: row.status || 'CONFIRMED',
+    newValue: 'CANCELLED',
+    changedBy: 'USER_WHATSAPP',
+    reason
+  });
+
+  return getAppointment(row.id);
 }
 
 export function listAppointments(phone, filter = 'all') {
@@ -1065,14 +1413,32 @@ export function listAppointments(phone, filter = 'all') {
 
   let rows = [];
   if (filter === 'today') {
-    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date = ? ORDER BY time ASC");
+    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date = ? AND status != 'CANCELLED' ORDER BY time ASC");
     rows = stmt.all(cleanPhone, todayStr);
   } else if (filter === 'tomorrow') {
-    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date = ? ORDER BY time ASC");
+    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date = ? AND status != 'CANCELLED' ORDER BY time ASC");
     rows = stmt.all(cleanPhone, tomorrowStr);
+  } else if (filter === 'completed') {
+    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND status = 'COMPLETED' ORDER BY date DESC, time DESC");
+    rows = stmt.all(cleanPhone);
+  } else if (filter === 'past') {
+    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date < ? AND status != 'CANCELLED' ORDER BY date DESC, time DESC");
+    rows = stmt.all(cleanPhone, todayStr);
+  } else if (filter === 'pending_review') {
+    const stmt = db.prepare(`
+      SELECT * FROM appointments
+      WHERE company_phone = ?
+        AND status = 'CONFIRMED'
+        AND (needs_outcome_confirmation = 1 OR date <= ?)
+      ORDER BY date ASC, time ASC
+    `);
+    rows = stmt.all(cleanPhone, todayStr);
+  } else if (filter === 'confirmed') {
+    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND status = 'CONFIRMED' ORDER BY date ASC, time ASC");
+    rows = stmt.all(cleanPhone);
   } else {
-    // Por defecto devuelve ABSOLUTAMENTE TODAS las citas registradas de la empresa
-    const stmt = db.prepare('SELECT * FROM appointments WHERE company_phone = ? ORDER BY date ASC, time ASC');
+    // 'all': Todas las visitas activas o no canceladas ordenadas cronológicamente
+    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND status != 'CANCELLED' ORDER BY date ASC, time ASC");
     rows = stmt.all(cleanPhone);
   }
 
@@ -1082,9 +1448,17 @@ export function listAppointments(phone, filter = 'all') {
     clientName: r.client_name,
     clientPhone: r.client_phone,
     clientAddress: r.client_address,
+    title: r.title,
     date: r.date,
     time: r.time,
     notes: r.notes,
+    timezone: r.timezone || 'Europe/Madrid',
+    status: r.status || 'CONFIRMED',
+    outcome: r.outcome || 'NONE',
+    needsOutcomeConfirmation: Boolean(r.needs_outcome_confirmation),
+    scheduledStart: r.scheduled_start,
+    scheduledEnd: r.scheduled_end,
+    rescheduleCount: r.reschedule_count || 0,
     createdAt: r.created_at,
     updatedAt: r.updated_at
   }));
@@ -1097,86 +1471,29 @@ export function updateAppointmentStatus(id, status) {
   stmt.run(status, now, id);
 }
 
-/**
- * Modifica los campos de una cita existente (fecha, hora, dirección, notas).
- * Busca la cita por ID exacto o por nombre de cliente/notas (match parcial).
- * @param {string} phone - Teléfono de la empresa
- * @param {string} query - ID de cita o nombre del cliente
- * @param {object} changes - Campos a actualizar: { date, time, clientAddress, notes, clientName, clientPhone }
- * @returns {object|null} La cita actualizada, o null si no se encontró
- */
-export function updateAppointment(phone, query, changes = {}) {
-  if (!query && !changes) return null;
+export function getAppointmentHistory(phone, appointmentId) {
   const cleanPhone = String(phone).replace(/\D/g, '');
-  const q = `%${(query || '').trim().toLowerCase()}%`;
-
-  const findStmt = db.prepare(`
-    SELECT * FROM appointments
-    WHERE company_phone = ?
-      AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ?)
-    ORDER BY date ASC, time ASC
-    LIMIT 1
-  `);
-
-  const row = findStmt.get(cleanPhone, q, q, q);
-  if (!row) return null;
-
-  const now = new Date().toISOString();
-  const newDate = changes.date || row.date;
-  const newTime = changes.time || row.time;
-  const newAddress = changes.clientAddress || row.client_address;
-  const newNotes = changes.notes || row.notes;
-  const newClientName = changes.clientName || row.client_name;
-  const newClientPhone = changes.clientPhone || row.client_phone;
-
-  const updateStmt = db.prepare(`
-    UPDATE appointments
-    SET date = ?, time = ?, client_address = ?, notes = ?,
-        client_name = ?, client_phone = ?, updated_at = ?
-    WHERE id = ?
-  `);
-  updateStmt.run(newDate, newTime, newAddress, newNotes, newClientName, newClientPhone, now, row.id);
-
-  return {
-    id: row.id,
-    companyPhone: cleanPhone,
-    clientName: newClientName,
-    clientPhone: newClientPhone,
-    clientAddress: newAddress,
-    date: newDate,
-    time: newTime,
-    notes: newNotes
-  };
+  return db.prepare(`
+    SELECT * FROM audit_logs
+    WHERE business_id = ?
+      AND entity_type = 'APPOINTMENT'
+      AND entity_id = ?
+    ORDER BY timestamp ASC
+  `).all(cleanPhone, appointmentId).map(r => ({
+    id: r.id,
+    businessId: r.business_id,
+    entityType: r.entity_type,
+    entityId: r.entity_id,
+    action: r.action,
+    fieldChanged: r.field_changed,
+    oldValue: r.old_value,
+    newValue: r.new_value,
+    changedBy: r.changed_by,
+    reason: r.reason,
+    timestamp: r.timestamp
+  }));
 }
 
-export function cancelAppointment(phone, query) {
-  if (!query) return null;
-  const cleanPhone = String(phone).replace(/\D/g, '');
-  const q = `%${query.trim().toLowerCase()}%`;
-
-  const stmt = db.prepare(`
-    SELECT * FROM appointments
-    WHERE company_phone = ?
-      AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ?)
-    ORDER BY date ASC, time ASC
-    LIMIT 1
-  `);
-
-  const row = stmt.get(cleanPhone, q, q, q);
-  if (!row) return null;
-
-  db.prepare('DELETE FROM appointments WHERE id = ?').run(row.id);
-  return {
-    id: row.id,
-    companyPhone: row.company_phone,
-    clientName: row.client_name,
-    clientPhone: row.client_phone,
-    clientAddress: row.client_address,
-    date: row.date,
-    time: row.time,
-    notes: row.notes
-  };
-}
 
 // ─── Métodos del Secretario Digital (Briefing y Seguimiento) ──────────────────
 

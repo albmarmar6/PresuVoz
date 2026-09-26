@@ -18,7 +18,7 @@ function getDbData() {
   const budgets = db.prepare('SELECT id, company_phone, client_name, client_address, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets ORDER BY updated_at DESC').all();
   const invoices = db.prepare('SELECT id, budget_id, company_phone, client_name, total_amount, status, created_at, data_json FROM invoices ORDER BY created_at DESC').all();
   const payments = db.prepare('SELECT id, budget_id, company_phone, amount, method, concept, created_at, data_json FROM payments ORDER BY created_at DESC').all();
-  const appointments = db.prepare('SELECT id, company_phone, client_name, client_phone, client_address, date, time, notes, status, created_at, updated_at FROM appointments ORDER BY date DESC, time DESC').all();
+  const appointments = db.prepare('SELECT id, company_phone, client_name, client_phone, client_address, date, time, notes, status, reschedule_count, created_at, updated_at FROM appointments ORDER BY date DESC, time DESC').all();
   let shoppingItems = [];
   try {
     shoppingItems = db.prepare('SELECT id, company_phone, client_name, budget_id, description, qty, unit, status, notes, created_at, bought_at FROM shopping_items ORDER BY status ASC, created_at DESC').all();
@@ -219,17 +219,17 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     function renderBadge(status) {
       if (!status) return '<span class="px-2 py-0.5 rounded text-xs bg-slate-800 text-slate-400 font-mono">-</span>';
       const s = String(status).toUpperCase();
-      if (s === 'FINALIZADO') {
-        return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">🏁 FINALIZADO</span>';
+      if (s === 'FINALIZADO' || s === 'COMPLETED' || s === 'REALIZADA') {
+        return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">🏁 REALIZADA</span>';
       }
-      if (s === 'ACEPTADO' || s === 'PAGADA' || s === 'LIQUIDADO' || s === 'CONFIRMADA' || s === 'FIRMADO') {
-        return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">🟢 ' + status + '</span>';
+      if (s === 'ACEPTADO' || s === 'PAGADA' || s === 'LIQUIDADO' || s === 'CONFIRMED' || s === 'CONFIRMADA' || s === 'FIRMADO') {
+        return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-cyan-500/15 text-cyan-400 border border-cyan-500/30">🟢 CONFIRMADA</span>';
       }
       if (s.includes('PENDIENTE')) {
         return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">⏳ ' + status + '</span>';
       }
-      if (s === 'CANCELADA') {
-        return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-red-500/15 text-red-400 border border-red-500/30">❌ ' + status + '</span>';
+      if (s === 'CANCELADA' || s === 'CANCELLED') {
+        return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-red-500/15 text-red-400 border border-red-500/30">❌ CANCELADA</span>';
       }
       return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-500/15 text-blue-400 border border-blue-500/30">🔵 ' + status + '</span>';
     }
@@ -337,7 +337,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
         let html = '<div class="overflow-x-auto rounded-xl border border-slate-800"><table class="w-full text-left text-xs">';
         html += '<thead class="bg-slate-950 text-slate-400 font-mono uppercase text-[11px] border-b border-slate-800"><tr>';
-        html += '<th class="p-3.5">ID Cita</th><th class="p-3.5">Fecha y Hora</th><th class="p-3.5">Cliente</th><th class="p-3.5">Dirección / Visita</th><th class="p-3.5">Motivo / Trabajos</th>';
+        html += '<th class="p-3.5">ID Cita</th><th class="p-3.5">Fecha y Hora</th><th class="p-3.5">Cliente</th><th class="p-3.5">Dirección / Visita</th><th class="p-3.5">Motivo / Trabajos</th><th class="p-3.5">Estado</th><th class="p-3.5 text-center">Cambios</th>';
         html += '</tr></thead><tbody class="divide-y divide-slate-800 bg-slate-900/60">';
 
         items.forEach(a => {
@@ -347,6 +347,8 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
           html += '<td class="p-3.5 font-semibold text-white">' + a.client_name + (a.client_phone ? '<div class="text-[11px] text-slate-400 font-mono">📞 ' + a.client_phone + '</div>' : '') + '</td>';
           html += '<td class="p-3.5 text-slate-300">' + (a.client_address || 'Por concretar') + '</td>';
           html += '<td class="p-3.5 text-slate-300">' + (a.notes || '-') + '</td>';
+          html += '<td class="p-3.5">' + renderBadge(a.status || 'CONFIRMED') + '</td>';
+          html += '<td class="p-3.5 text-center font-mono text-slate-400">' + (a.reschedule_count > 0 ? '<span class="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">' + a.reschedule_count + ' reagend.</span>' : '<span class="text-slate-600">0</span>') + '</td>';
           html += '</tr>';
         });
 

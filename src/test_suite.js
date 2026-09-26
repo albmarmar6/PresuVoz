@@ -1329,7 +1329,16 @@ import {
   updateFiscalPeriodStatus,
   listFiscalIncidents,
   recordAuditLog,
-  listAuditLogs
+  listAuditLogs,
+  saveAppointment as testSaveAppointment,
+  getAppointment as testGetAppointment,
+  findAppointments as testFindAppointments,
+  rescheduleAppointment as testRescheduleAppointment,
+  completeAppointments as testCompleteAppointments,
+  cancelAppointment as testCancelAppointment,
+  listAppointments as testListAppointments,
+  findConflictingAppointments as testFindConflictingAppointments,
+  getAppointmentHistory as testGetAppointmentHistory
 } from './db_service.js';
 import {
   getFiscalPeriodBounds,
@@ -1704,15 +1713,94 @@ assert(periodRecord.status === 'SENT', "CASO 14: El período fiscal pasa a estad
 const logs = listAuditLogs(testFiscalPhone, { entityType: 'FISCAL_PERIOD' });
 assert(logs.some(l => l.action === 'SEND_PACKAGE_GESTORIA'), "CASO 14: Acción registrada en audit_logs de forma inmutable");
 
-// Limpieza final de la prueba
-cleanDb.prepare('DELETE FROM invoices WHERE company_phone = ? OR company_phone = ?').run(testFiscalPhone, testFiscalPhoneB);
-cleanDb.prepare('DELETE FROM purchase_invoices WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
-cleanDb.prepare('DELETE FROM expense_payments WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
-cleanDb.prepare('DELETE FROM investment_assets WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
-cleanDb.prepare('DELETE FROM fiscal_periods WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
-cleanDb.prepare('DELETE FROM fiscal_incidents WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
-cleanDb.prepare('DELETE FROM audit_logs WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
-cleanDb.prepare('DELETE FROM companies WHERE phone = ? OR phone = ?').run(testFiscalPhone, testFiscalPhoneB);
+// -----------------------------------------------------------------------------
+// TEST 23: MODELO INTEGRAL DE VISITAS (REGLA DE ORO CONFIRMED, CICLO DE VIDA, REAGENDAMIENTOS Y AUDITORÍA)
+// -----------------------------------------------------------------------------
+console.log("\nTEST 23: Arquitectura Integral de Visitas Técnicas (CONFIRMED directo, Reagendamiento, Fin de Día y Auditoría)");
+
+const testVisitPhone = '34611998877';
+cleanDb.prepare('DELETE FROM appointments WHERE company_phone = ?').run(testVisitPhone);
+cleanDb.prepare('DELETE FROM audit_logs WHERE business_id = ?').run(testVisitPhone);
+
+// 1. Creación directa (Regla de Oro: Siempre CONFIRMED de entrada)
+const apt1 = testSaveAppointment(testVisitPhone, {
+  clientName: 'Juan Pérez',
+  clientPhone: '612345678',
+  clientAddress: 'Calle Betis 10, Sevilla',
+  date: '2026-09-27',
+  time: '11:00',
+  notes: 'Presupuesto de alicatado de cocina'
+});
+
+assert(apt1.id.startsWith('CIT-'), "CASO 15: Genera ID secuencial con prefijo CIT");
+assert(apt1.status === 'CONFIRMED', "CASO 15: La visita nace directamente como CONFIRMED (Regla de Oro)");
+assert(apt1.outcome === 'NONE', "CASO 15: El outcome inicial es NONE");
+assert(apt1.scheduledStart.includes('2026-09-27T11:00:00'), "CASO 15: Genera scheduled_start ISO con fecha y hora");
+assert(apt1.rescheduleCount === 0, "CASO 15: El contador inicial de reagendamientos es 0");
+
+const logsCreate = testGetAppointmentHistory(testVisitPhone, apt1.id);
+assert(logsCreate.some(l => l.action === 'CREATE' && l.newValue === 'CONFIRMED'), "CASO 15: Registra CREATE en audit_logs de forma inmutable");
+
+// 2. Detección de colisión de horario
+const conflicts = testFindConflictingAppointments(testVisitPhone, '2026-09-27', '11:00');
+assert(conflicts.length === 1 && conflicts[0].clientName === 'Juan Pérez', "CASO 15: Detecta colisión horaria si existe otra visita a la misma hora");
+
+const noConflicts = testFindConflictingAppointments(testVisitPhone, '2026-09-27', '12:30');
+assert(noConflicts.length === 0, "CASO 15: No detecta colisión si la hora está libre");
+
+// 3. Reagendamiento sin perder el registro ni crear una visita duplicada
+const reschResult = testRescheduleAppointment(testVisitPhone, 'Juan', '2026-09-30', '18:00', 'Cliente solicita cambio de fecha');
+assert(reschResult.success === true, "CASO 15: Reagendamiento exitoso");
+assert(reschResult.appointment.id === apt1.id, "CASO 15: Mantiene el mismo registro en base de datos (NO duplica visita)");
+assert(reschResult.appointment.date === '2026-09-30', "CASO 15: Fecha actualizada a 2026-09-30");
+assert(reschResult.appointment.time === '18:00', "CASO 15: Hora actualizada a 18:00");
+assert(reschResult.appointment.status === 'CONFIRMED', "CASO 15: Estado sigue siendo CONFIRMED tras reagendar");
+assert(reschResult.appointment.rescheduleCount === 1, "CASO 15: Incrementa reschedule_count a 1");
+
+const logsResch = testGetAppointmentHistory(testVisitPhone, apt1.id);
+assert(logsResch.some(l => l.action === 'RESCHEDULE' && l.oldValue.includes('2026-09-27 11:00') && l.newValue.includes('2026-09-30 18:00')), "CASO 15: Registra RESCHEDULE en audit_logs con valores anteriores y nuevos");
+
+// 4. Modificación de detalles sin alterar fecha
+const updatedDetails = testSaveAppointment(testVisitPhone, {
+  id: apt1.id,
+  clientAddress: 'Calle Betis 12 (portal interior)'
+});
+assert(updatedDetails.clientAddress === 'Calle Betis 12 (portal interior)', "CASO 15: Permite modificar dirección manteniendo la misma cita");
+
+// 5. Finalización con confirmación humana (Fin de jornada)
+const completeResult = testCompleteAppointments(testVisitPhone, ['Juan'], 'SUCCESSFUL', 'Revisión final de día');
+assert(completeResult.completed.length === 1, "CASO 15: Completa la visita de Juan con éxito");
+assert(completeResult.completed[0].status === 'COMPLETED', "CASO 15: Estado pasa a COMPLETED");
+assert(completeResult.completed[0].outcome === 'SUCCESSFUL', "CASO 15: Outcome pasa a SUCCESSFUL");
+assert(completeResult.completed[0].needsOutcomeConfirmation === false, "CASO 15: needs_outcome_confirmation se desactiva");
+
+const logsComplete = testGetAppointmentHistory(testVisitPhone, apt1.id);
+assert(logsComplete.some(l => l.action === 'COMPLETE'), "CASO 15: Registra COMPLETE en audit_logs");
+
+// 6. Cancelación suave (Soft-cancel, nunca DELETE)
+const apt2 = testSaveAppointment(testVisitPhone, {
+  clientName: 'Pedro Gómez',
+  date: '2026-10-05',
+  time: '10:00'
+});
+const cancelledApt = testCancelAppointment(testVisitPhone, 'Pedro', 'Cliente decide no realizar la obra');
+assert(cancelledApt.status === 'CANCELLED', "CASO 15: Cancelación establece status = CANCELLED sin borrar el registro");
+
+const aptInDb = testGetAppointment(apt2.id);
+assert(aptInDb !== null, "CASO 15: La visita cancelada NO se borra de la BD (permanece para métricas e historial)");
+assert(aptInDb.status === 'CANCELLED', "CASO 15: Permanece en la BD como CANCELLED");
+
+// 7. Filtros de listado inteligente
+const allActive = testListAppointments(testVisitPhone, 'all');
+assert(allActive.some(a => a.id === apt1.id), "CASO 15: listAppointments(all) incluye la visita completada");
+assert(!allActive.some(a => a.id === apt2.id), "CASO 15: listAppointments(all) excluye por defecto visitas CANCELLED");
+
+const completedList = testListAppointments(testVisitPhone, 'completed');
+assert(completedList.length === 1 && completedList[0].id === apt1.id, "CASO 15: listAppointments(completed) filtra exactamente las realizadas");
+
+// Limpieza de datos de prueba
+cleanDb.prepare('DELETE FROM appointments WHERE company_phone = ?').run(testVisitPhone);
+cleanDb.prepare('DELETE FROM audit_logs WHERE business_id = ?').run(testVisitPhone);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

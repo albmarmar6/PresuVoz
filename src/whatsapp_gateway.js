@@ -31,6 +31,7 @@ import {
   generateReceiptPDF,
   generateQuarterTaxPDF
 } from './pdf_service.js';
+import { initAppointmentScheduler } from './appointment_scheduler.js';
 import {
   buildGestoriaPackageZip,
   sendFiscalPackageToGestoria,
@@ -57,6 +58,11 @@ import {
   generateQuarterCSV,
   saveAppointment,
   getAppointment,
+  findAppointments,
+  rescheduleAppointment,
+  completeAppointments,
+  findConflictingAppointments,
+  getAppointmentHistory,
   listAppointments,
   updateAppointmentStatus,
   updateAppointment,
@@ -694,49 +700,8 @@ async function startWhatsAppGateway() {
         } catch (e) {}
       }, 4000);
 
-      // Cron del Secretario Digital: Briefing matinal (08:00 AM) y recordatorio de víspera (20:00 PM)
-      setInterval(async () => {
-        try {
-          const now = new Date();
-          const madridDateStr = now.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid' });
-          const madridHourStr = now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Europe/Madrid' });
-          const [hour, minute] = madridHourStr.split(':').map(Number);
-
-          // 1. Briefing matinal a las 08:00 AM
-          if (hour === 8 && minute === 0) {
-            for (const [jid, session] of userSessions.entries()) {
-              if (session.lastBriefingDate !== madridDateStr && !jid.includes('@g.us') && !jid.includes('broadcast')) {
-                session.lastBriefingDate = madridDateStr;
-                const cleanPhone = session.phone || String(jid).replace(/\D/g, '');
-                const briefing = generateDailyBriefing(cleanPhone);
-                try {
-                  const sent = await sock.sendMessage(jid, { text: briefing });
-                  if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-                  console.log(`☀️ Briefing matinal del Secretario enviado a ${jid}`);
-                } catch (err) {}
-              }
-            }
-          }
-
-          // 2. Recordatorio de víspera a las 20:00 PM
-          if (hour === 20 && minute === 0) {
-            for (const [jid, session] of userSessions.entries()) {
-              if (session.lastEveningReminderDate !== madridDateStr && !jid.includes('@g.us') && !jid.includes('broadcast')) {
-                session.lastEveningReminderDate = madridDateStr;
-                const cleanPhone = session.phone || String(jid).replace(/\D/g, '');
-                const eveningReminder = generateEveningReminder(cleanPhone);
-                if (eveningReminder) {
-                  try {
-                    const sent = await sock.sendMessage(jid, { text: eveningReminder });
-                    if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-                    console.log(`📋 Recordatorio de víspera del Secretario enviado a ${jid}`);
-                  } catch (err) {}
-                }
-              }
-            }
-          }
-        } catch (cronErr) {}
-      }, 60000);
+      // Inicializar Scheduler Autónomo e Idempotente de Visitas (Víspera 19:30, Mañana 07:30, Fin de Día 20:30)
+      initAppointmentScheduler(sock, userSessions, botSentMessageIds);
     }
   });
 
@@ -1466,9 +1431,19 @@ async function startWhatsAppGateway() {
   async function handleScheduleAppointment(sock, remoteJid, session, appointmentInfo = {}) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      
+      // Chequeo de colisión de horario (Aviso sin bloquear)
+      const conflicts = findConflictingAppointments(cleanPhone, appointmentInfo.date, appointmentInfo.time);
+      
       const saved = saveAppointment(cleanPhone, appointmentInfo);
       console.log(`📅 Cita técnica agendada para ${cleanPhone}: ${saved.id} - ${saved.clientName} (${saved.date} ${saved.time})`);
-      const text = formatAppointmentForWhatsApp(saved, session.company);
+      
+      let conflictWarning = '';
+      if (conflicts.length > 0) {
+        conflictWarning = `\n\n⚠️ *Aviso de horario:* Ya tenías una visita agendada a esa misma hora con *${conflicts[0].clientName}*. He registrado ambas en tu agenda.`;
+      }
+
+      const text = formatAppointmentForWhatsApp(saved, session.company) + conflictWarning;
       const sent = await sock.sendMessage(remoteJid, { text });
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
     } catch (err) {
@@ -1488,6 +1463,8 @@ async function startWhatsAppGateway() {
       let title = '📅 *TUS VISITAS TÉCNICAS AGENDADAS:*';
       if (filter === 'today') title = '📅 *TUS VISITAS TÉCNICAS DE HOY:*';
       else if (filter === 'tomorrow') title = '📅 *TUS VISITAS TÉCNICAS DE MAÑANA:*';
+      else if (filter === 'completed') title = '✅ *VISITAS TÉCNICAS REALIZADAS:*';
+      else if (filter === 'past') title = '🕒 *HISTORIAL DE VISITAS PASADAS:*';
 
       const text = formatAppointmentsListForWhatsApp(appointments, title);
       const sent = await sock.sendMessage(remoteJid, { text });
@@ -1507,9 +1484,23 @@ async function startWhatsAppGateway() {
       const cancelled = cancelAppointment(cleanPhone, query);
       if (!cancelled) {
         const sentNotFound = await sock.sendMessage(remoteJid, {
-          text: `⚠️ *No se encontró ninguna cita activa* que coincida con "${query}".\n\nEscribe *"agenda"* para ver tus citas programadas.`
+          text: `⚠️ *No se encontró ninguna visita activa* que coincida con "${query}".\n\nEscribe *"agenda"* para ver tus citas programadas.`
         });
         if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+        return;
+      }
+
+      if (cancelled.ambiguous) {
+        const lines = [
+          `⚠️ *Tienes varias visitas con "${query}":*`,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━'
+        ];
+        cancelled.matches.forEach((m, idx) => {
+          lines.push(`${idx + 1}️⃣ *${m.date} a las ${m.time} h* — ${m.clientName} (${m.id})`);
+        });
+        lines.push('\n¿Cuál de ellas deseas anular?');
+        const sentAmb = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+        if (sentAmb?.key?.id) botSentMessageIds.add(sentAmb.key.id);
         return;
       }
 
@@ -1517,7 +1508,7 @@ async function startWhatsAppGateway() {
       const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : cancelled.date;
 
       const sentOk = await sock.sendMessage(remoteJid, {
-        text: `❌ *Cita cancelada con éxito*\n\nSe ha anulado la visita técnica con *${cancelled.clientName}* prevista para el ${formattedDate} a las ${cancelled.time} h (${cancelled.id}).\n\nEl hueco ha quedado liberado en tu agenda.`
+        text: `❌ *Visita cancelada*\n\nHe anulado la visita con *${cancelled.clientName}* prevista para el ${formattedDate} a las ${cancelled.time} h (${cancelled.id}).\n\nEl hueco ha quedado libre en tu agenda.`
       });
       if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
       console.log(`❌ Cita ${cancelled.id} cancelada para ${cleanPhone}`);
@@ -1534,49 +1525,139 @@ async function startWhatsAppGateway() {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
       const query = updateInfo.appointmentQuery || updateInfo.clientName || '';
+      
+      // Si el usuario pide cambiar fecha u hora, usamos rescheduleAppointment para trazabilidad total
+      if (updateInfo.date || updateInfo.time) {
+        const res = rescheduleAppointment(cleanPhone, query, updateInfo.date, updateInfo.time, 'Reagendamiento por WhatsApp');
+        if (!res.success) {
+          if (res.error === 'AMBIGUOUS') {
+            const lines = [
+              `⚠️ *Tienes varias visitas con "${query}":*`,
+              '━━━━━━━━━━━━━━━━━━━━━━━━━'
+            ];
+            res.matches.forEach((m, idx) => {
+              lines.push(`${idx + 1}️⃣ *${m.date} a las ${m.time} h* — ${m.clientName}`);
+            });
+            lines.push('\n¿A cuál de ellas te refieres? Indícame la fecha o la hora.');
+            const sentAmb = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+            if (sentAmb?.key?.id) botSentMessageIds.add(sentAmb.key.id);
+            return;
+          }
+          const sentNotFound = await sock.sendMessage(remoteJid, {
+            text: `⚠️ No encontré ninguna visita activa que coincida con *"${query}"*.\n\nEscribe *"agenda"* para ver tus citas.`
+          });
+          if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+          return;
+        }
+
+        const apt = res.appointment;
+        const dp = (apt.date || '').split('-');
+        const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}/${dp[0]}` : apt.date;
+        const sentOk = await sock.sendMessage(remoteJid, {
+          text: `🗓️ *Visita reagendada con éxito*\n\nHe movido la visita con *${apt.clientName}* al *${fd}* a las *${apt.time} h*.\n\n_Se ha actualizado en tu agenda y el contador de reagendamientos es ${apt.rescheduleCount}._`
+        });
+        if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+        return;
+      }
+
+      // Modificación de dirección, notas o nombre
       const changes = {
-        date: updateInfo.date || null,
-        time: updateInfo.time || null,
         clientAddress: updateInfo.clientAddress || null,
         notes: updateInfo.notes || null,
         clientName: updateInfo.newClientName || null,
         clientPhone: updateInfo.clientPhone || null
       };
-      // Elimina nulls para no sobreescribir con vacío
       Object.keys(changes).forEach(k => { if (!changes[k]) delete changes[k]; });
 
       const updated = updateAppointment(cleanPhone, query, changes);
       if (!updated) {
         const sentNotFound = await sock.sendMessage(remoteJid, {
-          text: `⚠️ No encontré ninguna cita activa que coincida con *"${query}"*.\n\nEscribe *"agenda"* para ver tus citas y asegúrate de indicar el nombre del cliente.`
+          text: `⚠️ No encontré ninguna visita activa que coincida con *"${query}"*.\n\nEscribe *"agenda"* para ver tus citas.`
         });
         if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
         return;
       }
 
-      const dateParts = (updated.date || '').split('-');
-      const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : updated.date;
+      if (updated.ambiguous) {
+        const lines = [
+          `⚠️ *Tienes varias visitas con "${query}":*`,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━'
+        ];
+        updated.matches.forEach((m, idx) => {
+          lines.push(`${idx + 1}️⃣ *${m.date} a las ${m.time} h* — ${m.clientName}`);
+        });
+        lines.push('\n¿A cuál de ellas te refieres?');
+        const sentAmb = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+        if (sentAmb?.key?.id) botSentMessageIds.add(sentAmb.key.id);
+        return;
+      }
+
+      const dp = (updated.date || '').split('-');
+      const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}/${dp[0]}` : updated.date;
 
       const lines = [
-        `✅ *Cita modificada con éxito*`,
+        `✅ *Visita actualizada con éxito*`,
         '━━━━━━━━━━━━━━━━━━━━━━━━━',
         `👤 *Cliente:* ${updated.clientName}`,
         updated.clientPhone ? `📞 *Teléfono:* ${updated.clientPhone}` : null,
         `📍 *Dirección:* ${updated.clientAddress || 'Por concretar'}`,
-        `🗓️ *Fecha:* ${formattedDate}`,
+        `🗓️ *Fecha:* ${fd}`,
         `⏰ *Hora:* ${updated.time} h`,
-        updated.notes ? `📝 *Notas:* ${updated.notes}` : null,
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        `_Referencia: ${updated.id}_`
+        updated.notes ? `📝 *Notas:* ${updated.notes}` : null
       ].filter(Boolean);
 
       const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
       if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
-      console.log(`✏️ Cita ${updated.id} modificada para ${cleanPhone}: ${JSON.stringify(changes)}`);
     } catch (err) {
       console.error('❌ Error modificando cita:', err.message);
       const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *Error modificando la cita:* ${err.message}`
+        text: `⚠️ *Error modificando la visita:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+
+  async function handleCompleteAppointments(sock, remoteJid, session, completionInfo = {}, rescheduleInfo = null) {
+    try {
+      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const messagesToSend = [];
+
+      // 1. Si el usuario dijo "todas hechas" o similar
+      if (completionInfo.allCompleted) {
+        const pendingToday = listAppointments(cleanPhone, 'today');
+        const ids = pendingToday.map(a => a.id);
+        const res = completeAppointments(cleanPhone, ids, 'SUCCESSFUL', 'Confirmado por profesional al fin de día');
+        messagesToSend.push(`✅ *¡Estupendo!* He marcado tus *${res.completed.length} visitas* de hoy como finalizadas.`);
+      } else if (completionInfo.completedQueries && completionInfo.completedQueries.length > 0) {
+        const res = completeAppointments(cleanPhone, completionInfo.completedQueries, 'SUCCESSFUL');
+        const names = res.completed.map(c => `*${c.clientName}*`).join(', ');
+        messagesToSend.push(`✅ He marcado como realizada${res.completed.length === 1 ? '' : 's'} la visita con ${names}.`);
+      }
+
+      // 2. Si además pidió reagendar otra visita no realizada
+      if (rescheduleInfo && rescheduleInfo.query && (rescheduleInfo.date || rescheduleInfo.time)) {
+        const resch = rescheduleAppointment(cleanPhone, rescheduleInfo.query, rescheduleInfo.date, rescheduleInfo.time, 'Reagendada tras fin de jornada');
+        if (resch.success) {
+          const a = resch.appointment;
+          const dp = (a.date || '').split('-');
+          const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}/${dp[0]}` : a.date;
+          messagesToSend.push(`🗓️ La visita con *${a.clientName}* la he movido al *${fd}* a las *${a.time} h*.`);
+        }
+      }
+
+      // Si quedaron visitas sin resolver
+      if (completionInfo.uncompletedQueries && completionInfo.uncompletedQueries.length > 0 && (!rescheduleInfo || !rescheduleInfo.query)) {
+        const unDone = completionInfo.uncompletedQueries.join(', ');
+        messagesToSend.push(`ℹ️ La visita con *${unDone}* queda pendiente. ¿Deseas que la pasemos a otro día? Dímelo y la reagendo.`);
+      }
+
+      const finalText = messagesToSend.join('\n\n') || '✅ Anotado todo en tu agenda.';
+      const sentOk = await sock.sendMessage(remoteJid, { text: finalText });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    } catch (err) {
+      console.error('❌ Error completando visitas:', err.message);
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error guardando estado de visitas:* ${err.message}`
       });
       if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
     }
@@ -2425,50 +2506,24 @@ async function startWhatsAppGateway() {
       return;
     }
 
-    // 11. Cancelar cita (Nivel C: Confirmación fuerte requerida)
+    // 11. Cancelar cita / visita técnica
     if (aiResult?.action === 'cancel_appointment') {
       const query = (aiResult.appointmentQuery || aiResult.clientName || '').trim();
-      session.pendingAction = createProposedAction('C', 'cancel_appointment', { query });
-
-      const lines = [
-        '⚠️ *CONFIRMACIÓN REQUERIDA (Nivel C)*',
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        `¿Estás seguro de que deseas anular la cita técnica con *${query}*?`,
-        '',
-        '🔒 _Por seguridad de tu agenda, responde exactamente *"CONFIRMAR"* para cancelarla definitivamente o *"No"* para mantenerla._'
-      ];
-
-      const sentWarn = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
-      if (sentWarn?.key?.id) botSentMessageIds.add(sentWarn.key.id);
+      await handleCancelAppointment(sock, remoteJid, session, query);
       return;
     }
 
-    // 11b. Modificar cita (Nivel B: Confirmación simple)
+    // 11b. Modificar / Reagendar cita (Nivel A: Directo si es inequívoco)
     if (aiResult?.action === 'update_appointment') {
       const updateInfo = aiResult.appointmentInfo || {};
       updateInfo.appointmentQuery = updateInfo.appointmentQuery || aiResult.appointmentQuery || aiResult.clientName || '';
-      session.pendingAction = createProposedAction('B', 'update_appointment', { updateInfo });
+      await handleUpdateAppointment(sock, remoteJid, session, updateInfo);
+      return;
+    }
 
-      const query = updateInfo.appointmentQuery || updateInfo.clientName || 'la cita';
-      const dateParts = (updateInfo.date || '').split('-');
-      const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : (updateInfo.date || '');
-
-      const changeLines = [];
-      if (updateInfo.date) changeLines.push(`🗓️ *Nueva fecha:* ${formattedDate}`);
-      if (updateInfo.time) changeLines.push(`⏰ *Nueva hora:* ${updateInfo.time} h`);
-      if (updateInfo.clientAddress) changeLines.push(`📍 *Nueva dirección:* ${updateInfo.clientAddress}`);
-      if (updateInfo.notes) changeLines.push(`📝 *Nuevas notas:* ${updateInfo.notes}`);
-
-      const lines = [
-        `✏️ *MODIFICAR CITA — ${query.toUpperCase()}*`,
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        ...changeLines,
-        '',
-        '¿Confirmas estos cambios? Responde *"Sí"* para guardar o *"No"* para cancelar.'
-      ];
-
-      const sentProp = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
-      if (sentProp?.key?.id) botSentMessageIds.add(sentProp.key.id);
+    // 11c. Confirmar visitas realizadas / finalizadas (Revisión de fin de día o manual)
+    if (aiResult?.action === 'complete_appointments') {
+      await handleCompleteAppointments(sock, remoteJid, session, aiResult.completionInfo || {}, aiResult.rescheduleInfo || null);
       return;
     }
 
