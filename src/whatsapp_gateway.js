@@ -1440,22 +1440,22 @@ async function startWhatsAppGateway() {
     return lines.join('\n');
   }
 
-  function formatAppointmentsListForWhatsApp(appointments, title = '📅 *TUS PRÓXIMAS VISITAS TÉCNICAS:*') {
+  function formatAppointmentsListForWhatsApp(appointments, title = '📅 *TUS VISITAS TÉCNICAS AGENDADAS:*') {
     if (!appointments || appointments.length === 0) {
-      return '📅 *AGENDA VACÍA*\n\nNo tienes visitas técnicas programadas para este periodo.\n\n💡 _Para apuntar una cita di por ejemplo: "Apunta visita con Juan el jueves a las 11:00 en Calle Mayor 14 para ver la caldera"_.';
+      return '📅 *AGENDA VACÍA*\n\nNo tienes visitas técnicas en tu agenda.\n\n💡 _Para apuntar una cita di por ejemplo: "Apunta visita con Juan el jueves a las 11:00 en Calle Mayor 14 para ver la caldera"_.';
     }
 
     let text = `${title}\n━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
     appointments.forEach((app, idx) => {
       const dateParts = (app.date || '').split('-');
-      const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}` : app.date;
+      const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : app.date;
       const query = app.clientAddress ? `${app.clientAddress}` : app.clientName;
       const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
 
       text += `\n${idx + 1}️⃣ *${formattedDate} a las ${app.time} h* · ${app.clientName}\n`;
       if (app.clientPhone) text += `   📞 ${app.clientPhone}\n`;
       if (app.clientAddress) text += `   📍 ${app.clientAddress}\n`;
-      text += `   📝 ${app.notes}\n`;
+      if (app.notes) text += `   📝 ${app.notes}\n`;
       if (app.clientAddress) text += `   🗺️ ${mapsUrl}\n`;
     });
 
@@ -1480,15 +1480,14 @@ async function startWhatsAppGateway() {
     }
   }
 
-  async function handleListAppointments(sock, remoteJid, session, filter = 'upcoming') {
+  async function handleListAppointments(sock, remoteJid, session, filter = 'all') {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
       const appointments = listAppointments(cleanPhone, filter);
 
-      let title = '📅 *TUS PRÓXIMAS VISITAS TÉCNICAS:*';
+      let title = '📅 *TUS VISITAS TÉCNICAS AGENDADAS:*';
       if (filter === 'today') title = '📅 *TUS VISITAS TÉCNICAS DE HOY:*';
       else if (filter === 'tomorrow') title = '📅 *TUS VISITAS TÉCNICAS DE MAÑANA:*';
-      else if (filter === 'all') title = '📅 *TODAS LAS VISITAS REGISTRADAS:*';
 
       const text = formatAppointmentsListForWhatsApp(appointments, title);
       const sent = await sock.sendMessage(remoteJid, { text });
@@ -2419,7 +2418,10 @@ async function startWhatsAppGateway() {
 
     // 10. Listar citas (Nivel A: Automático)
     if (aiResult?.action === 'list_appointments') {
-      await handleListAppointments(sock, remoteJid, session, aiResult.appointmentFilter || 'upcoming');
+      const filter = (aiResult.appointmentFilter === 'today' || aiResult.appointmentFilter === 'tomorrow')
+        ? aiResult.appointmentFilter
+        : 'all';
+      await handleListAppointments(sock, remoteJid, session, filter);
       return;
     }
 
@@ -3410,16 +3412,16 @@ async function startWhatsAppGateway() {
         return;
       }
 
-      // Comando directo para consultar agenda: ej. "agenda", "mis citas", "visitas", "citas hoy", "citas mañana"
-      const isAgendaCmd = /^(?:agenda|mis citas|visitas|citas|mis visitas)(?:\s+(hoy|ma[ñn]ana|todas|pr[oó]ximas))?$/i.test(rawUserText)
-        || /^(?:citas hoy|visitas hoy|agenda hoy)$/i.test(rawUserText)
-        || /^(?:citas ma[ñn]ana|visitas ma[ñn]ana|agenda ma[ñn]ana)$/i.test(rawUserText);
+      // Comando directo para consultar agenda: ej. "agenda", "mis citas", "visitas", "cual es el estado de mis citas", etc.
+      const isAgendaCmd = /^(?:[¿?]?\s*(?:cu[aá]l\s+es\s+el\s+estado\s+de\s+(?:mis\s+)?citas|qu[eé]\s+(?:citas|visitas)\s+tengo(?:\s+agendadas)?|agenda|mis citas|visitas|citas|mis visitas|ver citas|ver agenda|mis citas agendadas|citas pendientes))[¿?]?$/i.test(rawUserText.trim())
+        || /^(?:agenda|mis citas|visitas|citas|mis visitas)(?:\s+(hoy|ma[ñn]ana|todas|pr[oó]ximas))?$/i.test(rawUserText.trim())
+        || /^(?:citas hoy|visitas hoy|agenda hoy)$/i.test(rawUserText.trim())
+        || /^(?:citas ma[ñn]ana|visitas ma[ñn]ana|agenda ma[ñn]ana)$/i.test(rawUserText.trim());
 
       if (isAgendaCmd) {
-        let filter = 'upcoming';
+        let filter = 'all';
         if (/hoy/i.test(rawUserText)) filter = 'today';
         else if (/ma[ñn]ana/i.test(rawUserText)) filter = 'tomorrow';
-        else if (/toda/i.test(rawUserText)) filter = 'all';
 
         await handleListAppointments(sock, remoteJid, session, filter);
         return;

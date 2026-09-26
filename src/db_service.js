@@ -302,6 +302,26 @@ db.exec(`
   );
 `);
 
+// Migración automática de datos creados accidentalmente bajo el LID de WhatsApp
+try {
+  const primaryAllowed = (process.env.ALLOWED_NUMBERS || '').split(',')[0]?.trim();
+  if (primaryAllowed && primaryAllowed.length >= 9) {
+    const oldLid = '82987509096647';
+    const oldComp = db.prepare('SELECT * FROM companies WHERE phone = ?').get(oldLid);
+    if (oldComp) {
+      db.prepare('DELETE FROM companies WHERE phone = ?').run(primaryAllowed);
+      db.prepare('UPDATE companies SET phone = ? WHERE phone = ?').run(primaryAllowed, oldLid);
+    }
+    db.prepare('UPDATE OR IGNORE budgets SET company_phone = ? WHERE company_phone = ?').run(primaryAllowed, oldLid);
+    db.prepare('UPDATE OR IGNORE invoices SET company_phone = ? WHERE company_phone = ?').run(primaryAllowed, oldLid);
+    db.prepare('UPDATE OR IGNORE appointments SET company_phone = ? WHERE company_phone = ?').run(primaryAllowed, oldLid);
+    db.prepare('UPDATE OR IGNORE shopping_items SET company_phone = ? WHERE company_phone = ?').run(primaryAllowed, oldLid);
+    db.prepare('UPDATE OR IGNORE payments SET company_phone = ? WHERE company_phone = ?').run(primaryAllowed, oldLid);
+  }
+} catch (e) {
+  // Ignorar errores en migración de LID
+}
+
 export const DEFAULT_COMPANY = {
   name: null,
   fiscalName: null,
@@ -1034,7 +1054,7 @@ export function getAppointment(id) {
   };
 }
 
-export function listAppointments(phone, filter = 'upcoming') {
+export function listAppointments(phone, filter = 'all') {
   const cleanPhone = String(phone).replace(/\D/g, '');
   const now = new Date();
   const todayStr = now.toISOString().split('T')[0];
@@ -1045,18 +1065,15 @@ export function listAppointments(phone, filter = 'upcoming') {
 
   let rows = [];
   if (filter === 'today') {
-    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date = ? AND status != 'CANCELADA' ORDER BY time ASC");
+    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date = ? ORDER BY time ASC");
     rows = stmt.all(cleanPhone, todayStr);
   } else if (filter === 'tomorrow') {
-    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date = ? AND status != 'CANCELADA' ORDER BY time ASC");
+    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date = ? ORDER BY time ASC");
     rows = stmt.all(cleanPhone, tomorrowStr);
-  } else if (filter === 'all') {
-    const stmt = db.prepare('SELECT * FROM appointments WHERE company_phone = ? ORDER BY date DESC, time DESC');
-    rows = stmt.all(cleanPhone);
   } else {
-    // 'upcoming': desde hoy en adelante no canceladas
-    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date >= ? AND status != 'CANCELADA' ORDER BY date ASC, time ASC");
-    rows = stmt.all(cleanPhone, todayStr);
+    // Por defecto devuelve ABSOLUTAMENTE TODAS las citas registradas de la empresa
+    const stmt = db.prepare('SELECT * FROM appointments WHERE company_phone = ? ORDER BY date ASC, time ASC');
+    rows = stmt.all(cleanPhone);
   }
 
   return rows.map(r => ({
@@ -1068,7 +1085,6 @@ export function listAppointments(phone, filter = 'upcoming') {
     date: r.date,
     time: r.time,
     notes: r.notes,
-    status: r.status,
     createdAt: r.created_at,
     updatedAt: r.updated_at
   }));
@@ -1097,7 +1113,6 @@ export function updateAppointment(phone, query, changes = {}) {
   const findStmt = db.prepare(`
     SELECT * FROM appointments
     WHERE company_phone = ?
-      AND status != 'CANCELADA'
       AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ?)
     ORDER BY date ASC, time ASC
     LIMIT 1
@@ -1130,8 +1145,7 @@ export function updateAppointment(phone, query, changes = {}) {
     clientAddress: newAddress,
     date: newDate,
     time: newTime,
-    notes: newNotes,
-    status: row.status
+    notes: newNotes
   };
 }
 
@@ -1143,7 +1157,6 @@ export function cancelAppointment(phone, query) {
   const stmt = db.prepare(`
     SELECT * FROM appointments
     WHERE company_phone = ?
-      AND status != 'CANCELADA'
       AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ?)
     ORDER BY date ASC, time ASC
     LIMIT 1
@@ -1152,7 +1165,7 @@ export function cancelAppointment(phone, query) {
   const row = stmt.get(cleanPhone, q, q, q);
   if (!row) return null;
 
-  updateAppointmentStatus(row.id, 'CANCELADA');
+  db.prepare('DELETE FROM appointments WHERE id = ?').run(row.id);
   return {
     id: row.id,
     companyPhone: row.company_phone,
@@ -1161,8 +1174,7 @@ export function cancelAppointment(phone, query) {
     clientAddress: row.client_address,
     date: row.date,
     time: row.time,
-    notes: row.notes,
-    status: 'CANCELADA'
+    notes: row.notes
   };
 }
 
@@ -1288,7 +1300,6 @@ export function listAppointmentsWeek(phone) {
     WHERE company_phone = ?
       AND date >= ?
       AND date <= ?
-      AND status != 'CANCELADA'
     ORDER BY date ASC, time ASC
   `).all(cleanPhone, todayStr, weekEndStr);
 
@@ -1299,8 +1310,7 @@ export function listAppointmentsWeek(phone) {
     clientAddress: r.client_address,
     date:          r.date,
     time:          r.time,
-    notes:         r.notes,
-    status:        r.status
+    notes:         r.notes
   }));
 }
 
@@ -1337,7 +1347,7 @@ export function getDashboard(phone) {
   // 2. Citas de hoy
   const todayAppointments = db.prepare(`
     SELECT client_name, client_address, time FROM appointments
-    WHERE company_phone = ? AND date = ? AND status != 'CANCELADA'
+    WHERE company_phone = ? AND date = ?
     ORDER BY time ASC
   `).all(cleanPhone, todayStr).map(r => ({
     clientName:    r.client_name,

@@ -90,8 +90,8 @@ Tu función es:
        pon 'action: "schedule_appointment"' y rellena 'appointmentInfo': { "clientName": "...", "clientPhone": "...", "clientAddress": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "notes": "..." }.
      * Si menciona VARIAS CITAS en el mismo mensaje (ej: "apunta visita con Juan el jueves a las 11 y con María el viernes a las 16 en otra dirección"):
        pon 'action: "schedule_appointment"' y rellena 'appointmentsList' (array con TODOS los objetos de citas), dejando 'appointmentInfo' con el primer elemento. Resuelve fechas relativas a partir de la fecha del contexto.
-   - CONSULTAR AGENDA / CITAS: Si el profesional pregunta por sus visitas o agenda (ej: "¿qué citas tengo hoy?", "agenda de mañana", "mis visitas", "ver agenda", "¿tengo visitas esta semana?"):
-     pon 'action: "list_appointments"' y rellena 'appointmentFilter': "today" | "tomorrow" | "upcoming" | "all".
+   - CONSULTAR AGENDA / CITAS: Si el profesional pregunta por sus visitas, citas o agenda (ej: "¿qué citas tengo?", "¿cuál es el estado de mis citas?", "¿qué visitas tengo agendadas?", "¿qué citas tengo hoy?", "agenda de mañana", "mis visitas", "ver agenda"):
+     pon 'action: "list_appointments"' y rellena 'appointmentFilter': "today" | "tomorrow" | "all" (por defecto "all" salvo que especifique explícitamente hoy o mañana).
    - MODIFICAR / CAMBIAR / MOVER CITA: Si el profesional pide cambiar, modificar, mover, adelantar o atrasar una cita existente (ej: "mueve la cita de Juan al martes", "cambia la hora de la visita de María a las 10", "adelanta la cita de Carlos al jueves a las 9"):
      pon 'action: "update_appointment"' y rellena 'appointmentInfo': { "appointmentQuery": "nombre o referencia de la cita a modificar", "date": "YYYY-MM-DD o null si no cambia", "time": "HH:MM o null si no cambia", "clientAddress": "nueva dirección o null", "notes": "nuevas notas o null" }.
    - CANCELAR CITA / VISITA: Si el profesional pide anular o cancelar una cita (ej: "cancela la cita con Juan", "anula la visita de las 11", "borra la cita con María"):
@@ -200,7 +200,7 @@ FORMATO DE RESPUESTA (JSON estricto):
       "notes": "Motivo o trabajos a valorar"
     }
   ],
-  "appointmentFilter": "upcoming", // "today" | "tomorrow" | "upcoming" | "all"
+  "appointmentFilter": "all", // "today" | "tomorrow" | "all"
   "appointmentQuery": null,
   "quarter": null, // 1 | 2 | 3 | 4 | null
   "year": null, // 2026 o null

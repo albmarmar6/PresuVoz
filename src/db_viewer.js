@@ -337,7 +337,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
         let html = '<div class="overflow-x-auto rounded-xl border border-slate-800"><table class="w-full text-left text-xs">';
         html += '<thead class="bg-slate-950 text-slate-400 font-mono uppercase text-[11px] border-b border-slate-800"><tr>';
-        html += '<th class="p-3.5">ID Cita</th><th class="p-3.5">Fecha y Hora</th><th class="p-3.5">Cliente</th><th class="p-3.5">Dirección / Visita</th><th class="p-3.5">Motivo / Trabajos</th><th class="p-3.5">Estado</th>';
+        html += '<th class="p-3.5">ID Cita</th><th class="p-3.5">Fecha y Hora</th><th class="p-3.5">Cliente</th><th class="p-3.5">Dirección / Visita</th><th class="p-3.5">Motivo / Trabajos</th>';
         html += '</tr></thead><tbody class="divide-y divide-slate-800 bg-slate-900/60">';
 
         items.forEach(a => {
@@ -347,7 +347,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
           html += '<td class="p-3.5 font-semibold text-white">' + a.client_name + (a.client_phone ? '<div class="text-[11px] text-slate-400 font-mono">📞 ' + a.client_phone + '</div>' : '') + '</td>';
           html += '<td class="p-3.5 text-slate-300">' + (a.client_address || 'Por concretar') + '</td>';
           html += '<td class="p-3.5 text-slate-300">' + (a.notes || '-') + '</td>';
-          html += '<td class="p-3.5">' + renderBadge(a.status) + '</td>';
           html += '</tr>';
         });
 

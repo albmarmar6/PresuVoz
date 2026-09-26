@@ -116,7 +116,7 @@ for (const a of appointments) {
   try {
     db.prepare(`
       INSERT OR IGNORE INTO appointments (id, company_phone, client_name, client_phone, client_address, date, time, notes, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDIENTE', ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
     `).run(a.id, PHONE, a.client_name, a.client_phone, a.client_address, a.date, a.time, a.notes, now, now);
     console.log(`  📅 Cita: ${a.id} — ${a.client_name} (${a.date} ${a.time})`);
   } catch(e) {
