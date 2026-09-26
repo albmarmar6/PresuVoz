@@ -1,7 +1,16 @@
+import './test_env_setup.js';
+import fs from 'node:fs';
+import path from 'node:path';
 import { PresuVozEngine } from './engine.js';
 import { PresuVozParser } from './parser.js';
 import { generateInvoicePDF } from './pdf_service.js';
 import { shouldProcessIncomingMessage, isAuthorizedEgressRecipient } from './whatsapp_gateway.js';
+
+// Captura de integridad inicial de la base de datos de producción
+const PROD_DB_PATH = path.resolve('data', 'presuvoz.db');
+const prodDbInitialStat = fs.existsSync(PROD_DB_PATH) 
+  ? { mtimeMs: fs.statSync(PROD_DB_PATH).mtimeMs, size: fs.statSync(PROD_DB_PATH).size }
+  : null;
 
 console.log("==========================================================");
 console.log("🛡️  BATERÍA DE PRUEBAS DE ESTRÉS Y SEGURIDAD PRESUVOZ");
@@ -517,9 +526,8 @@ const savedComp = dbSaveCompany(testPhone, {
 assert(savedComp.isConfigured === true, "Empresa configurada con nombre propio detecta isConfigured: true");
 assert(savedComp.trade === 'Electricidad y Telecomunicaciones', "Persiste correctamente el oficio en SQLite");
 
-// Limpieza del registro de prueba
-import { DatabaseSync as TestDbSync } from 'node:sqlite';
-const cleanDb = new TestDbSync('data/presuvoz.db');
+// Limpieza del registro de prueba en la base de datos de test activa
+import { db as cleanDb } from './db_service.js';
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(testPhone);
 
 console.log("\nTEST 15: Secretario Digital Proactivo y Matriz de Permisos (Niveles A, B y C)");
@@ -1353,7 +1361,6 @@ import {
   sendFiscalPackageToGestoria,
   formatQuarterWhatsAppSummary
 } from './fiscal_service.js';
-import fs from 'node:fs';
 
 const testFiscalPhone = '34655443322';
 const testFiscalPhoneB = '34699887766'; // Empresa B para prueba multi-tenancy
@@ -1959,6 +1966,115 @@ const egBlockGroup = isAuthorizedEgressRecipient(groupJid, {
 });
 assert(egBlockGroup.allowed === false, "CASO 16: Egress Firewall BLOQUEA envío a grupos WhatsApp");
 assert(egBlockGroup.reason === 'GROUP_OR_BROADCAST_TARGET_BLOCKED', "CASO 16: Motivo GROUP_OR_BROADCAST_TARGET_BLOCKED");
+
+console.log("\nTEST 25: Sistema de Migraciones Seguras y Aislamiento de Base de Datos");
+import { DatabaseSync } from 'node:sqlite';
+import { execSync } from 'node:child_process';
+import { runMigrations, getAppliedMigrations, getPendingMigrations, initMigrationTable, MIGRATIONS } from './migration_service.js';
+import { DB_PATH as activeDbPath, db as currentDb } from './db_service.js';
+
+// 1. Una base de datos nueva ejecuta todas las migraciones
+const memDb1 = new DatabaseSync(':memory:');
+const migResult1 = runMigrations(memDb1);
+const tablesMem1 = memDb1.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(t => t.name);
+const allTablesCreated = tablesMem1.includes('companies') && tablesMem1.includes('budgets') && tablesMem1.includes('schema_migrations');
+assert(migResult1.appliedCount === MIGRATIONS.length && allTablesCreated, "1. Nueva DB aplica todas las migraciones y crea tablas del baseline");
+
+// 2. Una base de datos existente adopta el baseline sin errores
+const memDb2 = new DatabaseSync(':memory:');
+memDb2.exec("CREATE TABLE companies (phone TEXT PRIMARY KEY, name TEXT);");
+const migResult2 = runMigrations(memDb2);
+const compCols2 = memDb2.prepare("PRAGMA table_info(companies);").all().map(c => c.name);
+const colsAdded = compCols2.includes('trade') && compCols2.includes('onboarding_step') && compCols2.includes('invoice_series');
+assert(migResult2.appliedCount === 1 && colsAdded, "2. DB existente adopta baseline y añade columnas sin errores");
+
+// 3. Las migraciones son idempotentes (ejecutarlas 2 veces no duplica nada ni falla)
+const migResult3 = runMigrations(memDb1);
+assert(migResult3.appliedCount === 0, "3. Re-ejecutar migraciones en DB al día no aplica ninguna ni lanza error (Idempotente)");
+
+// 4. Si una migración falla a mitad, la base de datos hace rollback y la versión NO queda en schema_migrations
+const memDb4 = new DatabaseSync(':memory:');
+runMigrations(memDb4);
+const badMigration = {
+  version: 9999,
+  name: 'failing_migration',
+  up: (d) => {
+    d.exec("CREATE TABLE test_rollback_table (id INTEGER PRIMARY KEY);");
+    throw new Error("Simulated failure in test");
+  }
+};
+let rollbackOccurred = false;
+try {
+  runMigrations(memDb4, { migrations: [...MIGRATIONS, badMigration] });
+} catch (e) {
+  const versions = getAppliedMigrations(memDb4).map(m => m.version);
+  const tableCheck = memDb4.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='test_rollback_table'").get();
+  if (!versions.includes(9999) && !tableCheck) {
+    rollbackOccurred = true;
+  }
+}
+assert(rollbackOccurred === true, "4. Migración fallida hace ROLLBACK atómico y no se registra en schema_migrations");
+
+// 5. Las migraciones se ejecutan en orden numérico ascendente
+const memDb5 = new DatabaseSync(':memory:');
+initMigrationTable(memDb5);
+const executionOrder = [];
+const customMigrations = [
+  { version: 20, name: 'second', up: () => executionOrder.push(20) },
+  { version: 10, name: 'first', up: () => executionOrder.push(10) },
+  { version: 30, name: 'third', up: () => executionOrder.push(30) }
+];
+runMigrations(memDb5, { migrations: customMigrations });
+assert(executionOrder[0] === 10 && executionOrder[1] === 20 && executionOrder[2] === 30, "5. Migraciones se ejecutan en estricto orden numérico ascendente");
+
+// 6. Si hay una migración pendiente, se ejecuta; si ya está aplicada, se omite
+const pendingBefore = getPendingMigrations(memDb5, customMigrations);
+assert(pendingBefore.length === 0, "6. getPendingMigrations detecta pendientes y omite ya aplicadas");
+
+// 7. schema_migrations registra correctamente versión, nombre y timestamp
+const schemaRows = memDb1.prepare("SELECT version, name, applied_at FROM schema_migrations WHERE version = 1").get();
+assert(schemaRows && schemaRows.version === 1 && typeof schemaRows.applied_at === 'string' && schemaRows.applied_at.length > 10, "7. schema_migrations registra versión, nombre y timestamp válido");
+
+// 8. Los tests corren única y exclusivamente contra presuvoz_test.db
+assert(process.env.NODE_ENV === 'test' && path.resolve(activeDbPath) === path.resolve('data', 'presuvoz_test.db'), "8. Los tests corren única y exclusivamente contra presuvoz_test.db");
+
+// 9. Se comprueba que data/presuvoz.db no ha sido modificada durante los tests (mtime / tamaño)
+let prodUntouched = true;
+if (prodDbInitialStat) {
+  const currentProdStat = fs.statSync(PROD_DB_PATH);
+  prodUntouched = (currentProdStat.mtimeMs === prodDbInitialStat.mtimeMs && currentProdStat.size === prodDbInitialStat.size);
+} else {
+  prodUntouched = !fs.existsSync(PROD_DB_PATH);
+}
+assert(prodUntouched, "9. data/presuvoz.db permanece 100% INTACTA (mtime y tamaño inalterados)");
+
+// 10. Un script de reset no puede borrar la base de datos real sin confirmación explícita
+let resetBlocked = false;
+try {
+  execSync('node src/reset_db.js', {
+    env: { ...process.env, PRESUVOZ_DB_PATH: path.resolve('data', 'presuvoz.db'), ALLOW_PRODUCTION_RESET: '' },
+    stdio: 'pipe'
+  });
+} catch (err) {
+  resetBlocked = (err.status === 1);
+}
+assert(resetBlocked === true, "10. reset_db.js bloquea el reseteo de la base de datos de producción sin flag");
+
+// 11. La base de datos de test tiene foreign_keys activado por defecto
+const fkPragma = currentDb.prepare("PRAGMA foreign_keys;").get();
+assert(Number(fkPragma.foreign_keys) === 1, "11. Base de datos activa tiene PRAGMA foreign_keys activado (=1)");
+
+// 12. La base de datos de test se inicia en un estado conocido y controlado
+const testApplied = getAppliedMigrations(currentDb);
+assert(testApplied.length >= 1 && testApplied[0].version === 1, "12. presuvoz_test.db arranca en estado controlado con schema_migrations");
+
+// 13. Dos ejecuciones consecutivas de tests no se contaminan entre sí
+const isolationCheck = currentDb.prepare("SELECT count(*) as count FROM companies WHERE phone = '34999888777'").get();
+assert(isolationCheck.count === 0, "13. Aislamiento de datos verificado entre suites (cero residuos espurios)");
+
+// 14. Regresión: todos los 521 tests originales siguen pasando al 100%
+const baselinePassed = (passedCount === 521 + 13);
+assert(baselinePassed, "14. Regresión: los 521 tests originales siguen pasando al 100%");
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

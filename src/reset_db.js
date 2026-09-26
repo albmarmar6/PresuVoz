@@ -2,8 +2,25 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const DB_PATH = path.resolve('data', 'presuvoz.db');
+const targetDbPath = process.env.PRESUVOZ_DB_PATH 
+  || (process.env.NODE_ENV === 'test' ? path.resolve('data', 'presuvoz_test.db') : path.resolve('data', 'presuvoz.db'));
+
+const DB_PATH = path.resolve(targetDbPath);
+const PROD_DB_PATH = path.resolve('data', 'presuvoz.db');
 const BACKUP_DIR = path.resolve('data', 'backups');
+
+const isRealDb = (DB_PATH === PROD_DB_PATH);
+const forceReal = process.argv.includes('--force-real-db') || process.env.ALLOW_PRODUCTION_RESET === 'true';
+
+if (isRealDb && !forceReal) {
+  console.error('\n🛑 [BARRERA DE SEGURIDAD] Operación bloqueada.');
+  console.error('Has intentado resetear la base de datos principal de producción (data/presuvoz.db).');
+  console.error('Para resetear la base de datos de prueba ejecuta:');
+  console.error('  NODE_ENV=test node src/reset_db.js');
+  console.error('O para forzar el reset de producción especifica el flag:');
+  console.error('  node src/reset_db.js --force-real-db\n');
+  process.exit(1);
+}
 
 if (!fs.existsSync(DB_PATH)) {
   console.log('No existe la base de datos en', DB_PATH);

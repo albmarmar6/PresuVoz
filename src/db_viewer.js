@@ -4,7 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { syncPendingSignaturesFromCloud } from './db_service.js';
 
-const DB_PATH = path.resolve('data', 'presuvoz.db');
+const DB_PATH = process.env.PRESUVOZ_DB_PATH || path.resolve('data', 'presuvoz.db');
 const PORT = process.env.DB_VIEWER_PORT || 3333;
 
 function getDbData() {
