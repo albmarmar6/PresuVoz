@@ -102,39 +102,3 @@ export function runMigrations(db, options = {}) {
   };
 }
 
-/**
- * Revierte la última migración aplicada si tiene soporte de `down`.
- * @param {import('node:sqlite').DatabaseSync} db
- * @param {object} [options]
- * @param {Array} [options.migrations]
- * @returns {{ revertedVersion: number, name: string } | null}
- */
-export function rollbackLastMigration(db, options = {}) {
-  initMigrationTable(db);
-  const migrationList = options.migrations || MIGRATIONS;
-  const applied = getAppliedMigrations(db);
-  if (applied.length === 0) return null;
-
-  const lastApplied = applied[applied.length - 1];
-  const migrationDef = migrationList.find(m => m.version === lastApplied.version);
-
-  if (!migrationDef || typeof migrationDef.down !== 'function') {
-    throw new Error(`La migración ${lastApplied.version} (${lastApplied.name}) no implementa método down para reversión.`);
-  }
-
-  db.exec('BEGIN;');
-  try {
-    migrationDef.down(db);
-    db.prepare('DELETE FROM schema_migrations WHERE version = ?').run(lastApplied.version);
-    db.exec('COMMIT;');
-    console.log(`↩️ [Migración ${lastApplied.version}] '${lastApplied.name}' revertida con éxito.`);
-    return {
-      revertedVersion: lastApplied.version,
-      name: lastApplied.name
-    };
-  } catch (err) {
-    try { db.exec('ROLLBACK;'); } catch (rbErr) {}
-    console.error(`❌ Error al revertir migración ${lastApplied.version}:`, err.message);
-    throw err;
-  }
-}

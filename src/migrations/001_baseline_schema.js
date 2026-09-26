@@ -343,17 +343,6 @@ export const migration = {
       CREATE INDEX IF NOT EXISTS idx_purchase_inv_period ON purchase_invoices(business_id, fiscal_period);
       CREATE INDEX IF NOT EXISTS idx_purchase_inv_date ON purchase_invoices(business_id, invoice_date);
     `);
-  },
-
-  down: (db) => {
-    // Reversión del esquema completo en caso de rollback
-    const tables = [
-      'audit_logs', 'fiscal_incidents', 'fiscal_periods', 'investment_assets',
-      'expense_payments', 'purchase_invoices', 'business_tax_profiles', 'messages',
-      'shopping_items', 'appointments', 'payments', 'invoices', 'budgets', 'companies'
-    ];
-    for (const t of tables) {
-      db.exec(`DROP TABLE IF EXISTS "${t}";`);
-    }
   }
 };
+

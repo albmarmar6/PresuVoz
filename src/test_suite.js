@@ -1979,6 +1979,7 @@ assert(egBlockGroup.reason === 'GROUP_OR_BROADCAST_TARGET_BLOCKED', "CASO 16: Mo
 console.log("\nTEST 25: Sistema de Migraciones Seguras y Aislamiento de Base de Datos");
 import { DatabaseSync } from 'node:sqlite';
 import { execSync } from 'node:child_process';
+import * as migrationService from './migration_service.js';
 import { runMigrations, getAppliedMigrations, getPendingMigrations, initMigrationTable, MIGRATIONS } from './migration_service.js';
 import { DB_PATH as activeDbPath, db as currentDb } from './db_service.js';
 
@@ -2091,6 +2092,29 @@ assert(isolationCheck.count === 0, "13. Aislamiento de datos verificado entre su
 // 14. Regresión: todos los 521 tests originales siguen pasando al 100%
 const baselinePassed = (passedCount === 521 + 13);
 assert(baselinePassed, "14. Regresión: los 521 tests originales siguen pasando al 100%");
+
+// 15. rollbackLastMigration ya no existe en el servicio (Blindaje Forward-Only)
+assert(typeof migrationService.rollbackLastMigration === 'undefined', "15. rollbackLastMigration no existe ni es accesible en migration_service (Forward-Only)");
+
+// 16. Ninguna migración aplicada tiene soporte de reversión destructiva (método down eliminado)
+const hasDownMethod = MIGRATIONS.some(m => typeof m.down === 'function');
+assert(hasDownMethod === false, "16. Las definiciones de migraciones carecen de métodos down() (cero DDL inverso)");
+
+// 17. El sistema ejecuta correctamente nuevas migraciones pendientes hacia adelante
+const memDbForward = new DatabaseSync(':memory:');
+runMigrations(memDbForward);
+const newForwardMigration = { 
+  version: 2, 
+  name: '002_forward_only_verification', 
+  up: (d) => { d.exec('CREATE TABLE forward_verify_test (id INTEGER PRIMARY KEY);'); } 
+};
+const fwdResult = runMigrations(memDbForward, { migrations: [...MIGRATIONS, newForwardMigration] });
+assert(fwdResult.appliedCount === 1 && fwdResult.appliedVersions.includes(2), "17. El sistema ejecuta correctamente migraciones pendientes hacia adelante de forma secuencial");
+
+// 18. Transaccionalidad garantizada y schema_migrations permanece consistente
+const fwdVersions = getAppliedMigrations(memDbForward).map(m => m.version);
+const tableExistsFwd = memDbForward.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='forward_verify_test'").get();
+assert(fwdVersions.length === 2 && fwdVersions[0] === 1 && fwdVersions[1] === 2 && Boolean(tableExistsFwd), "18. schema_migrations permanece consistente, ordenado e inmutable tras evolución");
 
 console.log("==========================================================");
 if (passedCount === totalCount) {
