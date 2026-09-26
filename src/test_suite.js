@@ -1,16 +1,25 @@
 import './test_env_setup.js';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { PresuVozEngine } from './engine.js';
 import { PresuVozParser } from './parser.js';
 import { generateInvoicePDF } from './pdf_service.js';
 import { shouldProcessIncomingMessage, isAuthorizedEgressRecipient } from './whatsapp_gateway.js';
+
+export function computeFileSha256(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
 
 // Captura de integridad inicial de la base de datos de producción
 const PROD_DB_PATH = path.resolve('data', 'presuvoz.db');
 const prodDbInitialStat = fs.existsSync(PROD_DB_PATH) 
   ? { mtimeMs: fs.statSync(PROD_DB_PATH).mtimeMs, size: fs.statSync(PROD_DB_PATH).size }
   : null;
+const prodDbInitialSha256 = computeFileSha256(PROD_DB_PATH);
+const TEST_DB_PATH = path.resolve('data', 'presuvoz_test.db');
+const testDbInitialSha256 = computeFileSha256(TEST_DB_PATH);
 
 console.log("==========================================================");
 console.log("🛡️  BATERÍA DE PRUEBAS DE ESTRÉS Y SEGURIDAD PRESUVOZ");
@@ -2036,17 +2045,24 @@ const schemaRows = memDb1.prepare("SELECT version, name, applied_at FROM schema_
 assert(schemaRows && schemaRows.version === 1 && typeof schemaRows.applied_at === 'string' && schemaRows.applied_at.length > 10, "7. schema_migrations registra versión, nombre y timestamp válido");
 
 // 8. Los tests corren única y exclusivamente contra presuvoz_test.db
-assert(process.env.NODE_ENV === 'test' && path.resolve(activeDbPath) === path.resolve('data', 'presuvoz_test.db'), "8. Los tests corren única y exclusivamente contra presuvoz_test.db");
+const currentTestDbSha256 = computeFileSha256(TEST_DB_PATH);
+const testDbActive = (process.env.NODE_ENV === 'test')
+  && (path.resolve(activeDbPath) === path.resolve('data', 'presuvoz_test.db'))
+  && fs.existsSync(TEST_DB_PATH);
+assert(testDbActive, `8. Los tests corren única y exclusivamente contra presuvoz_test.db (SHA-256 test: ${currentTestDbSha256?.slice(0, 16)}...)`);
 
-// 9. Se comprueba que data/presuvoz.db no ha sido modificada durante los tests (mtime / tamaño)
+// 9. Integridad Criptográfica de data/presuvoz.db (SHA-256 + mtime + size)
 let prodUntouched = true;
-if (prodDbInitialStat) {
+let prodShaMatch = true;
+const currentProdSha256 = computeFileSha256(PROD_DB_PATH);
+if (prodDbInitialStat && prodDbInitialSha256) {
   const currentProdStat = fs.statSync(PROD_DB_PATH);
   prodUntouched = (currentProdStat.mtimeMs === prodDbInitialStat.mtimeMs && currentProdStat.size === prodDbInitialStat.size);
+  prodShaMatch = (currentProdSha256 === prodDbInitialSha256);
 } else {
   prodUntouched = !fs.existsSync(PROD_DB_PATH);
 }
-assert(prodUntouched, "9. data/presuvoz.db permanece 100% INTACTA (mtime y tamaño inalterados)");
+assert(prodUntouched && prodShaMatch, `9. data/presuvoz.db permanece 100% CRIPTOGRÁFICAMENTE INTACTA (SHA-256 idéntico: ${prodDbInitialSha256})`);
 
 // 10. Un script de reset no puede borrar la base de datos real sin confirmación explícita
 let resetBlocked = false;
