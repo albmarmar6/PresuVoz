@@ -2386,57 +2386,33 @@ async function startWhatsAppGateway() {
       return;
     }
 
-    // 9. Agendar cita (Nivel B: Confirmación simple)
+    // 9. Agendar cita (Nivel A: Automático — el empresario ya lo tiene decidido)
     if (aiResult?.action === 'schedule_appointment') {
       const appsList = (aiResult.appointmentsList && aiResult.appointmentsList.length > 0)
         ? aiResult.appointmentsList
         : [aiResult.appointmentInfo || {}];
 
       if (appsList.length > 1) {
-        // ── PROPUESTA CONJUNTA para múltiples citas ──────────────────────────
-        session.pendingAction = createProposedAction('B', 'schedule_multiple_appointments', { appointmentsList: appsList });
-
-        const lines = [
-          `📅 *PROPUESTA DE ${appsList.length} VISITAS TÉCNICAS (Nivel B)*`,
+        // ── MÚLTIPLES CITAS: guardar todas de golpe y confirmar en bloque ────
+        for (const appInfo of appsList) {
+          await handleScheduleAppointment(sock, remoteJid, session, appInfo);
+        }
+        const summaryLines = [
+          `✅ *${appsList.length} VISITAS AGENDADAS*`,
           '━━━━━━━━━━━━━━━━━━━━━━━━━'
         ];
         appsList.forEach((app, idx) => {
           const dp = (app.date || '').split('-');
           const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}/${dp[0]}` : (app.date || 'Por concretar');
-          lines.push(`\n*Cita ${idx + 1}:* ${app.clientName || 'Cliente Particular'}`);
-          if (app.clientPhone) lines.push(`📞 ${app.clientPhone}`);
-          lines.push(`📍 ${app.clientAddress || 'Por concretar'}`);
-          lines.push(`🗓️ ${fd} · ⏰ ${app.time || '10:00'} h`);
-          if (app.notes) lines.push(`📝 ${app.notes}`);
+          summaryLines.push(`${idx + 1}. *${app.clientName || 'Cliente'}* · ${fd} · ${app.time || '10:00'} h`);
         });
-        lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
-        lines.push(`¿Las agendo todas? Responde *"Sí"* para confirmar las ${appsList.length} visitas o *"No"* para descartar.`);
-
-        const sentProp = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
-        if (sentProp?.key?.id) botSentMessageIds.add(sentProp.key.id);
+        summaryLines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+        summaryLines.push('Escribe *"agenda"* para verlas todas.');
+        const sentSum = await sock.sendMessage(remoteJid, { text: summaryLines.join('\n') });
+        if (sentSum?.key?.id) botSentMessageIds.add(sentSum.key.id);
       } else {
-        // ── PROPUESTA INDIVIDUAL (comportamiento original) ───────────────────
-        const appInfo = appsList[0];
-        session.pendingAction = createProposedAction('B', 'schedule_appointment', { appointmentInfo: appInfo });
-
-        const dateParts = (appInfo.date || '').split('-');
-        const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : appInfo.date;
-
-        const lines = [
-          '📅 *PROPUESTA DE VISITA TÉCNICA (Nivel B)*',
-          '━━━━━━━━━━━━━━━━━━━━━━━━━',
-          `👤 *Cliente:* ${appInfo.clientName || 'Cliente Particular'}`,
-          appInfo.clientPhone ? `📞 *Teléfono:* ${appInfo.clientPhone}` : null,
-          `📍 *Dirección:* ${appInfo.clientAddress || 'Por concretar'}`,
-          `🗓️ *Fecha:* ${formattedDate}`,
-          `⏰ *Hora:* ${appInfo.time || '10:00'} h`,
-          `📝 *Motivo:* ${appInfo.notes || 'Visita técnica y toma de medidas'}`,
-          '━━━━━━━━━━━━━━━━━━━━━━━━━',
-          '¿Quieres que la guarde en tu agenda? Responde *"Sí"* para confirmar o *"No"* para descartar.'
-        ].filter(Boolean);
-
-        const sentProp = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
-        if (sentProp?.key?.id) botSentMessageIds.add(sentProp.key.id);
+        // ── CITA INDIVIDUAL: guardar y confirmar directamente ────────────────
+        await handleScheduleAppointment(sock, remoteJid, session, appsList[0]);
       }
       return;
     }
@@ -3779,10 +3755,16 @@ async function startWhatsAppGateway() {
         continue;
       }
 
-      const senderNumber = remoteJid.replace(/\D/g, '');
+      const senderNumberRaw = remoteJid.replace(/\D/g, '');
       const isFromMe = msg.key.fromMe;
       const myNumber = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].replace(/\D/g, '');
       const myLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].replace(/\D/g, '');
+
+      // Si el mensaje es "fromMe" (usuario hablándose a sí mismo), el remoteJid puede ser un
+      // LID de dispositivo (ej: 82987509096647@lid) en lugar del número real. Usamos myNumber.
+      const senderNumber = (isFromMe && myNumber && myNumber.length >= 9 && myNumber.length <= 15)
+        ? myNumber
+        : senderNumberRaw;
 
       const logMsg = `[${new Date().toLocaleTimeString()}] 📩 Mensaje detectado [jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]\n`;
       try { (await import('fs')).appendFileSync('gateway.log', logMsg); } catch(e) {}
