@@ -233,16 +233,62 @@ export function saveCompany(phone, data = {}) {
   return getCompany(cleanPhone);
 }
 
-// ─── Métodos de Presupuestos ──────────────────────────────────────────────────
+// ─── Métodos de Presupuestos (Tenant-Scoped por company_id) ──────────────────
 
-export function saveBudget(phone, budget) {
-  if (!budget || !budget.id) return;
-  const cleanPhone = String(phone).replace(/\D/g, '');
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuid(val) {
+  return typeof val === 'string' && UUID_REGEX.test(val);
+}
+
+/**
+ * Resuelve el tenant canónico (companyId y phone) a partir de:
+ * - un authenticatedContext ({ companyId, company: { phone } })
+ * - un companyId (UUID)
+ * - un teléfono legacy (resuelve contra companies para obtener su company_id canónico)
+ */
+export function resolveCompanyTenant(companyContextOrIdOrPhone) {
+  if (!companyContextOrIdOrPhone) return null;
+
+  // Si es un authenticatedContext
+  if (typeof companyContextOrIdOrPhone === 'object') {
+    const companyId = companyContextOrIdOrPhone.companyId || companyContextOrIdOrPhone.id || null;
+    const phone = companyContextOrIdOrPhone.company?.phone || companyContextOrIdOrPhone.phone || '';
+    const cleanPhone = String(phone).replace(/\D/g, '');
+    return { companyId, phone: cleanPhone };
+  }
+
+  const str = String(companyContextOrIdOrPhone).trim();
+
+  // Si es un UUID
+  if (isUuid(str)) {
+    const comp = getCompanyById(str);
+    return { companyId: str, phone: comp ? String(comp.phone).replace(/\D/g, '') : '' };
+  }
+
+  // Si es un teléfono plano (modo legacy)
+  const cleanPhone = str.replace(/\D/g, '');
+  const comp = getCompany(cleanPhone);
+  return { companyId: comp?.id || comp?.companyId || null, phone: cleanPhone };
+}
+
+export function saveBudget(companyContextOrIdOrPhone, budget) {
+  if (!budget || !budget.id) return null;
+  if (!companyContextOrIdOrPhone) {
+    throw new Error("❌ [Tenant Boundary] saveBudget requiere un companyId o contexto autenticado obligatorio.");
+  }
+
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId || null;
+  const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
+
   const now = new Date().toISOString();
   const total = budget.financials?.totalAmount || budget.totals?.total || budget.totalAmount || 0;
 
   const cleanBudget = {
     id: budget.id,
+    companyId: companyId,
+    company_id: companyId,
     issueDate: budget.issueDate,
     company: budget.company,
     client: budget.client,
@@ -257,9 +303,11 @@ export function saveBudget(phone, budget) {
   };
 
   const stmt = db.prepare(`
-    INSERT INTO budgets (id, company_phone, client_name, client_address, client_phone, total_amount, status, data_json, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO budgets (id, company_id, company_phone, client_name, client_address, client_phone, total_amount, status, data_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
+      company_id = COALESCE(excluded.company_id, budgets.company_id),
+      company_phone = COALESCE(excluded.company_phone, budgets.company_phone),
       client_name = excluded.client_name,
       client_address = excluded.client_address,
       client_phone = excluded.client_phone,
@@ -267,10 +315,14 @@ export function saveBudget(phone, budget) {
       status = excluded.status,
       data_json = excluded.data_json,
       updated_at = excluded.updated_at
+    WHERE budgets.company_id = excluded.company_id 
+       OR budgets.company_id IS NULL
+       OR (budgets.company_phone = excluded.company_phone AND budgets.company_id IS NULL)
   `);
 
   stmt.run(
     budget.id,
+    companyId,
     cleanPhone,
     budget.client?.name || 'Cliente Particular',
     budget.client?.address || '',
@@ -281,16 +333,43 @@ export function saveBudget(phone, budget) {
     now,
     now
   );
+
+  return cleanBudget;
 }
 
-export function updateBudgetStatus(phone, budgetId, status) {
-  if (!budgetId) return null;
-  const cleanPhone = String(phone).replace(/\D/g, '');
-  const budget = getBudget(budgetId);
+export function updateBudget(companyContextOrIdOrPhone, budget) {
+  if (!companyContextOrIdOrPhone || !budget || !budget.id) return null;
+  const existing = getBudget(companyContextOrIdOrPhone, budget.id);
+  if (!existing) {
+    // Cross-tenant o inexistente: no revelar si existe en otra empresa
+    return null;
+  }
+  return saveBudget(companyContextOrIdOrPhone, budget);
+}
+
+export function updateBudgetStatus(companyContextOrIdOrPhone, budgetId, status) {
+  if (!companyContextOrIdOrPhone || !budgetId) return null;
+  const budget = getBudget(companyContextOrIdOrPhone, budgetId);
   if (!budget) return null;
   budget.status = status;
-  saveBudget(cleanPhone, budget);
+  saveBudget(companyContextOrIdOrPhone, budget);
   return budget;
+}
+
+export function deleteBudget(companyContextOrIdOrPhone, id) {
+  if (!companyContextOrIdOrPhone || !id) return { deleted: false };
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const phone = tenant?.phone;
+
+  let result = { changes: 0 };
+  if (companyId) {
+    result = db.prepare('DELETE FROM budgets WHERE id = ? AND company_id = ?').run(id, companyId);
+  } else if (phone) {
+    result = db.prepare('DELETE FROM budgets WHERE id = ? AND company_phone = ?').run(id, phone);
+  }
+
+  return { deleted: result.changes > 0, id };
 }
 
 export async function syncPendingSignaturesFromCloud() {
@@ -373,18 +452,55 @@ export async function syncPendingSignaturesFromCloud() {
   }
 }
 
-export function getBudget(id) {
-  if (!id) return null;
-  const stmt = db.prepare('SELECT data_json FROM budgets WHERE id = ?');
-  const row = stmt.get(id);
-  if (!row) return null;
-  try { return JSON.parse(row.data_json); } catch(e) { return null; }
+export function getBudget(companyContextOrIdOrPhone, id) {
+  // Manejo de llamada canónica tenant-scoped: getBudget(companyId, budgetId)
+  if (id !== undefined && id !== null) {
+    if (!companyContextOrIdOrPhone || !id) return null;
+    const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+    const companyId = tenant?.companyId;
+    const phone = tenant?.phone;
+
+    let row = null;
+    if (companyId) {
+      // Búsqueda canónica estricta por company_id
+      const stmt = db.prepare('SELECT data_json, company_id FROM budgets WHERE id = ? AND company_id = ?');
+      row = stmt.get(id, companyId);
+      // Fallback transitorio si el registro aún no ha sido migrado a company_id
+      if (!row && phone) {
+        const stmtLegacy = db.prepare('SELECT data_json, company_id FROM budgets WHERE id = ? AND company_phone = ? AND company_id IS NULL');
+        row = stmtLegacy.get(id, phone);
+      }
+    } else if (phone) {
+      // Búsqueda legacy por company_phone cuando no existe company_id
+      const stmt = db.prepare('SELECT data_json, company_id FROM budgets WHERE id = ? AND company_phone = ?');
+      row = stmt.get(id, phone);
+    }
+
+    if (!row) return null;
+    try { return JSON.parse(row.data_json); } catch(e) { return null; }
+  }
+
+  // REGLA DE SEGURIDAD ESTRICTA:
+  // Nunca debe existir una consulta de budget que dependa únicamente de budgetId sin tenant context
+  console.warn("🛑 [Seguridad Tenant] getBudget invocado sin tenant context obligatorio. Retornando null.");
+  return null;
 }
 
-export function listBudgets(phone, limit = 20) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
-  const stmt = db.prepare('SELECT data_json FROM budgets WHERE company_phone = ? ORDER BY updated_at DESC LIMIT ?');
-  const rows = stmt.all(cleanPhone, limit);
+export function listBudgets(companyContextOrIdOrPhone, limit = 20) {
+  if (!companyContextOrIdOrPhone) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const phone = tenant?.phone;
+
+  let rows = [];
+  if (companyId) {
+    const stmt = db.prepare('SELECT data_json FROM budgets WHERE company_id = ? ORDER BY updated_at DESC LIMIT ?');
+    rows = stmt.all(companyId, limit);
+  } else if (phone) {
+    const stmt = db.prepare('SELECT data_json FROM budgets WHERE company_phone = ? ORDER BY updated_at DESC LIMIT ?');
+    rows = stmt.all(phone, limit);
+  }
+
   const results = [];
   for (const r of rows) {
     try { results.push(JSON.parse(r.data_json)); } catch(e) {}
@@ -1267,10 +1383,17 @@ export function getUnpaidInvoices(phone) {
   });
 }
 
-export function getBudgetsPendingFollowUp(phone) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
-  const stmt = db.prepare("SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets WHERE company_phone = ? AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO') ORDER BY created_at ASC");
-  const rows = stmt.all(cleanPhone);
+export function getBudgetsPendingFollowUp(phoneOrCompany) {
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
+
+  let rows = [];
+  if (companyId) {
+    rows = db.prepare("SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets WHERE company_id = ? AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO') ORDER BY created_at ASC").all(companyId);
+  } else if (cleanPhone) {
+    rows = db.prepare("SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets WHERE company_phone = ? AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO') ORDER BY created_at ASC").all(cleanPhone);
+  }
   const now = Date.now();
   return rows.map(r => {
     let parsed = null;
@@ -1580,12 +1703,16 @@ export function clearShoppingList(phone) {
 
 // ─── Métodos de Modo Obra (Memoria y Estado de Obra en Vivo) ─────────────────
 
-export function getWorkMemory(phone, clientOrBudgetId = null) {
-  const cleanPhone = String(phone || '').replace(/\D/g, '');
+export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone || String(phoneOrCompany || '').replace(/\D/g, '');
   
   // 1. Buscar presupuesto correspondiente
-  let query = 'SELECT * FROM budgets WHERE company_phone = ?';
-  const params = [cleanPhone];
+  let query = companyId 
+    ? 'SELECT * FROM budgets WHERE (company_id = ? OR company_phone = ?)' 
+    : 'SELECT * FROM budgets WHERE company_phone = ?';
+  const params = companyId ? [companyId, cleanPhone] : [cleanPhone];
 
   if (clientOrBudgetId) {
     const q = String(clientOrBudgetId).trim().toLowerCase();

@@ -2480,6 +2480,265 @@ userSessions.delete(jidTenantA);
 userSessions.delete(jidTenantB);
 userSessions.delete(jidUnauthorized);
 
+console.log("\nTEST 29: Migración Controlada de Budgets a Company_ID (Fase 2B-1 — Backfill, Tenant Scoping & Cross-Tenant Defense)");
+
+import {
+  saveBudget as saveBudgetTenant,
+  getBudget as getBudgetTenant,
+  listBudgets as listBudgetsTenant,
+  updateBudget as updateBudgetTenant,
+  deleteBudget as deleteBudgetTenant,
+  updateBudgetStatus as updateBudgetStatusTenant
+} from './db_service.js';
+import { migration as mig003 } from './migrations/003_budgets_company_id.js';
+
+// Setup de dos empresas para pruebas de tenant scoping
+const phoneTenantA29 = '34699000001';
+const phoneTenantB29 = '34699000002';
+const phoneTenantC29 = '34699000003';
+
+const cleanupTest29 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM budgets WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+cleanupTest29(phoneTenantA29);
+cleanupTest29(phoneTenantB29);
+cleanupTest29(phoneTenantC29);
+
+const compA29 = createCompanyWithIdentity({
+  name: 'Empresa Alpha Reformas S.L.',
+  phone: phoneTenantA29,
+  cif: 'B-99000001',
+  trade: 'Construcción'
+});
+const contextA29 = resolveAuthenticatedContext('whatsapp', phoneTenantA29);
+
+const compB29 = createCompanyWithIdentity({
+  name: 'Empresa Beta Instalaciones S.L.',
+  phone: phoneTenantB29,
+  cif: 'B-99000002',
+  trade: 'Electricidad'
+});
+const contextB29 = resolveAuthenticatedContext('whatsapp', phoneTenantB29);
+
+const compC29 = createCompanyWithIdentity({
+  name: 'Empresa Gamma Sin Budgets S.L.',
+  phone: phoneTenantC29,
+  cif: 'B-99000003',
+  trade: 'Fontanería'
+});
+
+// ─── A. BACKFILL DETERMINISTA & INTEGRIDAD ───
+// 1. Probar migración y backfill en base de datos aislada en memoria
+const memDbBackfill = new DatabaseSync(':memory:');
+memDbBackfill.exec('PRAGMA foreign_keys = ON;');
+runMigrations(memDbBackfill, { migrations: [MIGRATIONS[0], MIGRATIONS[1]] });
+
+// Crear empresas en la BD en memoria
+const memCompIdA = crypto.randomUUID();
+const memCompIdB = crypto.randomUUID();
+memDbBackfill.prepare("INSERT INTO companies (id, phone, name) VALUES (?, ?, ?)").run(memCompIdA, '34600000001', 'Mem Comp A');
+memDbBackfill.prepare("INSERT INTO companies (id, phone, name) VALUES (?, ?, ?)").run(memCompIdB, '34600000002', 'Mem Comp B');
+
+// Insertar presupuestos legacy sin company_id (company_id = NULL)
+memDbBackfill.prepare(`
+  INSERT INTO budgets (id, company_phone, client_name, total_amount, status, created_at, updated_at)
+  VALUES (?, ?, ?, ?, 'PENDIENTE_ACEPTACION', ?, ?)
+`).run('PRE-MEM-A1', '34600000001', 'Cliente A1', 1200, new Date().toISOString(), new Date().toISOString());
+
+memDbBackfill.prepare(`
+  INSERT INTO budgets (id, company_phone, client_name, total_amount, status, created_at, updated_at)
+  VALUES (?, ?, ?, ?, 'PENDIENTE_ACEPTACION', ?, ?)
+`).run('PRE-MEM-B1', '34600000002', 'Cliente B1', 2500, new Date().toISOString(), new Date().toISOString());
+
+const countBeforeBackfill = memDbBackfill.prepare("SELECT count(*) as c FROM budgets").get().c;
+
+// Ejecutar migración 003
+mig003.up(memDbBackfill);
+
+const countAfterBackfill = memDbBackfill.prepare("SELECT count(*) as c FROM budgets").get().c;
+const budgetAFromMem = memDbBackfill.prepare("SELECT id, company_id, company_phone FROM budgets WHERE id = 'PRE-MEM-A1'").get();
+const budgetBFromMem = memDbBackfill.prepare("SELECT id, company_id, company_phone FROM budgets WHERE id = 'PRE-MEM-B1'").get();
+
+assert(countBeforeBackfill === 2 && countAfterBackfill === 2, "1. Backfill: número de presupuestos conservado exactamente (cero pérdidas, cero duplicados)");
+assert(budgetAFromMem.company_id === memCompIdA && budgetAFromMem.company_phone === '34600000001', "2. Backfill: budgetA recibe determinísticamente el company_id de Empresa A");
+assert(budgetBFromMem.company_id === memCompIdB && budgetBFromMem.company_phone === '34600000002', "3. Backfill: budgetB recibe determinísticamente el company_id de Empresa B");
+
+// Verificar que la migración es idempotente al re-ejecutarla
+let reExecError = false;
+try {
+  mig003.up(memDbBackfill);
+} catch (e) {
+  reExecError = true;
+}
+assert(reExecError === false, "4. Idempotencia: re-ejecutar migración 003 no duplica registros ni lanza errores");
+
+// Verificar detección estricta de huérfanos (orphan budget sin empresa lanza error)
+const memDbOrphan = new DatabaseSync(':memory:');
+runMigrations(memDbOrphan, { migrations: [MIGRATIONS[0], MIGRATIONS[1]] });
+memDbOrphan.prepare(`
+  INSERT INTO budgets (id, company_phone, client_name, total_amount, status, created_at, updated_at)
+  VALUES ('PRE-ORPHAN', '34699999999', 'Orphan Client', 100, 'PENDIENTE', '2026-01-01', '2026-01-01')
+`).run();
+let orphanHalted = false;
+let orphanErrorMsg = '';
+try {
+  mig003.up(memDbOrphan);
+} catch (e) {
+  orphanHalted = true;
+  orphanErrorMsg = e.message;
+}
+assert(orphanHalted === true && orphanErrorMsg.includes('PRE-ORPHAN') && orphanErrorMsg.includes('huérfanos'), "5. Integridad estricta: presupuestos huérfanos sin empresa correspondiente detienen la migración sin inventar datos");
+
+
+// ─── B. NUEVO BUDGET VINCULADO AL CONTEXTO AUTENTICADO ───
+const budgetObjA = {
+  id: 'PRE-TEST-29-A1',
+  client: { name: 'Cliente Carlos', phone: '654321000', address: 'Calle Mayor 1, Madrid' },
+  items: [{ description: 'Pintura plástica lisa', total: 800 }],
+  financials: { totalAmount: 800 },
+  status: 'PENDIENTE_ACEPTACION'
+};
+
+const savedBudgetA = saveBudgetTenant(contextA29, budgetObjA);
+const checkDbA = currentDb.prepare("SELECT id, company_id, company_phone, client_name FROM budgets WHERE id = ?").get(budgetObjA.id);
+
+assert(Boolean(checkDbA && checkDbA.company_id === compA29.companyId), "6. Nuevo budget: se persiste con el company_id canónico del authenticatedContext");
+assert(checkDbA.company_phone === phoneTenantA29, "7. Dual write: company_phone se preserva de forma coherente para compatibilidad legacy");
+
+
+// ─── C. NEUTRALIZACIÓN DE INYECCIÓN DE TENANT POR IA / MODELO ───
+const budgetObjInjected = {
+  id: 'PRE-TEST-29-A2',
+  company_id: compB29.companyId, // IA intenta inyectar empresa B
+  companyId: compB29.companyId,
+  client: { name: 'Cliente Inyección IA', phone: '654321001' },
+  items: [{ description: 'Tabiquería', total: 1500 }],
+  financials: { totalAmount: 1500 }
+};
+
+const sanitizedInjected = sanitizeTenantPayload(budgetObjInjected, contextA29);
+const savedInjected = saveBudgetTenant(contextA29, sanitizedInjected);
+const checkDbInjected = currentDb.prepare("SELECT id, company_id FROM budgets WHERE id = ?").get(budgetObjInjected.id);
+
+assert(checkDbInjected.company_id === compA29.companyId, "8. Inyección IA bloqueada: el backend impone el company_id de la sesión e ignora el del modelo");
+assert(checkDbInjected.company_id !== compB29.companyId, "9. Aislamiento IA: el presupuesto jamás se asigna a Empresa B");
+
+
+// ─── D. LECTURA CORRECTA (TENANT-SCOPED READ) ───
+const readBudgetA = getBudgetTenant(contextA29.companyId, budgetObjA.id);
+const readBudgetAByContext = getBudgetTenant(contextA29, budgetObjA.id);
+
+assert(Boolean(readBudgetA && readBudgetA.id === budgetObjA.id), "10. Lectura correcta: getBudget(companyId, id) retorna el presupuesto propio");
+assert(Boolean(readBudgetAByContext && readBudgetAByContext.id === budgetObjA.id), "11. Lectura por contexto: getBudget(authenticatedContext, id) resuelve y retorna el presupuesto");
+
+
+// ─── E. CROSS-TENANT READ (ZERO METADATA DISCLOSURE) ───
+const crossReadB = getBudgetTenant(contextB29.companyId, budgetObjA.id);
+const crossReadBByContext = getBudgetTenant(contextB29, budgetObjA.id);
+
+assert(crossReadB === null, "12. Cross-tenant read: Empresa B no puede leer budget de Empresa A (retorna null)");
+assert(crossReadBByContext === null, "13. Zero-Disclosure: no se revelan metadatos, cliente, importes ni existencia del budget");
+
+
+// ─── F. CROSS-TENANT UPDATE ───
+const maliciousUpdate = {
+  id: budgetObjA.id,
+  client: { name: 'Cliente Hackeado' },
+  financials: { totalAmount: 1 }
+};
+const updateResultB = updateBudgetTenant(contextB29.companyId, maliciousUpdate);
+const checkUnchangedA = currentDb.prepare("SELECT client_name, total_amount FROM budgets WHERE id = ?").get(budgetObjA.id);
+
+assert(updateResultB === null, "14. Cross-tenant update: updateBudget rechaza la modificación de budget ajeno");
+assert(checkUnchangedA.client_name === 'Cliente Carlos' && checkUnchangedA.total_amount === 800, "15. Integridad de datos: los datos del presupuesto de A permanecen intactos");
+
+// Actualización legítima por Empresa A
+const legitimateUpdate = updateBudgetTenant(contextA29.companyId, {
+  ...budgetObjA,
+  client: { name: 'Cliente Carlos Modificado', phone: '654321000' }
+});
+const checkUpdatedA = currentDb.prepare("SELECT client_name FROM budgets WHERE id = ?").get(budgetObjA.id);
+assert(Boolean(legitimateUpdate && checkUpdatedA.client_name === 'Cliente Carlos Modificado'), "16. Actualización legítima: Empresa A puede modificar su propio presupuesto");
+
+
+// ─── G. CROSS-TENANT DELETE ───
+const delResultB = deleteBudgetTenant(contextB29.companyId, budgetObjA.id);
+const checkStillExistsA = currentDb.prepare("SELECT id FROM budgets WHERE id = ?").get(budgetObjA.id);
+
+assert(delResultB.deleted === false, "17. Cross-tenant delete: Empresa B no puede eliminar budget de Empresa A");
+assert(Boolean(checkStillExistsA && checkStillExistsA.id === budgetObjA.id), "18. Presupuesto protegido: permanece en la base de datos tras intento de borrado ajeno");
+
+// Borrado legítimo por Empresa A
+const delResultA = deleteBudgetTenant(contextA29.companyId, budgetObjA.id);
+const checkDeletedA = currentDb.prepare("SELECT id FROM budgets WHERE id = ?").get(budgetObjA.id);
+assert(delResultA.deleted === true && !checkDeletedA, "19. Borrado legítimo: Empresa A puede eliminar su propio presupuesto");
+
+
+// ─── H. LISTADO POR TENANT (LISTBUDGETS) ───
+const budgetObjB = {
+  id: 'PRE-TEST-29-B1',
+  client: { name: 'Cliente Empresa B', phone: '654321002' },
+  items: [{ description: 'Instalación eléctrica', total: 2200 }],
+  financials: { totalAmount: 2200 },
+  status: 'PENDIENTE_ACEPTACION'
+};
+saveBudgetTenant(contextB29, budgetObjB);
+
+const listA = listBudgetsTenant(contextA29.companyId);
+const listB = listBudgetsTenant(contextB29.companyId);
+
+assert(listA.every(b => b.id !== budgetObjB.id), "20. Listado aislado: la lista de Empresa A no contiene presupuestos de Empresa B");
+assert(listB.every(b => b.id === budgetObjB.id), "21. Listado aislado: la lista de Empresa B contiene únicamente sus presupuestos");
+
+
+// ─── I. EMPRESA SIN BUDGETS ───
+const listC = listBudgetsTenant(compC29.companyId);
+assert(Array.isArray(listC) && listC.length === 0, "22. Empresa sin presupuestos: retorna lista vacía ([]) correctamente");
+
+
+// ─── J. PROHIBICIÓN DE CONSULTA SIN TENANT CONTEXT ───
+const unauthSingleParamLookup = getBudgetTenant(budgetObjB.id);
+assert(unauthSingleParamLookup === null, "23. Prohibición estricta: llamada getBudget(id) sin tenant context es rechazada (retorna null)");
+
+
+// ─── K. COMPATIBILIDAD LEGACY DUAL-READ ───
+const legacyListA = listBudgetsTenant(phoneTenantA29);
+const legacyReadB = getBudgetTenant(phoneTenantB29, budgetObjB.id);
+assert(Array.isArray(legacyListA), "24. Compatibilidad legacy: listBudgets(phone) continúa respondiendo correctamente");
+assert(Boolean(legacyReadB && legacyReadB.id === budgetObjB.id), "25. Compatibilidad legacy: getBudget(phone, id) resuelve y retorna el presupuesto");
+
+
+// ─── L. RESTRICCIÓN FOREIGN KEY & PRAGMA INTEGRITY CHECK ───
+let fkConstraintBlocked = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO budgets (id, company_id, company_phone, client_name, total_amount, status, created_at, updated_at)
+    VALUES ('PRE-INVALID-FK', '00000000-0000-0000-0000-000000000000', '34699999999', 'Fake', 10, 'PENDIENTE', '2026-01-01', '2026-01-01')
+  `).run();
+} catch (e) {
+  fkConstraintBlocked = true;
+}
+assert(fkConstraintBlocked === true, "26. Foreign Key estricta: SQLite rechaza budgets con company_id inexistente en companies");
+
+// PRAGMA foreign_key_check e integrity_check sobre la base de datos de test
+const fkViolations = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult = currentDb.prepare("PRAGMA integrity_check;").get();
+
+assert(fkViolations.length === 0, "27. PRAGMA foreign_key_check: cero violaciones de claves foráneas");
+assert(integrityResult.integrity_check === 'ok', "28. PRAGMA integrity_check: la base de datos de test está 100% íntegra (ok)");
+
+// Limpieza final de TEST 29
+cleanupTest29(phoneTenantA29);
+cleanupTest29(phoneTenantB29);
+cleanupTest29(phoneTenantC29);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

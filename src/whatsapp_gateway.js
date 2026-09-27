@@ -332,7 +332,7 @@ export function getUserSession(remoteJid, senderNumber) {
   session.company = resolvedCompany;
 
   // Refrescar siempre desde SQLite para reflejar cambios en tiempo real
-  const dbBudgets = listBudgets(canonicalIdentifier, 100);
+  const dbBudgets = listBudgets(companyId || canonicalIdentifier, 100);
   for (const b of dbBudgets) {
     if (b && b.id) session.budgets.set(b.id, b);
   }
@@ -2906,11 +2906,12 @@ async function startWhatsAppGateway() {
     }
 
     engineResult.budget.company = session.company;
+    engineResult.budget.companyId = session.companyId;
     session.budgets.set(engineResult.budget.id, engineResult.budget);
     session.activeBudgetId = engineResult.budget.id;
 
-    saveBudget(cleanPhone, engineResult.budget);
-    console.log(`💾 Presupuesto guardado en SQLite y sesión: ${engineResult.budget.id} (Total guardados: ${session.budgets.size})`);
+    saveBudget(session.companyId || cleanPhone, engineResult.budget);
+    console.log(`💾 Presupuesto guardado en SQLite y sesión: ${engineResult.budget.id} (companyId: ${session.companyId}) (Total guardados: ${session.budgets.size})`);
 
     // Detección preventiva de cliente homónimo / repetido al crear presupuesto nuevo
     let homonymWarningText = '';
