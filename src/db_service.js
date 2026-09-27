@@ -510,9 +510,47 @@ export function listBudgets(companyContextOrIdOrPhone, limit = 20) {
 
 // ─── Métodos de Facturas ──────────────────────────────────────────────────────
 
-export function saveInvoice(phone, invoice) {
+export function saveInvoice(companyContextOrIdOrPhone, invoice) {
   if (!invoice || !invoice.id) return null;
-  const cleanPhone = String(phone).replace(/\D/g, '');
+  if (!companyContextOrIdOrPhone) {
+    throw new Error("❌ [Tenant Boundary] saveInvoice requiere un companyId o contexto autenticado obligatorio.");
+  }
+
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId || null;
+  const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
+
+  // Defensa activa contra inyección de companyId/company_id por parte de la IA o cliente
+  if (invoice.companyId && companyId && invoice.companyId !== companyId) {
+    console.warn(`⚠️ [DEFENSA ACTIVA] Intento de inyección de companyId detectado en factura: '${invoice.companyId}' ignorado. Se fuerza '${companyId}'.`);
+  }
+  if (invoice.company_id && companyId && invoice.company_id !== companyId) {
+    console.warn(`⚠️ [DEFENSA ACTIVA] Intento de inyección de company_id detectado en factura: '${invoice.company_id}' ignorado. Se fuerza '${companyId}'.`);
+  }
+  invoice.companyId = companyId;
+  invoice.company_id = companyId;
+
+  // Defensa activa contra inyección de company_phone
+  if (invoice.company_phone && cleanPhone && String(invoice.company_phone).replace(/\D/g, '') !== cleanPhone) {
+    console.warn(`⚠️ [DEFENSA ACTIVA] Intento de inyección de company_phone detectado en factura: '${invoice.company_phone}' ignorado. Se fuerza '${cleanPhone}'.`);
+    invoice.company_phone = cleanPhone;
+  }
+
+  // Validación estricta de la invariante con presupuestos (invoice.company_id == budget.company_id)
+  const rawBudgetId = invoice.budgetId || invoice.budget_id || '';
+  const budgetId = typeof rawBudgetId === 'string' ? rawBudgetId.trim() : '';
+
+  if (budgetId) {
+    const linkedBudget = getBudget(companyContextOrIdOrPhone, budgetId);
+    if (!linkedBudget) {
+      throw new Error(`❌ [Tenant Boundary] Violación de invariante: No se puede asociar la factura '${invoice.id}' al presupuesto '${budgetId}' porque no pertenece a la empresa autenticada o no existe.`);
+    }
+    const budgetCompId = linkedBudget.companyId || linkedBudget.company_id;
+    if (budgetCompId && companyId && budgetCompId !== companyId) {
+      throw new Error(`❌ [Tenant Boundary] Violación de invariante: La factura (${companyId}) y el presupuesto (${budgetCompId}) pertenecen a tenants distintos.`);
+    }
+  }
+
   const now = new Date().toISOString();
   const total = Number(invoice.financials?.totalAmount ?? invoice.total_amount ?? invoice.totalAmount ?? 0);
 
@@ -521,15 +559,22 @@ export function saveInvoice(phone, invoice) {
   const verifactuHash = invoice.verifactu_hash || invoice.verifactuHash || null;
 
   const stmt = db.prepare(`
-    INSERT INTO invoices (id, budget_id, company_phone, client_name, total_amount, status, data_json, rectifies_invoice_id, fiscal_period, verifactu_hash, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO invoices (id, company_id, budget_id, company_phone, client_name, total_amount, status, data_json, rectifies_invoice_id, fiscal_period, verifactu_hash, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
+      company_id = COALESCE(excluded.company_id, invoices.company_id),
+      company_phone = COALESCE(excluded.company_phone, invoices.company_phone),
+      budget_id = excluded.budget_id,
+      client_name = excluded.client_name,
+      total_amount = excluded.total_amount,
       status = excluded.status,
       data_json = excluded.data_json,
-      total_amount = excluded.total_amount,
       rectifies_invoice_id = excluded.rectifies_invoice_id,
       fiscal_period = excluded.fiscal_period,
       verifactu_hash = excluded.verifactu_hash
+    WHERE invoices.company_id = excluded.company_id 
+       OR invoices.company_id IS NULL
+       OR (invoices.company_phone = excluded.company_phone AND invoices.company_id IS NULL)
   `);
 
   invoice.rectifiesInvoiceId = rectifiesId;
@@ -541,7 +586,8 @@ export function saveInvoice(phone, invoice) {
 
   stmt.run(
     invoice.id,
-    invoice.budgetId || invoice.budget_id || '',
+    companyId,
+    budgetId,
     cleanPhone,
     invoice.client?.name || invoice.client_name || 'Cliente Particular',
     total,
@@ -555,18 +601,81 @@ export function saveInvoice(phone, invoice) {
   return invoice;
 }
 
-export function getInvoice(id) {
-  if (!id) return null;
-  const stmt = db.prepare('SELECT data_json FROM invoices WHERE id = ?');
-  const row = stmt.get(id);
-  if (!row) return null;
-  try { return JSON.parse(row.data_json); } catch(e) { return null; }
+export function updateInvoice(companyContextOrIdOrPhone, invoice) {
+  if (!companyContextOrIdOrPhone || !invoice || !invoice.id) return null;
+  const existing = getInvoice(companyContextOrIdOrPhone, invoice.id);
+  if (!existing) {
+    // Cross-tenant o inexistente: no revelar metadatos ni existencia
+    return null;
+  }
+  return saveInvoice(companyContextOrIdOrPhone, invoice);
 }
 
-export function listInvoices(phone, limit = 20) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
-  const stmt = db.prepare('SELECT data_json FROM invoices WHERE company_phone = ? ORDER BY created_at DESC LIMIT ?');
-  const rows = stmt.all(cleanPhone, limit);
+export function deleteInvoice(companyContextOrIdOrPhone, id) {
+  if (!companyContextOrIdOrPhone || !id) return { deleted: false };
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const phone = tenant?.phone;
+
+  let result = { changes: 0 };
+  if (companyId) {
+    result = db.prepare('DELETE FROM invoices WHERE id = ? AND company_id = ?').run(id, companyId);
+  } else if (phone) {
+    result = db.prepare('DELETE FROM invoices WHERE id = ? AND company_phone = ?').run(id, phone);
+  }
+
+  return { deleted: result.changes > 0, id };
+}
+
+export function getInvoice(companyContextOrIdOrPhone, id) {
+  // Manejo de llamada canónica tenant-scoped: getInvoice(companyId, invoiceId)
+  if (id !== undefined && id !== null) {
+    if (!companyContextOrIdOrPhone || !id) return null;
+    const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+    const companyId = tenant?.companyId;
+    const phone = tenant?.phone;
+
+    let row = null;
+    if (companyId) {
+      // Búsqueda canónica estricta por company_id
+      const stmt = db.prepare('SELECT data_json, company_id FROM invoices WHERE id = ? AND company_id = ?');
+      row = stmt.get(id, companyId);
+      // Fallback transitorio si el registro aún no ha sido migrado a company_id
+      if (!row && phone) {
+        const stmtLegacy = db.prepare('SELECT data_json, company_id FROM invoices WHERE id = ? AND company_phone = ? AND company_id IS NULL');
+        row = stmtLegacy.get(id, phone);
+      }
+    } else if (phone) {
+      // Búsqueda legacy por company_phone cuando no existe company_id
+      const stmt = db.prepare('SELECT data_json, company_id FROM invoices WHERE id = ? AND company_phone = ?');
+      row = stmt.get(id, phone);
+    }
+
+    if (!row) return null;
+    try { return JSON.parse(row.data_json); } catch(e) { return null; }
+  }
+
+  // REGLA DE SEGURIDAD ESTRICTA:
+  // Nunca debe existir una consulta de factura que dependa únicamente de invoiceId sin tenant context
+  console.warn("🛑 [Seguridad Tenant] getInvoice invocado sin tenant context obligatorio. Retornando null.");
+  return null;
+}
+
+export function listInvoices(companyContextOrIdOrPhone, limit = 20) {
+  if (!companyContextOrIdOrPhone) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const phone = tenant?.phone;
+
+  let rows = [];
+  if (companyId) {
+    const stmt = db.prepare('SELECT data_json FROM invoices WHERE company_id = ? ORDER BY created_at DESC LIMIT ?');
+    rows = stmt.all(companyId, limit);
+  } else if (phone) {
+    const stmt = db.prepare('SELECT data_json FROM invoices WHERE company_phone = ? ORDER BY created_at DESC LIMIT ?');
+    rows = stmt.all(phone, limit);
+  }
+
   const results = [];
   for (const r of rows) {
     try { results.push(JSON.parse(r.data_json)); } catch(e) {}
@@ -645,8 +754,10 @@ export function getPayments(budgetId) {
  * @param {number|string} [yearInput] - Año (ej: 2026)
  * @returns {object} Datos del trimestre con facturas y resumen para Modelo 303
  */
-export function getQuarterInvoices(phone, quarterInput = null, yearInput = null) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
+export function getQuarterInvoices(phoneOrCompany, quarterInput = null, yearInput = null) {
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' ? phoneOrCompany.replace(/\D/g, '') : '');
   const now = new Date();
   let currentYear = now.getFullYear();
   let currentMonth = now.getMonth(); // 0 a 11
@@ -703,8 +814,12 @@ export function getQuarterInvoices(phone, quarterInput = null, yearInput = null)
   const endStr = `${String(endDay).padStart(2, '0')}/${String(endMonth + 1).padStart(2, '0')}/${year}`;
 
   // Consultar todas las facturas de la empresa
-  const stmt = db.prepare('SELECT data_json, created_at FROM invoices WHERE company_phone = ? ORDER BY created_at ASC');
-  const rows = stmt.all(cleanPhone);
+  let rows = [];
+  if (companyId) {
+    rows = db.prepare('SELECT data_json, created_at FROM invoices WHERE company_id = ? ORDER BY created_at ASC').all(companyId);
+  } else if (cleanPhone) {
+    rows = db.prepare('SELECT data_json, created_at FROM invoices WHERE company_phone = ? ORDER BY created_at ASC').all(cleanPhone);
+  }
 
   const quarterInvoices = [];
   for (const r of rows) {
@@ -1359,10 +1474,16 @@ export function getAppointmentHistory(phone, appointmentId) {
 
 // ─── Métodos del Secretario Digital (Briefing y Seguimiento) ──────────────────
 
-export function getUnpaidInvoices(phone) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
-  const stmt = db.prepare("SELECT id, budget_id, client_name, total_amount, status, created_at, data_json FROM invoices WHERE company_phone = ? AND status != 'PAGADA' ORDER BY created_at ASC");
-  const rows = stmt.all(cleanPhone);
+export function getUnpaidInvoices(phoneOrCompany) {
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' ? phoneOrCompany.replace(/\D/g, '') : '');
+  let rows = [];
+  if (companyId) {
+    rows = db.prepare("SELECT id, budget_id, client_name, total_amount, status, created_at, data_json FROM invoices WHERE company_id = ? AND status != 'PAGADA' ORDER BY created_at ASC").all(companyId);
+  } else if (cleanPhone) {
+    rows = db.prepare("SELECT id, budget_id, client_name, total_amount, status, created_at, data_json FROM invoices WHERE company_phone = ? AND status != 'PAGADA' ORDER BY created_at ASC").all(cleanPhone);
+  }
   const now = Date.now();
   return rows.map(r => {
     let parsed = null;
@@ -1419,22 +1540,33 @@ export function getBudgetsPendingFollowUp(phoneOrCompany) {
 /**
  * Calcula los ingresos facturados, cobrados y pendientes en un mes concreto.
  * Usado por el Intent Router para responder "¿cuánto llevo este mes?" sin IA.
- * @param {string} phone
+ * @param {string|object} phoneOrCompany
  * @param {number} year  - ej. 2026
  * @param {number} month - 1 a 12
  * @returns {{ invoiceCount, budgetCount, totalInvoiced, totalCollected, totalPending }}
  */
-export function getMonthlyRevenue(phone, year, month) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
+export function getMonthlyRevenue(phoneOrCompany, year, month) {
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' ? phoneOrCompany.replace(/\D/g, '') : '');
   const startISO = new Date(year, month - 1, 1, 0, 0, 0).toISOString();
   const endISO   = new Date(year, month, 0, 23, 59, 59, 999).toISOString();
 
   // Facturas del mes
-  const invoiceRows = db.prepare(`
-    SELECT total_amount, status, data_json
-    FROM invoices
-    WHERE company_phone = ? AND created_at >= ? AND created_at <= ?
-  `).all(cleanPhone, startISO, endISO);
+  let invoiceRows = [];
+  if (companyId) {
+    invoiceRows = db.prepare(`
+      SELECT total_amount, status, data_json
+      FROM invoices
+      WHERE company_id = ? AND created_at >= ? AND created_at <= ?
+    `).all(companyId, startISO, endISO);
+  } else if (cleanPhone) {
+    invoiceRows = db.prepare(`
+      SELECT total_amount, status, data_json
+      FROM invoices
+      WHERE company_phone = ? AND created_at >= ? AND created_at <= ?
+    `).all(cleanPhone, startISO, endISO);
+  }
 
   let totalInvoiced  = 0;
   let totalCollected = 0;
@@ -1453,10 +1585,18 @@ export function getMonthlyRevenue(phone, year, month) {
   }
 
   // Presupuestos del mes
-  const budgetCount = db.prepare(`
-    SELECT COUNT(*) as c FROM budgets
-    WHERE company_phone = ? AND created_at >= ? AND created_at <= ?
-  `).get(cleanPhone, startISO, endISO)?.c || 0;
+  let budgetCount = 0;
+  if (companyId) {
+    budgetCount = db.prepare(`
+      SELECT COUNT(*) as c FROM budgets
+      WHERE company_id = ? AND created_at >= ? AND created_at <= ?
+    `).get(companyId, startISO, endISO)?.c || 0;
+  } else if (cleanPhone) {
+    budgetCount = db.prepare(`
+      SELECT COUNT(*) as c FROM budgets
+      WHERE company_phone = ? AND created_at >= ? AND created_at <= ?
+    `).get(cleanPhone, startISO, endISO)?.c || 0;
+  }
 
   return {
     invoiceCount:  invoiceRows.length,
@@ -1507,18 +1647,28 @@ export function listAppointmentsWeek(phone) {
  * @param {string} phone
  * @returns {{ totalDebt, debtCount, todayAppointments, pendingBudgets, monthlyStats }}
  */
-export function getDashboard(phone) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
+export function getDashboard(phoneOrCompany) {
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' ? phoneOrCompany.replace(/\D/g, '') : '');
   const now     = new Date();
   const todayStr   = now.toISOString().split('T')[0];
   const month   = now.getMonth() + 1;
   const year    = now.getFullYear();
 
   // 1. Deudas totales
-  const unpaidRows = db.prepare(`
-    SELECT total_amount, data_json FROM invoices
-    WHERE company_phone = ? AND status != 'PAGADA'
-  `).all(cleanPhone);
+  let unpaidRows = [];
+  if (companyId) {
+    unpaidRows = db.prepare(`
+      SELECT total_amount, data_json FROM invoices
+      WHERE company_id = ? AND status != 'PAGADA'
+    `).all(companyId);
+  } else if (cleanPhone) {
+    unpaidRows = db.prepare(`
+      SELECT total_amount, data_json FROM invoices
+      WHERE company_phone = ? AND status != 'PAGADA'
+    `).all(cleanPhone);
+  }
 
   let totalDebt  = 0;
   for (const r of unpaidRows) {
@@ -1542,14 +1692,23 @@ export function getDashboard(phone) {
   }));
 
   // 3. Presupuestos pendientes de firma
-  const pendingBudgets = db.prepare(`
-    SELECT COUNT(*) as c FROM budgets
-    WHERE company_phone = ?
-      AND status IN ('PENDIENTE_ACEPTACION', 'ENVIADO')
-  `).get(cleanPhone)?.c || 0;
+  let pendingBudgets = 0;
+  if (companyId) {
+    pendingBudgets = db.prepare(`
+      SELECT COUNT(*) as c FROM budgets
+      WHERE company_id = ?
+        AND status IN ('PENDIENTE_ACEPTACION', 'ENVIADO')
+    `).get(companyId)?.c || 0;
+  } else if (cleanPhone) {
+    pendingBudgets = db.prepare(`
+      SELECT COUNT(*) as c FROM budgets
+      WHERE company_phone = ?
+        AND status IN ('PENDIENTE_ACEPTACION', 'ENVIADO')
+    `).get(cleanPhone)?.c || 0;
+  }
 
   // 4. Resumen del mes actual
-  const monthlyStats = getMonthlyRevenue(cleanPhone, year, month);
+  const monthlyStats = getMonthlyRevenue(phoneOrCompany, year, month);
 
   return {
     totalDebt:          Number(totalDebt.toFixed(2)),

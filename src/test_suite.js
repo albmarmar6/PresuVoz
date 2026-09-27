@@ -916,6 +916,8 @@ import {
 } from './onboarding_service.js';
 
 const onboardPhone = '34699887766';
+cleanDb.prepare('DELETE FROM invoices WHERE company_phone = ?').run(onboardPhone);
+cleanDb.prepare('DELETE FROM budgets WHERE company_phone = ?').run(onboardPhone);
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(onboardPhone);
 
 // 1. Iniciar onboarding
@@ -2279,7 +2281,7 @@ cleanupIdentities(testPhoneB);
 
 console.log("\nTEST 27: Blindaje Estricto de Autenticación de Canal WhatsApp (Zero-Fallback & Tenant Isolation)");
 
-const fallbackPhone = '34655443322';
+const fallbackPhone = '34644001122';
 const fallbackJid = `${fallbackPhone}@s.whatsapp.net`;
 const validPhone = '34677889900';
 const validJid = `${validPhone}@s.whatsapp.net`;
@@ -2739,6 +2741,344 @@ cleanupTest29(phoneTenantA29);
 cleanupTest29(phoneTenantB29);
 cleanupTest29(phoneTenantC29);
 
+console.log("\nTEST 30: Migración Controlada de Invoices a Company_ID (Fase 2B-2 — Backfill, Invariante con Presupuestos, Tenant Scoping & Cross-Tenant Defense)");
+
+import {
+  saveInvoice as saveInvoiceTenant,
+  getInvoice as getInvoiceTenant,
+  listInvoices as listInvoicesTenant,
+  updateInvoice as updateInvoiceTenant,
+  deleteInvoice as deleteInvoiceTenant
+} from './db_service.js';
+import { migration as mig004 } from './migrations/004_invoices_company_id.js';
+
+// ─── A. PRUEBA DE BACKFILL E IDEMPOTENCIA EN BASE DE DATOS AISLADA EN MEMORIA ───
+const memDb30 = new DatabaseSync(':memory:');
+memDb30.exec('PRAGMA foreign_keys = ON;');
+runMigrations(memDb30, { migrations: [MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2]] });
+
+// Insertar empresas de prueba
+const compAIdMem = crypto.randomUUID();
+const compBIdMem = crypto.randomUUID();
+memDb30.prepare("INSERT INTO companies (id, phone, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(
+  compAIdMem, '34611000001', 'Empresa Mem A', '2026-01-01', '2026-01-01'
+);
+memDb30.prepare("INSERT INTO companies (id, phone, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(
+  compBIdMem, '34611000002', 'Empresa Mem B', '2026-01-01', '2026-01-01'
+);
+
+// Insertar presupuestos para las dos empresas
+memDb30.prepare("INSERT INTO budgets (id, company_id, company_phone, client_name, total_amount, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'BUD-MEM-A1', compAIdMem, '34611000001', 'Cliente Mem A', 1000, JSON.stringify({ id: 'BUD-MEM-A1', companyId: compAIdMem }), '2026-01-01', '2026-01-01'
+);
+memDb30.prepare("INSERT INTO budgets (id, company_id, company_phone, client_name, total_amount, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'BUD-MEM-B1', compBIdMem, '34611000002', 'Cliente Mem B', 2000, JSON.stringify({ id: 'BUD-MEM-B1', companyId: compBIdMem }), '2026-01-01', '2026-01-01'
+);
+
+// Insertar facturas legadas (sin company_id)
+// 1. Factura con budget_id legítimo de A
+memDb30.prepare("INSERT INTO invoices (id, budget_id, company_phone, client_name, total_amount, status, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'INV-MEM-A1', 'BUD-MEM-A1', '34611000001', 'Cliente Mem A', 1000, 'PENDIENTE_PAGO', JSON.stringify({ id: 'INV-MEM-A1' }), '2026-01-01'
+);
+// 2. Factura directa sin budget_id pero con company_phone de A
+memDb30.prepare("INSERT INTO invoices (id, budget_id, company_phone, client_name, total_amount, status, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'INV-MEM-A2', '', '34611000001', 'Cliente Directo A', 500, 'PENDIENTE_PAGO', JSON.stringify({ id: 'INV-MEM-A2' }), '2026-01-01'
+);
+// 3. Factura con budget_id legítimo de B
+memDb30.prepare("INSERT INTO invoices (id, budget_id, company_phone, client_name, total_amount, status, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'INV-MEM-B1', 'BUD-MEM-B1', '34611000002', 'Cliente Mem B', 2000, 'PAGADA', JSON.stringify({ id: 'INV-MEM-B1' }), '2026-01-01'
+);
+
+// Ejecutar migración 004 sobre memDb30
+mig004.up(memDb30);
+
+const memInvoicesAfter = memDb30.prepare("SELECT id, budget_id, company_id, company_phone, data_json FROM invoices").all();
+const invA1After = memInvoicesAfter.find(i => i.id === 'INV-MEM-A1');
+const invA2After = memInvoicesAfter.find(i => i.id === 'INV-MEM-A2');
+const invB1After = memInvoicesAfter.find(i => i.id === 'INV-MEM-B1');
+
+assert(memInvoicesAfter.length === 3, "1. Backfill: número total de facturas conservado exactamente (cero pérdidas, cero duplicados)");
+assert(invA1After && invA1After.company_id === compAIdMem, "2. Backfill: factura con presupuesto hereda determinísticamente budget.company_id");
+assert(invA2After && invA2After.company_id === compAIdMem, "3. Backfill: factura sin presupuesto resuelve determinísticamente por company_phone");
+assert(invB1After && invB1After.company_id === compBIdMem, "4. Backfill: factura de Empresa B recibe determinísticamente su company_id");
+
+// Idempotencia: re-ejecución no produce fallos ni cambios espurios
+let idempotencyPass = true;
+try {
+  mig004.up(memDb30);
+} catch (e) {
+  idempotencyPass = false;
+}
+const memCountSecondRun = memDb30.prepare("SELECT count(*) as count FROM invoices").get().count;
+assert(idempotencyPass && memCountSecondRun === 3, "5. Idempotencia: re-ejecutar migración 004 no duplica registros ni lanza errores");
+
+// ─── B. DETECCIÓN Y ABORTO ANTE INCONSISTENCIAS / HUÉRFANOS ───
+// Caso 1: Factura huérfana sin presupuesto ni empresa registrada
+const orphanMemDb = new DatabaseSync(':memory:');
+orphanMemDb.exec('PRAGMA foreign_keys = ON;');
+runMigrations(orphanMemDb, { migrations: [MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2]] });
+orphanMemDb.prepare("INSERT INTO invoices (id, budget_id, company_phone, client_name, total_amount, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+  'INV-ORPHAN', '', '34600999999', 'Huérfano', 100, '{}', '2026-01-01'
+);
+let orphanBlocked = false;
+try {
+  mig004.up(orphanMemDb);
+} catch (e) {
+  orphanBlocked = e.message.includes('Factura huérfana');
+}
+assert(orphanBlocked === true, "6. Integridad estricta: factura huérfana sin empresa detiene la migración sin inventar datos");
+
+// Caso 2: Factura con contradicción entre su company_phone y el budget_id vinculado
+const conflictMemDb = new DatabaseSync(':memory:');
+conflictMemDb.exec('PRAGMA foreign_keys = ON;');
+runMigrations(conflictMemDb, { migrations: [MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2]] });
+const cAId = crypto.randomUUID();
+const cBId = crypto.randomUUID();
+conflictMemDb.prepare("INSERT INTO companies (id, phone, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(
+  cAId, '34622000001', 'Empresa A', '2026-01-01', '2026-01-01'
+);
+conflictMemDb.prepare("INSERT INTO companies (id, phone, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(
+  cBId, '34622000002', 'Empresa B', '2026-01-01', '2026-01-01'
+);
+conflictMemDb.prepare("INSERT INTO budgets (id, company_id, company_phone, client_name, total_amount, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'BUD-CONFLICT-B', cBId, '34622000002', 'Cliente B', 500, '{}', '2026-01-01', '2026-01-01'
+);
+// Factura que pertenece a A por teléfono pero referencia presupuesto de B
+conflictMemDb.prepare("INSERT INTO invoices (id, budget_id, company_phone, client_name, total_amount, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+  'INV-CONFLICT', 'BUD-CONFLICT-B', '34622000001', 'Cliente Conflicto', 500, '{}', '2026-01-01'
+);
+let conflictBlocked = false;
+try {
+  mig004.up(conflictMemDb);
+} catch (e) {
+  conflictBlocked = e.message.includes('Contradicción crítica de tenant') || e.message.includes('inconsistencia');
+}
+assert(conflictBlocked === true, "7. Integridad estricta: contradicción entre company_phone de factura y budget asociado aborta la migración");
+
+// ─── C. SETUP DE TENANTS PARA PRUEBAS REALES EN currentDb ───
+const phoneTenantA30 = '34698000001';
+const phoneTenantB30 = '34698000002';
+const phoneTenantC30 = '34698000003';
+
+const cleanupTest30 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM invoices WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM budgets WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+cleanupTest30(phoneTenantA30);
+cleanupTest30(phoneTenantB30);
+cleanupTest30(phoneTenantC30);
+
+const compA30 = createCompanyWithIdentity({
+  name: 'Reformas Levante A S.L.',
+  phone: phoneTenantA30,
+  cif: 'B-30000001',
+  trade: 'Construcción'
+});
+const compB30 = createCompanyWithIdentity({
+  name: 'Climatización Sur B S.L.',
+  phone: phoneTenantB30,
+  cif: 'B-30000002',
+  trade: 'Climatización'
+});
+const compC30 = createCompanyWithIdentity({
+  name: 'Empresa Sin Facturas C S.L.',
+  phone: phoneTenantC30,
+  cif: 'B-30000003',
+  trade: 'Fontanería'
+});
+
+const contextA30 = resolveAuthenticatedContext('whatsapp', phoneTenantA30);
+const contextB30 = resolveAuthenticatedContext('whatsapp', phoneTenantB30);
+const contextC30 = resolveAuthenticatedContext('whatsapp', phoneTenantC30);
+
+// Crear presupuesto legítimo para Empresa A y para Empresa B
+const budgetObjA30 = {
+  id: 'PRE-TEST-30-A1',
+  client: { name: 'Cliente Carlos A', phone: '654000111' },
+  financials: { totalAmount: 1500 },
+  status: 'ACEPTADO'
+};
+saveBudgetTenant(contextA30, budgetObjA30);
+
+const budgetObjB30 = {
+  id: 'PRE-TEST-30-B1',
+  client: { name: 'Cliente Laura B', phone: '654000222' },
+  financials: { totalAmount: 2500 },
+  status: 'ACEPTADO'
+};
+saveBudgetTenant(contextB30, budgetObjB30);
+
+// ─── D. CREACIÓN LEGÍTIMA DE FACTURA & DUAL-WRITE ───
+const invoiceObjA = {
+  id: 'INV-TEST-30-A1',
+  budgetId: budgetObjA30.id,
+  client: { name: 'Cliente Carlos A' },
+  financials: { totalAmount: 1500 },
+  status: 'PENDIENTE_PAGO'
+};
+const savedInvA = saveInvoiceTenant(contextA30, invoiceObjA);
+
+const rowInvA = currentDb.prepare("SELECT company_id, company_phone, budget_id FROM invoices WHERE id = ?").get(invoiceObjA.id);
+
+assert(Boolean(savedInvA && rowInvA && rowInvA.company_id === contextA30.companyId), "8. Nueva factura: se persiste con el company_id canónico del tenant");
+assert(rowInvA && rowInvA.company_phone === phoneTenantA30, "9. Dual write: company_phone se preserva de forma coherente para compatibilidad legacy");
+const rowBudgetA = currentDb.prepare("SELECT company_id FROM budgets WHERE id = ?").get(budgetObjA30.id);
+assert(Boolean(rowInvA && rowBudgetA && rowInvA.company_id === rowBudgetA.company_id), "10. Invariante estricta: invoice.company_id coincide exactamente con budget.company_id");
+
+// ─── E. INVARIANTE ESTRICTA: ASOCIACIÓN CROSS-TENANT BLOQUEADA ───
+let crossTenantBudgetBlocked = false;
+try {
+  saveInvoiceTenant(contextA30, {
+    id: 'INV-TEST-30-CROSS-BUDGET',
+    budgetId: budgetObjB30.id, // Presupuesto de Empresa B intentado por Empresa A
+    client: { name: 'Ataque Cross Budget' },
+    financials: { totalAmount: 500 }
+  });
+} catch (e) {
+  crossTenantBudgetBlocked = e.message.includes('Violación de invariante');
+}
+assert(crossTenantBudgetBlocked === true, "11. Invariante estricta: Empresa A no puede crear factura asociada al presupuesto de Empresa B");
+
+// Factura directa sin presupuesto asignada correctamente
+const invoiceObjA2 = {
+  id: 'INV-TEST-30-A2-DIRECT',
+  budgetId: '',
+  client: { name: 'Cliente Directo Sin Presupuesto' },
+  financials: { totalAmount: 800 },
+  status: 'PENDIENTE_PAGO'
+};
+const savedInvA2 = saveInvoiceTenant(contextA30, invoiceObjA2);
+const rowInvA2 = currentDb.prepare("SELECT company_id FROM invoices WHERE id = ?").get(invoiceObjA2.id);
+assert(Boolean(savedInvA2 && rowInvA2 && rowInvA2.company_id === contextA30.companyId), "12. Factura sin presupuesto: se crea con company_id del tenant autenticado");
+
+// ─── F. NEUTRALIZACIÓN DE INYECCIÓN DE MODELO IA / CLIENTE ───
+const maliciousInvoice = {
+  id: 'INV-TEST-30-AI-INJECT',
+  budgetId: budgetObjA30.id,
+  company_id: contextB30.companyId, // IA genera company_id de B
+  companyId: contextB30.companyId,
+  company_phone: phoneTenantB30,     // IA genera teléfono de B
+  client: { name: 'Inyección IA' },
+  financials: { totalAmount: 300 }
+};
+const defendedInv = saveInvoiceTenant(contextA30, maliciousInvoice);
+const rowDefended = currentDb.prepare("SELECT company_id, company_phone FROM invoices WHERE id = ?").get(maliciousInvoice.id);
+
+assert(rowDefended && rowDefended.company_id === contextA30.companyId, "13. Inyección IA bloqueada: el backend impone el company_id de la sesión e ignora el del modelo");
+assert(rowDefended && rowDefended.company_phone === phoneTenantA30, "14. Inyección IA bloqueada: el backend impone el teléfono de la sesión e ignora el del modelo");
+assert(rowDefended.company_id !== contextB30.companyId, "15. Aislamiento IA: la factura jamás se asigna a Empresa B");
+
+// ─── G. LECTURA TENANT-SCOPED & ZERO-DISCLOSURE ───
+const legitimateReadA = getInvoiceTenant(contextA30.companyId, invoiceObjA.id);
+const legitimateReadContextA = getInvoiceTenant(contextA30, invoiceObjA.id);
+const crossTenantReadB = getInvoiceTenant(contextB30.companyId, invoiceObjA.id);
+
+assert(Boolean(legitimateReadA && legitimateReadA.id === invoiceObjA.id), "16. Lectura legítima: getInvoice(companyId, id) retorna la factura propia");
+assert(Boolean(legitimateReadContextA && legitimateReadContextA.id === invoiceObjA.id), "17. Lectura por contexto: getInvoice(authenticatedContext, id) retorna la factura");
+assert(crossTenantReadB === null, "18. Cross-tenant read: Empresa B no puede leer factura de Empresa A (retorna null)");
+assert(crossTenantReadB === null, "19. Zero-Disclosure: no se revelan metadatos, cliente ni importes");
+
+// ─── H. CROSS-TENANT UPDATE ───
+const maliciousInvoiceUpdate = {
+  id: invoiceObjA.id,
+  client: { name: 'Cliente Hackeado' },
+  financials: { totalAmount: 1 }
+};
+const updateResultB30 = updateInvoiceTenant(contextB30.companyId, maliciousInvoiceUpdate);
+const checkUnchangedInvA = currentDb.prepare("SELECT client_name, total_amount FROM invoices WHERE id = ?").get(invoiceObjA.id);
+
+assert(updateResultB30 === null, "20. Cross-tenant update: updateInvoice rechaza la modificación de factura ajena");
+assert(checkUnchangedInvA.client_name === 'Cliente Carlos A' && checkUnchangedInvA.total_amount === 1500, "21. Integridad de datos: los datos de la factura de A permanecen intactos");
+
+// Actualización legítima por Empresa A
+const legitimateInvUpdate = updateInvoiceTenant(contextA30.companyId, {
+  ...invoiceObjA,
+  status: 'PAGADA'
+});
+const checkUpdatedInvA = currentDb.prepare("SELECT status FROM invoices WHERE id = ?").get(invoiceObjA.id);
+assert(Boolean(legitimateInvUpdate && checkUpdatedInvA.status === 'PAGADA'), "22. Actualización legítima: Empresa A puede modificar su propia factura");
+
+// ─── I. CROSS-TENANT DELETE ───
+const delInvResultB = deleteInvoiceTenant(contextB30.companyId, invoiceObjA.id);
+const checkStillExistsInvA = currentDb.prepare("SELECT id FROM invoices WHERE id = ?").get(invoiceObjA.id);
+
+assert(delInvResultB.deleted === false, "23. Cross-tenant delete: Empresa B no puede eliminar factura de Empresa A");
+assert(Boolean(checkStillExistsInvA && checkStillExistsInvA.id === invoiceObjA.id), "24. Factura protegida: permanece en la base de datos tras intento de borrado ajeno");
+
+// Borrado legítimo por Empresa A
+const delInvResultA = deleteInvoiceTenant(contextA30.companyId, invoiceObjA.id);
+const checkDeletedInvA = currentDb.prepare("SELECT id FROM invoices WHERE id = ?").get(invoiceObjA.id);
+assert(delInvResultA.deleted === true && !checkDeletedInvA, "25. Borrado legítimo: Empresa A puede eliminar su propia factura");
+
+// ─── J. LISTADOS POR TENANT (LISTINVOICES) ───
+const invoiceObjB = {
+  id: 'INV-TEST-30-B1',
+  budgetId: budgetObjB30.id,
+  client: { name: 'Cliente Laura B' },
+  financials: { totalAmount: 2500 },
+  status: 'PENDIENTE_PAGO'
+};
+saveInvoiceTenant(contextB30, invoiceObjB);
+
+const listInvA = listInvoicesTenant(contextA30.companyId);
+const listInvB = listInvoicesTenant(contextB30.companyId);
+
+assert(listInvA.every(inv => inv.id !== invoiceObjB.id), "26. Listado aislado: la lista de Empresa A no contiene facturas de Empresa B");
+assert(listInvB.every(inv => inv.id === invoiceObjB.id), "27. Listado aislado: la lista de Empresa B contiene únicamente sus facturas");
+
+// Empresa sin facturas
+const listInvC = listInvoicesTenant(compC30.companyId);
+assert(Array.isArray(listInvC) && listInvC.length === 0, "28. Empresa sin facturas: retorna lista vacía ([]) correctamente");
+
+// ─── K. PROHIBICIÓN DE CONSULTA SIN TENANT CONTEXT ───
+const unauthSingleInvoiceLookup = getInvoiceTenant(invoiceObjB.id);
+assert(unauthSingleInvoiceLookup === null, "29. Prohibición estricta: llamada getInvoice(id) sin tenant context es rechazada (retorna null)");
+
+// ─── L. COMPATIBILIDAD LEGACY DUAL-READ ───
+const legacyListInvA = listInvoicesTenant(phoneTenantA30);
+const legacyReadInvB = getInvoiceTenant(phoneTenantB30, invoiceObjB.id);
+assert(Array.isArray(legacyListInvA), "30. Compatibilidad legacy: listInvoices(phone) continúa respondiendo correctamente");
+assert(Boolean(legacyReadInvB && legacyReadInvB.id === invoiceObjB.id), "31. Compatibilidad legacy: getInvoice(phone, id) resuelve y retorna la factura");
+
+// ─── M. FLUJO DE GATEWAY Y SESIÓN DE WHATSAPP ───
+const sessionB = getUserSession(`${phoneTenantB30}@s.whatsapp.net`);
+assert(Boolean(sessionB && sessionB.companyId === compB30.companyId), "32. Gateway: sesión en memoria resuelve companyId canónico");
+assert(sessionB.invoices && sessionB.invoices.has(invoiceObjB.id), "33. Gateway: getUserSession carga las facturas con scope de company_id");
+
+// ─── N. RESTRICCIÓN FOREIGN KEY & PRAGMA INTEGRITY CHECK ───
+let fkConstraintBlockedInv = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO invoices (id, company_id, budget_id, company_phone, client_name, total_amount, status, created_at)
+    VALUES ('INV-INVALID-FK', '00000000-0000-0000-0000-000000000000', '', '34699999999', 'Fake', 10, 'PENDIENTE', '2026-01-01')
+  `).run();
+} catch (e) {
+  fkConstraintBlockedInv = true;
+}
+assert(fkConstraintBlockedInv === true, "34. Foreign Key estricta: SQLite rechaza invoices con company_id inexistente en companies");
+
+// PRAGMA foreign_key_check e integrity_check sobre la base de datos de test
+const fkViolations30 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult30 = currentDb.prepare("PRAGMA integrity_check;").get();
+
+assert(fkViolations30.length === 0, "35. PRAGMA foreign_key_check: cero violaciones de claves foráneas");
+assert(integrityResult30.integrity_check === 'ok', "36. PRAGMA integrity_check: la base de datos de test está 100% íntegra (ok)");
+
+// Limpieza final de TEST 30
+cleanupTest30(phoneTenantA30);
+cleanupTest30(phoneTenantB30);
+cleanupTest30(phoneTenantC30);
+userSessions.delete(`${phoneTenantA30}@s.whatsapp.net`);
+userSessions.delete(`${phoneTenantB30}@s.whatsapp.net`);
+userSessions.delete(`${phoneTenantC30}@s.whatsapp.net`);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
@@ -2747,3 +3087,4 @@ if (passedCount === totalCount) {
   console.error(`❌ RESULTADO: ${passedCount}/${totalCount} pruebas superadas.`);
 }
 console.log("==========================================================");
+

@@ -336,7 +336,7 @@ export function getUserSession(remoteJid, senderNumber) {
   for (const b of dbBudgets) {
     if (b && b.id) session.budgets.set(b.id, b);
   }
-  const dbInvoices = listInvoices(canonicalIdentifier, 100);
+  const dbInvoices = listInvoices(companyId || canonicalIdentifier, 100);
   for (const inv of dbInvoices) {
     if (inv && inv.id) session.invoices.set(inv.id, inv);
   }
@@ -1098,7 +1098,9 @@ async function startWhatsAppGateway() {
 
       // Persistir factura en SQLite
       const cleanPhone = session.phone || remoteJid.replace(/\D/g, '');
-      saveInvoice(cleanPhone, invoice);
+      invoice.companyId = session.companyId;
+      invoice.company_id = session.companyId;
+      saveInvoice(session.companyId || cleanPhone, invoice);
 
       // Generar PDF formal de Factura
       const invoicePdfBuffer = await generateInvoicePDF(invoice);
@@ -1229,8 +1231,10 @@ async function startWhatsAppGateway() {
       if (!session.invoices) session.invoices = new Map();
       session.invoices.set(advanceInvoice.id, advanceInvoice);
 
-      saveInvoice(cleanPhone, advanceInvoice);
-      saveBudget(cleanPhone, targetBudget);
+      advanceInvoice.companyId = session.companyId;
+      advanceInvoice.company_id = session.companyId;
+      saveInvoice(session.companyId || cleanPhone, advanceInvoice);
+      saveBudget(session.companyId || cleanPhone, targetBudget);
 
       const invoicePdfBuffer = await generateInvoicePDF(advanceInvoice);
       const invoiceFileName = `Factura_Anticipo_${advanceInvoice.id}.pdf`;
@@ -1335,12 +1339,12 @@ async function startWhatsAppGateway() {
 
       // Si la obra queda liquidada o se cubre el saldo, actualizar las facturas pendientes a 'PAGADA'
       if (receipt.remainingBalance <= 0) {
-        const allInvoices = listInvoices(cleanPhone, 50);
+        const allInvoices = listInvoices(session.companyId || cleanPhone, 50);
         for (const inv of allInvoices) {
           if (inv.budgetId === targetBudget.id && inv.status !== 'PAGADA') {
             inv.status = 'PAGADA';
             inv.paidAt = new Date().toISOString();
-            saveInvoice(cleanPhone, inv);
+            saveInvoice(session.companyId || cleanPhone, inv);
             if (session.invoices && session.invoices.has(inv.id)) {
               session.invoices.set(inv.id, inv);
             }
@@ -3409,7 +3413,7 @@ async function startWhatsAppGateway() {
 
           extraText = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n👉 *Sugerencia del Secretario (Nivel B):*\n${proposal.promptMessage}\n\n_(Responde *"Sí"* para preparar el recordatorio o *"No"* para descartar)_`;
         } else {
-          const unpaidInvoices = getUnpaidInvoices(senderNumber);
+          const unpaidInvoices = getUnpaidInvoices(session.companyId || senderNumber);
           const urgentInv = unpaidInvoices.find(i => i.daysPending >= 7);
           if (urgentInv) {
             const proposal = buildInvoiceFollowUpProposal(urgentInv, session.company);

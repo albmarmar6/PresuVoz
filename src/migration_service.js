@@ -11,11 +11,13 @@
 import { migration as baselineMigration } from './migrations/001_baseline_schema.js';
 import { migration as identityMigration } from './migrations/002_identity_foundation.js';
 import { migration as budgetsMigration } from './migrations/003_budgets_company_id.js';
+import { migration as invoicesMigration } from './migrations/004_invoices_company_id.js';
 
 export const MIGRATIONS = [
   baselineMigration,
   identityMigration,
-  budgetsMigration
+  budgetsMigration,
+  invoicesMigration
 ];
 
 /**
