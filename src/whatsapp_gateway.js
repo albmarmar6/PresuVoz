@@ -170,20 +170,94 @@ export function setConversationState(remoteJid, state) {
 export const userSessions = new Map();
 
 /**
+ * ─── EXTRACTION & CORRESPONDENCE GATE: Remitente e Identidad ───
+ * Extrae y valida el identificador canónico del remitente a partir de remoteJid y senderNumber.
+ * 
+ * Reglas de correspondencia estricta:
+ * 1. Formatos legítimos de JID telefónico (@s.whatsapp.net, @c.us):
+ *    - Se extrae el número de teléfono del usuario (descartando sufijos de dispositivo como ':0').
+ *    - Si además se proporciona senderNumber, AMBOS DEBEN coincidir exactamente en dígitos.
+ *    - Si difieren, se detecta un intento de suplantación o mismatch y se rechaza inmediatamente (retorna null).
+ * 2. Formato LID (@lid):
+ *    - Si se proporciona senderNumber, se verifica que no sea una inyección vacía y se valida.
+ *    - Si no se proporciona senderNumber, se utiliza el identificador del LID.
+ * 3. Formato plano (solo dígitos o número):
+ *    - Si se pasan ambos, deben ser idénticos.
+ * 4. Canales, grupos (@g.us), difusiones (@broadcast) retornan null.
+ */
+export function extractCanonicalSenderIdentifier(remoteJid, senderNumber) {
+  if (!remoteJid && !senderNumber) return null;
+
+  const rawJid = String(remoteJid || '').trim();
+  const rawSender = String(senderNumber || '').trim();
+
+  // Si remoteJid contiene '@'
+  if (rawJid.includes('@')) {
+    const [userPart, server] = rawJid.split('@');
+    const cleanJidUser = userPart.split(':')[0].replace(/\D/g, '');
+
+    // Descartar grupos, difusiones y canales
+    if (server.includes('g.us') || server.includes('broadcast') || server.includes('newsletter')) {
+      return null;
+    }
+
+    // JIDs telefónicos estándar de WhatsApp (@s.whatsapp.net o @c.us)
+    if (server.includes('s.whatsapp.net') || server.includes('c.us')) {
+      if (rawSender) {
+        const cleanSender = rawSender.replace(/\D/g, '');
+        // Si se proporcionan ambos, DEBEN coincidir en el número de teléfono
+        if (cleanSender && cleanJidUser && cleanSender !== cleanJidUser) {
+          console.warn(`🛑 [Identidad WhatsApp] Discrepancia crítica de remitente: remoteJid='${cleanJidUser}' !== senderNumber='${cleanSender}'. Rechazando.`);
+          return null;
+        }
+        return cleanSender || cleanJidUser || null;
+      }
+      return cleanJidUser || null;
+    }
+
+    // JIDs de tipo LID (@lid)
+    if (server.includes('lid')) {
+      if (rawSender) {
+        const cleanSender = rawSender.replace(/\D/g, '');
+        return cleanSender || cleanJidUser || null;
+      }
+      return cleanJidUser || null;
+    }
+
+    return cleanJidUser || null;
+  }
+
+  // Si remoteJid es un identificador plano (número)
+  const cleanJid = rawJid.replace(/\D/g, '');
+  if (rawSender) {
+    const cleanSender = rawSender.replace(/\D/g, '');
+    if (cleanJid && cleanSender && cleanJid !== cleanSender) {
+      console.warn(`🛑 [Identidad WhatsApp] Discrepancia de remitente detectada: remoteJid='${cleanJid}' !== senderNumber='${cleanSender}'. Rechazando.`);
+      return null;
+    }
+    return cleanSender || cleanJid || null;
+  }
+
+  return cleanJid || null;
+}
+
+/**
  * Autentica una sesión de WhatsApp de forma estricta contra la capa canónica de identidad.
  * Flujo:
- * WhatsApp/JID -> cleanPhone -> resolveAuthenticatedContext('whatsapp', cleanPhone) -> authContext -> companyId
+ * WhatsApp/JID + senderNumber -> extractCanonicalSenderIdentifier() -> cleanIdentifier -> resolveAuthenticatedContext('whatsapp', cleanIdentifier) -> authContext
  *
- * REGLA ESTRICTA DE AISLAMIENTO:
- * Si resolveAuthenticatedContext() retorna null:
- * - Se rechaza la autenticación (retorna null).
- * - NUNCA recurre a getCompany(phone) como fallback.
- * - NUNCA crea una empresa automática.
+ * REGLAS ESTRICTAS DE SEGURIDAD:
+ * 1. Si no hay correspondencia fiable entre remoteJid y senderNumber, retorna null.
+ * 2. Si resolveAuthenticatedContext() retorna null, retorna null.
+ * 3. Cero fallbacks a getCompany(phone).
+ * 4. Cero creación automática de empresa.
  */
 export function authenticateWhatsAppSession(remoteJid, senderNumber) {
-  const cleanPhone = senderNumber || String(remoteJid || '').replace(/\D/g, '');
-  if (!cleanPhone) return null;
-  const authContext = resolveAuthenticatedContext('whatsapp', cleanPhone);
+  const canonicalIdentifier = extractCanonicalSenderIdentifier(remoteJid, senderNumber);
+  if (!canonicalIdentifier) {
+    return null;
+  }
+  const authContext = resolveAuthenticatedContext('whatsapp', canonicalIdentifier);
   if (!authContext) {
     return null;
   }
@@ -192,22 +266,51 @@ export function authenticateWhatsAppSession(remoteJid, senderNumber) {
 
 /**
  * Obtiene o inicializa la sesión de usuario para un chat de WhatsApp autenticado.
- * Si el remitente NO tiene un canal autorizado en channel_identities, retorna null.
- * NO existe fallback a getCompany(phone).
+ *
+ * REGLAS DE AUDITORÍA Y MEMORIA:
+ * 1. Valida identidad antes de retornar o usar cualquier sesión.
+ * 2. Si la identidad no es válida o fue desactivada, PURGA la sesión de memoria (userSessions.delete(remoteJid)).
+ * 3. Si detecta un cambio de empresa (companyId) en el mismo JID, reinicia la sesión en memoria
+ *    y limpia presupuestos/facturas cacheados de la empresa previa.
+ * 4. Si el remitente NO tiene un canal autorizado en channel_identities, retorna null.
  */
 export function getUserSession(remoteJid, senderNumber) {
-  const cleanPhone = senderNumber || String(remoteJid || '').replace(/\D/g, '');
-  const authContext = authenticateWhatsAppSession(remoteJid, cleanPhone);
+  const canonicalIdentifier = extractCanonicalSenderIdentifier(remoteJid, senderNumber);
+  if (!canonicalIdentifier) {
+    // Si la identidad no es válida o hay discrepancia, invalidar sesión previa en este JID
+    if (remoteJid && userSessions.has(remoteJid)) {
+      userSessions.delete(remoteJid);
+    }
+    return null;
+  }
+
+  const authContext = authenticateWhatsAppSession(remoteJid, senderNumber);
   if (!authContext) {
+    // Si la identidad está inactiva o revocada, purgar inmediatamente de memoria
+    if (remoteJid && userSessions.has(remoteJid)) {
+      userSessions.delete(remoteJid);
+    }
     return null;
   }
 
   const resolvedCompany = authContext.company;
   const companyId = authContext.companyId;
 
-  if (!userSessions.has(remoteJid)) {
+  // Si ya existía una sesión en memoria para este remoteJid
+  if (userSessions.has(remoteJid)) {
+    const existingSession = userSessions.get(remoteJid);
+    // Verificar si el companyId o el teléfono cambiaron
+    if (existingSession.companyId !== companyId || existingSession.phone !== canonicalIdentifier) {
+      console.warn(`🔄 [Sesión WhatsApp] Cambio de empresa detectado en JID '${remoteJid}' (${existingSession.companyId} -> ${companyId}). Reiniciando sesión en memoria.`);
+      existingSession.budgets.clear();
+      existingSession.invoices.clear();
+      existingSession.activeBudgetId = null;
+      existingSession.pendingAction = null;
+      existingSession.pendingDisambiguation = null;
+    }
+  } else {
     userSessions.set(remoteJid, {
-      phone: cleanPhone,
+      phone: canonicalIdentifier,
       companyId: companyId,
       authContext: authContext,
       company: resolvedCompany,
@@ -219,19 +322,21 @@ export function getUserSession(remoteJid, senderNumber) {
       lastBriefingDate: null,
       lastEveningReminderDate: null
     });
-    console.log(`📦 Sesión inicializada para ${cleanPhone} (companyId: ${companyId})`);
+    console.log(`📦 Sesión inicializada para ${canonicalIdentifier} (companyId: ${companyId})`);
   }
+
   const session = userSessions.get(remoteJid);
+  session.phone = canonicalIdentifier;
   session.authContext = authContext;
   session.companyId = companyId;
   session.company = resolvedCompany;
 
-  // Refrescar siempre desde SQLite para reflejar cambios en tiempo real (firmas web, cobros, etc.)
-  const dbBudgets = listBudgets(cleanPhone, 100);
+  // Refrescar siempre desde SQLite para reflejar cambios en tiempo real
+  const dbBudgets = listBudgets(canonicalIdentifier, 100);
   for (const b of dbBudgets) {
     if (b && b.id) session.budgets.set(b.id, b);
   }
-  const dbInvoices = listInvoices(cleanPhone, 100);
+  const dbInvoices = listInvoices(canonicalIdentifier, 100);
   for (const inv of dbInvoices) {
     if (inv && inv.id) session.invoices.set(inv.id, inv);
   }

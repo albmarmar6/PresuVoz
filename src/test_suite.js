@@ -9,7 +9,9 @@ import {
   shouldProcessIncomingMessage,
   isAuthorizedEgressRecipient,
   authenticateWhatsAppSession,
-  getUserSession
+  getUserSession,
+  extractCanonicalSenderIdentifier,
+  userSessions
 } from './whatsapp_gateway.js';
 
 export function computeFileSha256(filePath) {
@@ -2372,6 +2374,111 @@ assert(crossTenantOwnerViolation === true && violationErrorMessage.includes('Vio
 // Limpieza final de datos de TEST 27
 cleanupTest27(fallbackPhone);
 cleanupTest27(validPhone);
+
+console.log("\nTEST 28: Correspondencia Estricta de Identidad del Remitente y Auditoría de Sesión en Memoria (WhatsApp Gatekeeper)");
+
+const phoneTenantA = '34688000001';
+const jidTenantA = `${phoneTenantA}@s.whatsapp.net`;
+const phoneTenantB = '34688000002';
+const jidTenantB = `${phoneTenantB}@s.whatsapp.net`;
+const phoneUnauthorized = '34688999999';
+const jidUnauthorized = `${phoneUnauthorized}@s.whatsapp.net`;
+
+// Pre-limpieza
+const cleanupTest28 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+cleanupTest28(phoneTenantA);
+cleanupTest28(phoneTenantB);
+cleanupTest28(phoneUnauthorized);
+userSessions.delete(jidTenantA);
+userSessions.delete(jidTenantB);
+userSessions.delete(jidUnauthorized);
+
+// Crear Empresa A y Empresa B con identidades legítimas
+const compDataA = createCompanyWithIdentity({
+  name: 'Empresa A Reformas S.L.',
+  phone: phoneTenantA,
+  cif: 'B-88000001',
+  trade: 'Reformas Generales'
+});
+
+const compDataB = createCompanyWithIdentity({
+  name: 'Empresa B Fontanería S.L.',
+  phone: phoneTenantB,
+  cif: 'B-88000002',
+  trade: 'Fontanería'
+});
+
+// ─── 1. Un remoteJid legítimo con su número correspondiente ───
+const identLegit = extractCanonicalSenderIdentifier(jidTenantA, phoneTenantA);
+const authLegit = authenticateWhatsAppSession(jidTenantA, phoneTenantA);
+const sessionLegit = getUserSession(jidTenantA, phoneTenantA);
+
+assert(identLegit === phoneTenantA, "1.1. Correspondencia legítima: extractCanonicalSenderIdentifier extrae el teléfono verificado");
+assert(Boolean(authLegit && authLegit.companyId === compDataA.companyId), "1.2. Autenticación legítima: resuelve el companyId de la Empresa A");
+assert(Boolean(sessionLegit && sessionLegit.companyId === compDataA.companyId && userSessions.has(jidTenantA)), "1.3. Sesión legítima: inicializa la sesión en memoria asociada al companyId de A");
+
+// ─── 2. Un remoteJid de Empresa A acompañado de senderNumber de Empresa B (Mismatch / Spoofing) ───
+const identSpoofed = extractCanonicalSenderIdentifier(jidTenantA, phoneTenantB);
+const authSpoofed = authenticateWhatsAppSession(jidTenantA, phoneTenantB);
+const sessionSpoofed = getUserSession(jidTenantA, phoneTenantB);
+
+assert(identSpoofed === null, "2.1. Bloqueo de discrepancia: extractCanonicalSenderIdentifier detecta discordancia y retorna null");
+assert(authSpoofed === null, "2.2. Bloqueo de suplantación: authenticateWhatsAppSession rechaza la petición con senderNumber cruzado");
+assert(sessionSpoofed === null, "2.3. Protección de sesión: getUserSession retorna null y no permite que senderNumber de B suplante a A");
+
+// ─── 3. Un remitente sin identidad autorizada ───
+const identUnauth = extractCanonicalSenderIdentifier(jidUnauthorized, phoneUnauthorized);
+const authUnauth = authenticateWhatsAppSession(jidUnauthorized, phoneUnauthorized);
+const sessionUnauth = getUserSession(jidUnauthorized, phoneUnauthorized);
+
+assert(identUnauth === phoneUnauthorized, "3.1. Formato de número limpio extraído correctamente para remitente desconocido");
+assert(authUnauth === null, "3.2. Rechazo absoluto: authenticateWhatsAppSession devuelve null si no existe channel_identity");
+assert(sessionUnauth === null && !userSessions.has(jidUnauthorized), "3.3. Cero persistencia en memoria: remitente no autorizado no crea sesión en userSessions");
+
+// ─── 4. Una identidad desactivada después de haber inicializado una sesión (Purga Inmediata de Memoria) ───
+const sessionBeforeDeact = getUserSession(jidTenantA, phoneTenantA);
+assert(Boolean(sessionBeforeDeact && userSessions.has(jidTenantA)), "4.1. Pre-condición: la sesión en memoria de la Empresa A está activa");
+
+deactivateChannelIdentity('whatsapp', phoneTenantA);
+
+const authAfterDeactivation = authenticateWhatsAppSession(jidTenantA, phoneTenantA);
+const sessionAfterDeactivation = getUserSession(jidTenantA, phoneTenantA);
+
+assert(authAfterDeactivation === null, "4.2. Identidad desactivada: authenticateWhatsAppSession devuelve null inmediatamente");
+assert(sessionAfterDeactivation === null, "4.3. Identidad desactivada: getUserSession devuelve null");
+assert(userSessions.has(jidTenantA) === false, "4.4. Purga inmediata: la sesión en memoria es totalmente ELIMINADA de userSessions al desactivar la identidad");
+
+reactivateChannelIdentity('whatsapp', phoneTenantA);
+
+// ─── 5. Un intento de reutilizar una sesión existente con una identidad distinta ───
+const sessionInitialA = getUserSession(jidTenantA, phoneTenantA);
+assert(Boolean(sessionInitialA && sessionInitialA.companyId === compDataA.companyId), "5.1. Sesión para Empresa A re-inicializada");
+sessionInitialA.budgets.set('PRE-TEST-A1', { id: 'PRE-TEST-A1', total: 500 });
+sessionInitialA.invoices.set('FAC-TEST-A1', { id: 'FAC-TEST-A1', total: 500 });
+
+// Simular reasignación de canal en la base de datos para apuntar a Empresa B en el mismo identificador
+currentDb.prepare("UPDATE channel_identities SET company_id = ? WHERE channel_identifier = ?").run(compDataB.companyId, phoneTenantA);
+
+const sessionReassigned = getUserSession(jidTenantA, phoneTenantA);
+assert(Boolean(sessionReassigned && sessionReassigned.companyId === compDataB.companyId), "5.2. Nueva resolución de identidad: resuelve el nuevo companyId de Empresa B tras cambio canónico");
+assert(sessionReassigned.budgets.has('PRE-TEST-A1') === false, "5.3. Aislamiento estricto de memoria: los presupuestos de Empresa A fueron purgados y no contaminan a Empresa B");
+assert(sessionReassigned.invoices.has('FAC-TEST-A1') === false, "5.4. Aislamiento estricto de memoria: las facturas de Empresa A fueron purgadas y no contaminan a Empresa B");
+
+// Limpieza final de TEST 28
+cleanupTest28(phoneTenantA);
+cleanupTest28(phoneTenantB);
+cleanupTest28(phoneUnauthorized);
+userSessions.delete(jidTenantA);
+userSessions.delete(jidTenantB);
+userSessions.delete(jidUnauthorized);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {
