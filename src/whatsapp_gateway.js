@@ -38,6 +38,7 @@ import {
   formatQuarterWhatsAppSummary,
   getQuarterSummary
 } from './fiscal_service.js';
+import { resolveAuthenticatedContext } from './identity_service.js';
 import {
   getCompany,
   saveCompany,
@@ -846,10 +847,16 @@ async function startWhatsAppGateway() {
 
   function getUserSession(remoteJid, senderNumber) {
     const cleanPhone = senderNumber || String(remoteJid).replace(/\D/g, '');
+    const authContext = resolveAuthenticatedContext('whatsapp', cleanPhone);
+    const resolvedCompany = authContext ? authContext.company : getCompany(cleanPhone);
+    const companyId = authContext ? authContext.companyId : resolvedCompany?.id || null;
+
     if (!userSessions.has(remoteJid)) {
       userSessions.set(remoteJid, {
         phone: cleanPhone,
-        company: getCompany(cleanPhone),
+        companyId: companyId,
+        authContext: authContext,
+        company: resolvedCompany,
         activeBudgetId: null,
         budgets: new Map(),
         invoices: new Map(),
@@ -858,10 +865,12 @@ async function startWhatsAppGateway() {
         lastBriefingDate: null,
         lastEveningReminderDate: null
       });
-      console.log(`📦 Sesión inicializada para ${cleanPhone}`);
+      console.log(`📦 Sesión inicializada para ${cleanPhone} (companyId: ${companyId || 'legacy'})`);
     }
     const session = userSessions.get(remoteJid);
-    session.company = getCompany(cleanPhone);
+    session.authContext = authContext;
+    session.companyId = companyId;
+    session.company = resolvedCompany;
 
     // Refrescar siempre desde SQLite para reflejar cambios en tiempo real (firmas web, cobros, etc.)
     const dbBudgets = listBudgets(cleanPhone, 100);

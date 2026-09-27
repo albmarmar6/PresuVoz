@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { runMigrations } from './migration_service.js';
 
 const DATA_DIR = path.resolve('data');
@@ -87,6 +88,8 @@ export function getCompany(phone) {
     return { ...DEFAULT_COMPANY, phone: cleanPhone, isConfigured: false };
   }
   return {
+    id: row.id || null,
+    companyId: row.id || null,
     phone: row.phone,
     name: row.name || null,
     fiscalName: row.fiscal_name || row.name || null,
@@ -115,10 +118,19 @@ export function getCompany(phone) {
   };
 }
 
+export function getCompanyById(companyId) {
+  if (!companyId) return null;
+  const stmt = db.prepare('SELECT phone FROM companies WHERE id = ?');
+  const row = stmt.get(companyId);
+  if (!row) return null;
+  return getCompany(row.phone);
+}
+
 export function saveCompany(phone, data = {}) {
   const cleanPhone = String(phone).replace(/\D/g, '');
   const existing = getCompany(cleanPhone);
   const now = new Date().toISOString();
+  const companyId = data.id || data.companyId || existing.id || crypto.randomUUID();
 
   const name = data.name !== undefined ? data.name : existing.name;
   const fiscalName = data.fiscalName !== undefined ? data.fiscalName : existing.fiscalName;
@@ -146,13 +158,14 @@ export function saveCompany(phone, data = {}) {
 
   const stmt = db.prepare(`
     INSERT INTO companies (
-      phone, name, fiscal_name, owner_name, cif, trade, address, city, working_hours,
+      id, phone, name, fiscal_name, owner_name, cif, trade, address, city, working_hours,
       payment_terms, quote_validity_days, entity_type, irpf_rate, invoice_series,
       phone_contact, email, iban, bizum, logo_path, gestoria_email, default_tax_rate,
       default_advance, onboarding_step, onboarding_data_json, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(phone) DO UPDATE SET
+      id = COALESCE(companies.id, excluded.id),
       name = excluded.name,
       fiscal_name = excluded.fiscal_name,
       owner_name = excluded.owner_name,
@@ -180,11 +193,43 @@ export function saveCompany(phone, data = {}) {
   `);
 
   stmt.run(
-    cleanPhone, name, fiscalName, ownerName, cif, trade, address, city, workingHours,
+    companyId, cleanPhone, name, fiscalName, ownerName, cif, trade, address, city, workingHours,
     paymentTerms, quoteValidityDays, entityType, irpfRate, invoiceSeries,
     phoneContact, email, iban, bizum, logoPath, gestoriaEmail, defaultTaxRate,
     defaultAdvance, onboardingStep, onboardingDataJson, now, now
   );
+
+  // Sincronizar automáticamente channel_identity, user y membership
+  try {
+    const chExisting = db.prepare('SELECT id FROM channel_identities WHERE channel = ? AND channel_identifier = ?').get('whatsapp', cleanPhone);
+    if (!chExisting) {
+      db.prepare(`
+        INSERT INTO channel_identities (id, company_id, channel, channel_identifier, is_active, created_at, updated_at)
+        VALUES (?, ?, 'whatsapp', ?, 1, ?, ?)
+      `).run(crypto.randomUUID(), companyId, cleanPhone, now, now);
+    }
+
+    let user = db.prepare('SELECT id FROM users WHERE phone = ?').get(cleanPhone);
+    let userId = user ? user.id : null;
+    if (!userId) {
+      userId = crypto.randomUUID();
+      db.prepare(`
+        INSERT INTO users (id, name, email, phone, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?)
+      `).run(userId, ownerName || name || 'Propietario', email, cleanPhone, now, now);
+    }
+
+    const memExisting = db.prepare('SELECT id FROM memberships WHERE user_id = ? AND company_id = ?').get(userId, companyId);
+    if (!memExisting) {
+      db.prepare(`
+        INSERT INTO memberships (id, user_id, company_id, role, status, created_at, updated_at)
+        VALUES (?, ?, ?, 'OWNER', 'ACTIVE', ?, ?)
+      `).run(crypto.randomUUID(), userId, companyId, now, now);
+    }
+  } catch (syncErr) {
+    // Sincronización silenciosa en caso de que aún no existan las tablas (p. ej. pre-migración)
+  }
+
   return getCompany(cleanPhone);
 }
 

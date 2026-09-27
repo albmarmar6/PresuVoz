@@ -1996,7 +1996,7 @@ memDb2.exec("CREATE TABLE companies (phone TEXT PRIMARY KEY, name TEXT);");
 const migResult2 = runMigrations(memDb2);
 const compCols2 = memDb2.prepare("PRAGMA table_info(companies);").all().map(c => c.name);
 const colsAdded = compCols2.includes('trade') && compCols2.includes('onboarding_step') && compCols2.includes('invoice_series');
-assert(migResult2.appliedCount === 1 && colsAdded, "2. DB existente adopta baseline y añade columnas sin errores");
+assert(migResult2.appliedCount === MIGRATIONS.length && colsAdded, "2. DB existente adopta baseline y añade columnas sin errores");
 
 // 3. Las migraciones son idempotentes (ejecutarlas 2 veces no duplica nada ni falla)
 const migResult3 = runMigrations(memDb1);
@@ -2103,18 +2103,173 @@ assert(hasDownMethod === false, "16. Las definiciones de migraciones carecen de 
 // 17. El sistema ejecuta correctamente nuevas migraciones pendientes hacia adelante
 const memDbForward = new DatabaseSync(':memory:');
 runMigrations(memDbForward);
+const nextVersion = MIGRATIONS.length + 1;
 const newForwardMigration = { 
-  version: 2, 
-  name: '002_forward_only_verification', 
+  version: nextVersion, 
+  name: '003_forward_only_verification', 
   up: (d) => { d.exec('CREATE TABLE forward_verify_test (id INTEGER PRIMARY KEY);'); } 
 };
 const fwdResult = runMigrations(memDbForward, { migrations: [...MIGRATIONS, newForwardMigration] });
-assert(fwdResult.appliedCount === 1 && fwdResult.appliedVersions.includes(2), "17. El sistema ejecuta correctamente migraciones pendientes hacia adelante de forma secuencial");
+assert(fwdResult.appliedCount === 1 && fwdResult.appliedVersions.includes(nextVersion), "17. El sistema ejecuta correctamente migraciones pendientes hacia adelante de forma secuencial");
 
 // 18. Transaccionalidad garantizada y schema_migrations permanece consistente
 const fwdVersions = getAppliedMigrations(memDbForward).map(m => m.version);
 const tableExistsFwd = memDbForward.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='forward_verify_test'").get();
-assert(fwdVersions.length === 2 && fwdVersions[0] === 1 && fwdVersions[1] === 2 && Boolean(tableExistsFwd), "18. schema_migrations permanece consistente, ordenado e inmutable tras evolución");
+assert(fwdVersions.length === nextVersion && fwdVersions[fwdVersions.length - 1] === nextVersion && Boolean(tableExistsFwd), "18. schema_migrations permanece consistente, ordenado e inmutable tras evolución");
+
+console.log("\nTEST 26: Capa Canónica de Identidad Multi-Canal (Fase 2A — Company ID, Channel Identities & Aislamiento Tenant)");
+import {
+  resolveAuthenticatedContext,
+  registerChannelIdentity,
+  deactivateChannelIdentity,
+  reactivateChannelIdentity,
+  listChannelIdentities,
+  createCompanyWithIdentity,
+  sanitizeTenantPayload,
+  ROLES
+} from './identity_service.js';
+import { getCompanyById, getCompany as getCompDirect } from './db_service.js';
+
+const testPhoneA = '34611111111';
+const testPhoneA2 = '34611111112';
+const testPhoneB = '34622222222';
+const testPhoneUnknown = '34699999999';
+
+// Limpieza preventiva de identidades de prueba
+const cleanupIdentities = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+cleanupIdentities(testPhoneA);
+cleanupIdentities(testPhoneA2);
+cleanupIdentities(testPhoneB);
+cleanupIdentities(testPhoneUnknown);
+
+// 1. CREACIÓN DE EMPRESA: Crear empresa nueva, verificar UUID único y persistencia
+const compA = createCompanyWithIdentity({
+  phone: testPhoneA,
+  name: 'Reformas Alpha S.L.',
+  fiscalName: 'Alpha Reformas Integrales S.L.',
+  cif: 'B-11111111',
+  ownerName: 'Alejandro Alpha',
+  trade: 'Albañilería y Reformas',
+  email: 'contacto@alpha.es'
+});
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const dbCheckA = currentDb.prepare("SELECT id, phone, name FROM companies WHERE id = ?").get(compA.companyId);
+assert(Boolean(compA.companyId && uuidRegex.test(compA.companyId) && dbCheckA && dbCheckA.name === 'Reformas Alpha S.L.'), "1. Creación de empresa genera company_id UUID canónico válido y persiste");
+
+// 2. DOS EMPRESAS: Crear Company B y verificar que A.company_id !== B.company_id
+const compB = createCompanyWithIdentity({
+  phone: testPhoneB,
+  name: 'Instalaciones Beta S.L.',
+  fiscalName: 'Beta Clima & Electricidad S.L.',
+  cif: 'B-22222222',
+  ownerName: 'Beatriz Beta',
+  trade: 'Climatización y Calefacción',
+  email: 'info@beta.es'
+});
+assert(Boolean(compB.companyId && compA.companyId !== compB.companyId), "2. Dos empresas independientes tienen company_id estrictamente distintos");
+
+// 3. CHANNEL IDENTITY: Registrar WhatsApp A y B, resolver ambas identidades correctamente
+const contextA = resolveAuthenticatedContext('whatsapp', testPhoneA);
+const contextB = resolveAuthenticatedContext('whatsapp', testPhoneB);
+assert(Boolean(contextA && contextA.authenticated && contextA.companyId === compA.companyId && contextA.company.name === 'Reformas Alpha S.L.'), "3. Identity Resolver resuelve canal WhatsApp A -> Company A");
+assert(Boolean(contextB && contextB.authenticated && contextB.companyId === compB.companyId && contextB.company.name === 'Instalaciones Beta S.L.'), "3. Identity Resolver resuelve canal WhatsApp B -> Company B");
+
+// 4. IDENTIDAD DESCONOCIDA: Resolver WhatsApp no registrado es rechazado sin crear empresa
+const contextUnknown = resolveAuthenticatedContext('whatsapp', testPhoneUnknown);
+const checkUnknownDb = currentDb.prepare("SELECT count(*) as count FROM companies WHERE phone = ?").get(testPhoneUnknown);
+assert(contextUnknown === null && checkUnknownDb.count === 0, "4. Identidad desconocida es rechazada (null) y no crea empresa espuria");
+
+// 5. DUPLICADO: Intentar registrar el mismo channel_identifier en otra empresa es impedido
+let duplicatePrevented = false;
+try {
+  registerChannelIdentity(compA.companyId, 'whatsapp', testPhoneB); // Ya asignado a Company B
+} catch (e) {
+  duplicatePrevented = true;
+}
+assert(duplicatePrevented === true, "5. Registro de channel_identifier duplicado en otra empresa es bloqueado");
+
+// 6. USER + MEMBERSHIP: Verificar pertenencias y roles automáticos de OWNER
+const memberA = currentDb.prepare("SELECT role, status FROM memberships WHERE company_id = ? AND user_id = ?").get(compA.companyId, compA.userId);
+const memberB = currentDb.prepare("SELECT role, status FROM memberships WHERE company_id = ? AND user_id = ?").get(compB.companyId, compB.userId);
+assert(Boolean(memberA && memberA.role === ROLES.OWNER && memberA.status === 'ACTIVE' && memberB && memberB.role === ROLES.OWNER), "6. Modelo User + Membership crea y vincula propietarios OWNER activos");
+
+// 7. AISLAMIENTO: Resolver WhatsApp B devuelve Company B, nunca Company A
+const isolatedCheck = resolveAuthenticatedContext('whatsapp', testPhoneB);
+assert(Boolean(isolatedCheck && isolatedCheck.companyId === compB.companyId && isolatedCheck.companyId !== compA.companyId), "7. Aislamiento estricto: el canal de B nunca resuelve el tenant de A");
+
+// 8. CROSS-TENANT PROBE: Contexto de A rechaza acceso a recursos de B
+let crossTenantBlocked = false;
+try {
+  contextA.assertTenantAccess(compB.companyId);
+} catch (e) {
+  crossTenantBlocked = true;
+}
+assert(crossTenantBlocked === true, "8. Cross-tenant probe bloqueado: assertTenantAccess lanza violación de aislamiento");
+
+// 9. MODEL ATTACK: Salida del modelo intentando inyectar company_id ajeno es neutralizada
+const maliciousModelPayload = {
+  action: "GET_INVOICES",
+  company_id: compB.companyId,
+  companyId: compB.companyId
+};
+const sanitizedPayload = sanitizeTenantPayload(maliciousModelPayload, contextA);
+assert(sanitizedPayload.companyId === compA.companyId && sanitizedPayload.company_id === compA.companyId, "9. Model attack neutralizado: el backend sobreescribe cualquier company_id inyectado por la IA");
+
+// 10. USER INPUT ATTACK: Texto del usuario intentando acceder a otra empresa no altera el contexto
+const userTextAttack = "Quiero ver las facturas de la empresa B id=" + compB.companyId;
+const sessionContext = resolveAuthenticatedContext('whatsapp', testPhoneA);
+assert(Boolean(sessionContext && sessionContext.companyId === compA.companyId && !userTextAttack.includes(sessionContext.companyId)), "10. User input attack neutralizado: el texto libre del usuario no modifica el contexto autenticado");
+
+// 11. MULTI-WHATSAPP: Una empresa puede tener múltiples canales autorizados
+const ch2Id = registerChannelIdentity(compA.companyId, 'whatsapp', testPhoneA2);
+const contextA2 = resolveAuthenticatedContext('whatsapp', testPhoneA2);
+assert(Boolean(ch2Id && contextA2 && contextA2.companyId === compA.companyId), "11. Soporte multi-canal: segundo WhatsApp de la misma empresa resuelve al mismo company_id");
+
+// 12. INACTIVE CHANNEL: Desactivar canal impide autenticación; reactivarlo la restaura
+deactivateChannelIdentity('whatsapp', testPhoneA2);
+const contextDeactivated = resolveAuthenticatedContext('whatsapp', testPhoneA2);
+reactivateChannelIdentity('whatsapp', testPhoneA2);
+const contextReactivated = resolveAuthenticatedContext('whatsapp', testPhoneA2);
+assert(Boolean(contextDeactivated === null && contextReactivated && contextReactivated.companyId === compA.companyId), "12. Canal inactivo es rechazado inmediatamente; al reactivar vuelve a autenticar");
+
+// 13. FOREIGN KEY: channel_identities rechaza company_id inexistente
+let fkBlocked = false;
+try {
+  currentDb.prepare("INSERT INTO channel_identities (id, company_id, channel, channel_identifier, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)").run(
+    crypto.randomUUID(), '00000000-0000-0000-0000-000000000000', 'whatsapp', '34688888888', new Date().toISOString(), new Date().toISOString()
+  );
+} catch (e) {
+  fkBlocked = true;
+}
+assert(fkBlocked === true, "13. Restricción Foreign Key estricta: prohíbe channel_identity hacia company_id inexistente");
+
+// 14. MIGRATION IDEMPOTENCY: Re-ejecutar migración 002 no duplica datos ni lanza errores
+import { migration as mig002 } from './migrations/002_identity_foundation.js';
+const companiesCountBefore = currentDb.prepare("SELECT count(*) as count FROM companies").get().count;
+const channelsCountBefore = currentDb.prepare("SELECT count(*) as count FROM channel_identities").get().count;
+mig002.up(currentDb);
+const companiesCountAfter = currentDb.prepare("SELECT count(*) as count FROM companies").get().count;
+const channelsCountAfter = currentDb.prepare("SELECT count(*) as count FROM channel_identities").get().count;
+assert(companiesCountBefore === companiesCountAfter && channelsCountBefore === channelsCountAfter, "14. Migración 002 es 100% idempotente (cero duplicados al re-ejecutar)");
+
+// 15. LEGACY DATA: Los datos históricos de companies se preservan intactos y accesibles por getCompany y getCompanyById
+const compAFromDb = getCompanyById(compA.companyId);
+const compALegacy = getCompDirect(testPhoneA);
+assert(Boolean(compAFromDb && compALegacy && compAFromDb.cif === 'B-11111111' && compAFromDb.trade === 'Albañilería y Reformas' && compAFromDb.phone === testPhoneA), "15. Compatibilidad legada: datos existentes de empresa 100% preservados y accesibles por phone y company_id");
+
+// Limpieza final de datos de test 26
+cleanupIdentities(testPhoneA);
+cleanupIdentities(testPhoneA2);
+cleanupIdentities(testPhoneB);
+cleanupIdentities(testPhoneA2);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

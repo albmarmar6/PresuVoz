@@ -9,9 +9,11 @@
  */
 
 import { migration as baselineMigration } from './migrations/001_baseline_schema.js';
+import { migration as identityMigration } from './migrations/002_identity_foundation.js';
 
 export const MIGRATIONS = [
-  baselineMigration
+  baselineMigration,
+  identityMigration
 ];
 
 /**
