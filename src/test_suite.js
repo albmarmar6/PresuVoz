@@ -5,7 +5,12 @@ import crypto from 'node:crypto';
 import { PresuVozEngine } from './engine.js';
 import { PresuVozParser } from './parser.js';
 import { generateInvoicePDF } from './pdf_service.js';
-import { shouldProcessIncomingMessage, isAuthorizedEgressRecipient } from './whatsapp_gateway.js';
+import {
+  shouldProcessIncomingMessage,
+  isAuthorizedEgressRecipient,
+  authenticateWhatsAppSession,
+  getUserSession
+} from './whatsapp_gateway.js';
 
 export function computeFileSha256(filePath) {
   if (!fs.existsSync(filePath)) return null;
@@ -2269,7 +2274,104 @@ assert(Boolean(compAFromDb && compALegacy && compAFromDb.cif === 'B-11111111' &&
 cleanupIdentities(testPhoneA);
 cleanupIdentities(testPhoneA2);
 cleanupIdentities(testPhoneB);
-cleanupIdentities(testPhoneA2);
+
+console.log("\nTEST 27: Blindaje Estricto de Autenticación de Canal WhatsApp (Zero-Fallback & Tenant Isolation)");
+
+const fallbackPhone = '34655443322';
+const fallbackJid = `${fallbackPhone}@s.whatsapp.net`;
+const validPhone = '34677889900';
+const validJid = `${validPhone}@s.whatsapp.net`;
+
+// Pre-limpieza
+const cleanupTest27 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+cleanupTest27(fallbackPhone);
+cleanupTest27(validPhone);
+
+// ─── A) FALLBACK RECHAZADO: Teléfono en companies SIN channel_identity ───
+// 1. Crear empresa directamente en la tabla companies SIN entrada en channel_identities
+const orphanCompanyId = crypto.randomUUID();
+currentDb.prepare(`
+  INSERT INTO companies (id, phone, name, cif, trade, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+`).run(
+  orphanCompanyId,
+  fallbackPhone,
+  'Empresa Huérfana Sin Canal S.L.',
+  'B-00112233',
+  'Pintura y Decoración',
+  new Date().toISOString(),
+  new Date().toISOString()
+);
+
+// Verificar que getCompany(phone) SÍ encuentra la empresa (compatibilidad de lectura legada)
+const legacyCompany = getCompDirect(fallbackPhone);
+assert(Boolean(legacyCompany && legacyCompany.id === orphanCompanyId), "1. Lectura legada: getCompany(phone) encuentra la empresa en base de datos para funciones internas");
+
+// Verificar que resolveAuthenticatedContext retorna null para ese teléfono
+const unauthContext = resolveAuthenticatedContext('whatsapp', fallbackPhone);
+assert(unauthContext === null, "2. Zero-Fallback: resolveAuthenticatedContext retorna null para teléfono existente en companies sin channel_identity");
+
+// Verificar que authenticateWhatsAppSession retorna null (sin fallback a getCompany)
+const unauthWhatsApp = authenticateWhatsAppSession(fallbackJid, fallbackPhone);
+assert(unauthWhatsApp === null, "3. Zero-Fallback: authenticateWhatsAppSession rechaza autenticación si no existe channel_identity");
+
+// Verificar que getUserSession retorna null y no crea sesión para el chat
+const unauthSession = getUserSession(fallbackJid, fallbackPhone);
+assert(unauthSession === null, "4. Zero-Fallback: getUserSession retorna null sin crear sesión para remitente no autorizado");
+
+// Caso A2: Canal inactivo (is_active = 0)
+const inactiveChanId = crypto.randomUUID();
+currentDb.prepare(`
+  INSERT INTO channel_identities (id, company_id, channel, channel_identifier, is_active, created_at, updated_at)
+  VALUES (?, ?, 'whatsapp', ?, 0, ?, ?)
+`).run(inactiveChanId, orphanCompanyId, fallbackPhone, new Date().toISOString(), new Date().toISOString());
+
+const inactiveAuth = authenticateWhatsAppSession(fallbackJid, fallbackPhone);
+const inactiveSession = getUserSession(fallbackJid, fallbackPhone);
+assert(inactiveAuth === null && inactiveSession === null, "5. Zero-Fallback: channel_identity inactiva (is_active=0) es rechazada y no autentica ni genera sesión");
+
+
+// ─── B) CANAL VÁLIDO: Autenticación completa a través de channel_identities ───
+const validCompanyData = createCompanyWithIdentity({
+  name: 'Fontanería y Clima Express S.L.',
+  phone: validPhone,
+  cif: 'B-99001122',
+  trade: 'Fontanería y Climatización'
+});
+
+const validAuth = authenticateWhatsAppSession(validJid, validPhone);
+assert(Boolean(validAuth && validAuth.companyId === validCompanyData.companyId && validAuth.role === ROLES.OWNER), "6. Canal válido: authenticateWhatsAppSession autentica correctamente y resuelve el companyId canónico");
+
+const validSession = getUserSession(validJid, validPhone);
+assert(Boolean(validSession && validSession.companyId === validCompanyData.companyId && validSession.company && validSession.company.name === 'Fontanería y Clima Express S.L.'), "7. Canal válido: getUserSession inicializa sesión completa con authContext y companyId canónico");
+
+
+// ─── C) PERMISO VS AISLAMIENTO TENANT (Aislamiento Horizontal) ───
+// Validar que el usuario OWNER tiene permisos globales wildcard ['*'] en su propio tenant
+assert(validAuth.permissions.includes('*') || validAuth.permissions.includes('company:all'), "8. Permisos de rol: el OWNER posee permisos de administración total ('*') en su contexto");
+
+// Validar que un OWNER con permisos ['*'] en Empresa A es BLOQUEADO categóricamente si intenta acceder a datos de Empresa B
+let crossTenantOwnerViolation = false;
+let violationErrorMessage = '';
+try {
+  validAuth.assertTenantAccess(orphanCompanyId);
+} catch (err) {
+  crossTenantOwnerViolation = true;
+  violationErrorMessage = err.message;
+}
+assert(crossTenantOwnerViolation === true && violationErrorMessage.includes('Violación de aislamiento'), "9. Permiso vs Aislamiento: Permisos ('*') no otorgan acceso cross-tenant; assertTenantAccess bloquea el acceso horizontal");
+
+// Limpieza final de datos de TEST 27
+cleanupTest27(fallbackPhone);
+cleanupTest27(validPhone);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

@@ -166,6 +166,81 @@ export function setConversationState(remoteJid, state) {
   console.log(`💬 [Conversación: ${String(remoteJid).split('@')[0]}] Estado -> ${state}`);
 }
 
+// Memoria multi-presupuesto y facturas por chat conectada a SQLite
+export const userSessions = new Map();
+
+/**
+ * Autentica una sesión de WhatsApp de forma estricta contra la capa canónica de identidad.
+ * Flujo:
+ * WhatsApp/JID -> cleanPhone -> resolveAuthenticatedContext('whatsapp', cleanPhone) -> authContext -> companyId
+ *
+ * REGLA ESTRICTA DE AISLAMIENTO:
+ * Si resolveAuthenticatedContext() retorna null:
+ * - Se rechaza la autenticación (retorna null).
+ * - NUNCA recurre a getCompany(phone) como fallback.
+ * - NUNCA crea una empresa automática.
+ */
+export function authenticateWhatsAppSession(remoteJid, senderNumber) {
+  const cleanPhone = senderNumber || String(remoteJid || '').replace(/\D/g, '');
+  if (!cleanPhone) return null;
+  const authContext = resolveAuthenticatedContext('whatsapp', cleanPhone);
+  if (!authContext) {
+    return null;
+  }
+  return authContext;
+}
+
+/**
+ * Obtiene o inicializa la sesión de usuario para un chat de WhatsApp autenticado.
+ * Si el remitente NO tiene un canal autorizado en channel_identities, retorna null.
+ * NO existe fallback a getCompany(phone).
+ */
+export function getUserSession(remoteJid, senderNumber) {
+  const cleanPhone = senderNumber || String(remoteJid || '').replace(/\D/g, '');
+  const authContext = authenticateWhatsAppSession(remoteJid, cleanPhone);
+  if (!authContext) {
+    return null;
+  }
+
+  const resolvedCompany = authContext.company;
+  const companyId = authContext.companyId;
+
+  if (!userSessions.has(remoteJid)) {
+    userSessions.set(remoteJid, {
+      phone: cleanPhone,
+      companyId: companyId,
+      authContext: authContext,
+      company: resolvedCompany,
+      activeBudgetId: null,
+      budgets: new Map(),
+      invoices: new Map(),
+      pendingAction: null,
+      pendingDisambiguation: null,
+      lastBriefingDate: null,
+      lastEveningReminderDate: null
+    });
+    console.log(`📦 Sesión inicializada para ${cleanPhone} (companyId: ${companyId})`);
+  }
+  const session = userSessions.get(remoteJid);
+  session.authContext = authContext;
+  session.companyId = companyId;
+  session.company = resolvedCompany;
+
+  // Refrescar siempre desde SQLite para reflejar cambios en tiempo real (firmas web, cobros, etc.)
+  const dbBudgets = listBudgets(cleanPhone, 100);
+  for (const b of dbBudgets) {
+    if (b && b.id) session.budgets.set(b.id, b);
+  }
+  const dbInvoices = listInvoices(cleanPhone, 100);
+  for (const inv of dbInvoices) {
+    if (inv && inv.id) session.invoices.set(inv.id, inv);
+  }
+  if (!session.activeBudgetId && session.budgets.size > 0) {
+    session.activeBudgetId = Array.from(session.budgets.keys())[0];
+  }
+  return session;
+}
+
 function storeMessage(keyId, message) {
   if (!keyId || !message) return;
   if (messageStore.size > 2000) {
@@ -842,50 +917,7 @@ async function startWhatsAppGateway() {
   
 
 
-  // Memoria multi-presupuesto y facturas por chat conectada a SQLite
-  const userSessions = new Map();
 
-  function getUserSession(remoteJid, senderNumber) {
-    const cleanPhone = senderNumber || String(remoteJid).replace(/\D/g, '');
-    const authContext = resolveAuthenticatedContext('whatsapp', cleanPhone);
-    const resolvedCompany = authContext ? authContext.company : getCompany(cleanPhone);
-    const companyId = authContext ? authContext.companyId : resolvedCompany?.id || null;
-
-    if (!userSessions.has(remoteJid)) {
-      userSessions.set(remoteJid, {
-        phone: cleanPhone,
-        companyId: companyId,
-        authContext: authContext,
-        company: resolvedCompany,
-        activeBudgetId: null,
-        budgets: new Map(),
-        invoices: new Map(),
-        pendingAction: null,
-        pendingDisambiguation: null,
-        lastBriefingDate: null,
-        lastEveningReminderDate: null
-      });
-      console.log(`📦 Sesión inicializada para ${cleanPhone} (companyId: ${companyId || 'legacy'})`);
-    }
-    const session = userSessions.get(remoteJid);
-    session.authContext = authContext;
-    session.companyId = companyId;
-    session.company = resolvedCompany;
-
-    // Refrescar siempre desde SQLite para reflejar cambios en tiempo real (firmas web, cobros, etc.)
-    const dbBudgets = listBudgets(cleanPhone, 100);
-    for (const b of dbBudgets) {
-      if (b && b.id) session.budgets.set(b.id, b);
-    }
-    const dbInvoices = listInvoices(cleanPhone, 100);
-    for (const inv of dbInvoices) {
-      if (inv && inv.id) session.invoices.set(inv.id, inv);
-    }
-    if (!session.activeBudgetId && session.budgets.size > 0) {
-      session.activeBudgetId = Array.from(session.budgets.keys())[0];
-    }
-    return session;
-  }
 
   function formatCompanyForWhatsApp(company) {
     const hasLogo = Boolean(company.logoPath && fs.existsSync(company.logoPath));
@@ -2910,6 +2942,15 @@ async function startWhatsAppGateway() {
     let isSuccess = false;
     try {
       const session = getUserSession(remoteJid, senderNumber);
+      if (!session || !session.authContext) {
+        console.warn(`⛔ [Auth] Mensaje rechazado de ${senderNumber} (${remoteJid}): Canal no autenticado / sin channel_identity activa.`);
+        if (wamId) updateMessageStatus(wamId, 'REJECTED');
+        if (allWamIds) {
+          allWamIds.forEach(id => updateMessageStatus(id, 'REJECTED'));
+        }
+        setConversationState(remoteJid, 'IDLE');
+        return;
+      }
 
       // Si recibimos una imagen para logotipo de empresa o factura de gasto/ticket
       if (isImage) {
@@ -3897,7 +3938,7 @@ async function startWhatsAppGateway() {
       activeProcessingJids.delete(remoteJid);
       const session = getUserSession(remoteJid, senderNumber);
       const onboardingState = getOnboardingState(senderNumber);
-      if (session.pendingAction || onboardingState?.step || session.pendingDisambiguation) {
+      if (session && (session.pendingAction || onboardingState?.step || session.pendingDisambiguation)) {
         setConversationState(remoteJid, 'WAITING_FOR_INPUT');
       } else {
         setConversationState(remoteJid, 'IDLE');
@@ -4047,6 +4088,12 @@ async function startWhatsAppGateway() {
       };
 
       const session = getUserSession(remoteJid, senderNumber);
+      if (!session || !session.authContext) {
+        console.warn(`⛔ [Auth] Mensaje rechazado de ${senderNumber} (${remoteJid}): Canal no autenticado en channel_identities.`);
+        if (wamId) updateMessageStatus(wamId, 'REJECTED');
+        setConversationState(remoteJid, 'IDLE');
+        continue;
+      }
       const onboardingState = getOnboardingState(senderNumber);
       const isWaitingForInput = getConversationState(remoteJid) === 'WAITING_FOR_INPUT' ||
         Boolean(session.pendingAction || onboardingState?.step || session.pendingDisambiguation);
