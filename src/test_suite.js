@@ -3567,6 +3567,214 @@ const integrityResult31 = currentDb.prepare("PRAGMA integrity_check;").get();
 assert(fkViolations31.length === 0, "53. PRAGMA foreign_key_check: cero violaciones de claves foráneas");
 assert(integrityResult31.integrity_check === 'ok', "54. PRAGMA integrity_check: la base de datos de test está 100% íntegra (ok)");
 
+// ─── L. MICRO-AUDITORÍA Y HARDENING MONETARIO / RUTAS DE ALLOCATION ───
+
+// 1. Precisión decimal: 0.30 = 0.10 + 0.20 (PASS)
+const payPrecision1 = savePaymentTenant(contextA31, {
+  id: 'PAY-HARDEN-P1',
+  amount: 0.30,
+  method: 'BIZUM',
+  concept: 'Prueba precisión 0.30'
+});
+const allocP1 = createPaymentAllocationTenant(contextA31, {
+  paymentId: payPrecision1.id,
+  invoiceId: invoiceObjA31.id,
+  amount: 0.10
+});
+const allocP2 = createPaymentAllocationTenant(contextA31, {
+  paymentId: payPrecision1.id,
+  invoiceId: invoiceObjA31.id,
+  amount: 0.20
+});
+const allocsP1Total = listPaymentAllocationsTenant(contextA31, { paymentId: payPrecision1.id })
+  .reduce((acc, a) => acc + Math.round(Number(a.amount) * 100), 0);
+assert(allocsP1Total === 30 && Boolean(allocP1 && allocP2), "55. Hardening monetario: 0.30 = 0.10 + 0.20 es exacto y no produce drift de coma flotante");
+
+// 2. Precisión decimal: 0.30 < 0.10 + 0.21 (FAIL)
+let precisionOverFail = false;
+try {
+  createPaymentAllocationTenant(contextA31, {
+    paymentId: payPrecision1.id,
+    invoiceId: invoiceObjA31.id,
+    amount: 0.01 // Ya tiene 0.30 completo (10 + 20), 0.01 adicional debe fallar
+  });
+} catch (e) {
+  precisionOverFail = true;
+}
+assert(precisionOverFail === true, "56. Hardening monetario: rechaza superar 0.30 incluso por 0.01 (0.10 + 0.21 o 0.30 + 0.01)");
+
+// Prueba directa 0.30 con 0.10 + 0.21 en un solo intento excedente
+const payPrecision2 = savePaymentTenant(contextA31, {
+  id: 'PAY-HARDEN-P2',
+  amount: 0.30,
+  method: 'BIZUM',
+  concept: 'Prueba 0.10 + 0.21'
+});
+createPaymentAllocationTenant(contextA31, {
+  paymentId: payPrecision2.id,
+  invoiceId: invoiceObjA31.id,
+  amount: 0.10
+});
+let precision21Fail = false;
+try {
+  createPaymentAllocationTenant(contextA31, {
+    paymentId: payPrecision2.id,
+    invoiceId: invoiceObjA31.id,
+    amount: 0.21
+  });
+} catch (e) {
+  precision21Fail = true;
+}
+assert(precision21Fail === true, "57. Hardening monetario: 0.10 + 0.21 > 0.30 es rechazado determinísticamente");
+
+// 3. Allocation de 0.01 (importe mínimo centesimal)
+const payCent = savePaymentTenant(contextA31, {
+  id: 'PAY-HARDEN-CENT',
+  amount: 1.00,
+  method: 'EFECTIVO',
+  concept: 'Prueba céntimo'
+});
+const allocCent = createPaymentAllocationTenant(contextA31, {
+  paymentId: payCent.id,
+  invoiceId: invoiceObjA31.id,
+  amount: 0.01
+});
+assert(Boolean(allocCent && allocCent.amount === 0.01), "58. Hardening monetario: allocation de 0.01 € aceptada y registrada correctamente");
+
+// 4. Allocation de 999.99
+const payThousand = savePaymentTenant(contextA31, {
+  id: 'PAY-HARDEN-1000',
+  amount: 1000.00,
+  method: 'TRANSFERENCIA',
+  concept: 'Prueba mil euros'
+});
+const alloc999 = createPaymentAllocationTenant(contextA31, {
+  paymentId: payThousand.id,
+  invoiceId: invoiceObjA31.id,
+  amount: 999.99
+});
+assert(Boolean(alloc999 && alloc999.amount === 999.99), "59. Hardening monetario: allocation de 999.99 € aceptada");
+
+// 5. Sobreasignación por 0.01 €
+// Queda 0.01 € restante en payThousand. Intentar asignar 0.02 € debe fallar por 1 céntimo
+let overCentFail = false;
+try {
+  createPaymentAllocationTenant(contextA31, {
+    paymentId: payThousand.id,
+    invoiceId: invoiceObjA31.id,
+    amount: 0.02
+  });
+} catch (e) {
+  overCentFail = true;
+}
+assert(overCentFail === true, "60. Hardening monetario: sobreasignación por 0.01 € (0.02 cuando queda 0.01) es rechazada");
+
+// Asignar el último céntimo exacto (0.01) -> PASS
+const allocLastCent = createPaymentAllocationTenant(contextA31, {
+  paymentId: payThousand.id,
+  invoiceId: invoiceObjA31.id,
+  amount: 0.01
+});
+assert(Boolean(allocLastCent && allocLastCent.amount === 0.01), "61. Hardening monetario: asignación del céntimo final (999.99 + 0.01 = 1000.00) es exacta");
+
+// Caso mínimo exigido: Payment = 1000.00, 600.00 + 400.00 PASS, 600.00 + 400.01 FAIL
+const payMil = savePaymentTenant(contextA31, {
+  id: 'PAY-HARDEN-MIL',
+  amount: 1000.00,
+  method: 'TRANSFERENCIA'
+});
+createPaymentAllocationTenant(contextA31, { paymentId: payMil.id, invoiceId: invoiceObjA31.id, amount: 600.00 });
+const allocMil400 = createPaymentAllocationTenant(contextA31, { paymentId: payMil.id, invoiceId: invoiceObjA31.id, amount: 400.00 });
+assert(Boolean(allocMil400 && allocMil400.amount === 400.00), "62. Hardening monetario: 1000.00 con 600.00 + 400.00 es aceptado (PASS)");
+
+const payMilFail = savePaymentTenant(contextA31, {
+  id: 'PAY-HARDEN-MIL-FAIL',
+  amount: 1000.00,
+  method: 'TRANSFERENCIA'
+});
+createPaymentAllocationTenant(contextA31, { paymentId: payMilFail.id, invoiceId: invoiceObjA31.id, amount: 600.00 });
+let milOverFail = false;
+try {
+  createPaymentAllocationTenant(contextA31, { paymentId: payMilFail.id, invoiceId: invoiceObjA31.id, amount: 400.01 });
+} catch (e) {
+  milOverFail = true;
+}
+assert(milOverFail === true, "63. Hardening monetario: 1000.00 con 600.00 + 400.01 es rechazado (FAIL)");
+
+// 6. Búsqueda exhaustiva de rutas de INSERT en código de producción
+const srcFiles = fs.readdirSync(path.resolve('src')).filter(f => f.endsWith('.js'));
+const unencapsulatedInsertRoutes = [];
+for (const file of srcFiles) {
+  if (file === 'test_suite.js') continue; // Ignorar fixtures de test
+  const content = fs.readFileSync(path.resolve('src', file), 'utf-8');
+  const matches = content.match(/INSERT\s+INTO\s+payment_allocations/gi);
+  if (matches) {
+    if (file !== 'db_service.js' && file !== 'reset_db.js') {
+      unencapsulatedInsertRoutes.push(file);
+    }
+  }
+}
+assert(unencapsulatedInsertRoutes.length === 0, "64. Auditoría de rutas: Ningún módulo de producción fuera de db_service contiene INSERT INTO payment_allocations");
+
+// 7. Allocation Cross-Tenant
+let crossTenantAllocTestFail = false;
+try {
+  createPaymentAllocationTenant(contextA31, {
+    paymentId: payCent.id,
+    invoiceId: invoiceObjB31.id, // Factura de Empresa B
+    amount: 0.10
+  });
+} catch (e) {
+  crossTenantAllocTestFail = true;
+}
+assert(crossTenantAllocTestFail === true, "65. Invariante cross-tenant: Empresa A no puede crear allocation apuntando a factura de Empresa B");
+
+// 8. Payment Cross-Tenant
+const crossTenantPayRead = getPaymentTenant(contextB31.companyId, payCent.id);
+assert(crossTenantPayRead === null, "66. Invariante cross-tenant: Empresa B no puede leer pagos de Empresa A (Zero-Disclosure)");
+
+// 9. Invoice Cross-Tenant en savePayment
+let crossTenantTargetFail = false;
+try {
+  savePaymentTenant(contextA31, {
+    id: 'PAY-CROSS-FAIL-TGT',
+    amount: 100,
+    targetId: invoiceObjB31.id
+  });
+} catch (e) {
+  crossTenantTargetFail = true;
+}
+assert(crossTenantTargetFail === true, "67. Invariante cross-tenant: savePayment rechaza targetId de factura perteneciente a otro tenant");
+
+// 10. Atomicidad en savePayment: si targetId es de otro tenant, no se crea payment ni allocation
+const checkNoLeakedPay = currentDb.prepare("SELECT id FROM payments WHERE id = 'PAY-CROSS-FAIL-TGT'").get();
+const checkNoLeakedAlloc = currentDb.prepare("SELECT id FROM payment_allocations WHERE payment_id = 'PAY-CROSS-FAIL-TGT'").get();
+assert(!checkNoLeakedPay && !checkNoLeakedAlloc, "68. Atomicidad savePayment: ante error de validación de tenant, no se escribe payment ni allocation en disco");
+
+// 11. savePayment crea exactamente una allocation
+const payAtomicSingle = savePaymentTenant(contextA31, {
+  id: 'PAY-ATOMIC-SINGLE',
+  amount: 250,
+  method: 'TRANSFERENCIA',
+  targetId: invoiceObjA31.id,
+  concept: 'Pago único atómico'
+});
+const countAllocsSingle = currentDb.prepare("SELECT count(*) as count FROM payment_allocations WHERE payment_id = ?").get(payAtomicSingle.id).count;
+assert(countAllocsSingle === 1, "69. savePayment con targetId legítimo genera exactamente una allocation");
+
+// 12. Retry de savePayment no duplica allocation
+savePaymentTenant(contextA31, {
+  ...payAtomicSingle,
+  concept: 'Pago único atómico (Reintento de webhook / actualización)'
+});
+const countAllocsAfterRetry = currentDb.prepare("SELECT count(*) as count FROM payment_allocations WHERE payment_id = ?").get(payAtomicSingle.id).count;
+assert(countAllocsAfterRetry === 1, "70. Idempotencia savePayment: reintento de guardado no duplica allocations (conserva exactamente 1)");
+
+// 13. Comportamiento legacy de payments.budget_id se mantiene intacto
+const payLegacyRow = currentDb.prepare("SELECT id, budget_id, company_phone FROM payments WHERE id = ?").get(payAtomicSingle.id);
+const legacyFetchedPayments = getPaymentsTenant(phoneTenantA31, invoiceObjA31.id);
+assert(payLegacyRow && payLegacyRow.budget_id === invoiceObjA31.id && legacyFetchedPayments.some(p => p.id === payAtomicSingle.id), "71. Deuda técnica controlada: payments.budget_id conserva su valor legacy y consultas antiguas siguen funcionando");
+
 // Limpieza final de TEST 31
 cleanupTest31(phoneTenantA31);
 cleanupTest31(phoneTenantB31);

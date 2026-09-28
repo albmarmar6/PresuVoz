@@ -685,6 +685,71 @@ export function listInvoices(companyContextOrIdOrPhone, limit = 20) {
 
 // ─── Métodos de Cobros ────────────────────────────────────────────────────────
 
+/**
+ * Inserción interna segura y validada de registros en payment_allocations.
+ * Encapsula la validación de invariantes, tenant isolation y límites monetarios en céntimos enteros.
+ * 
+ * Invariante canónico: allocation.company_id == payment.company_id == invoice.company_id.
+ * Validación de límites: SUM(allocations.amount) <= payment.amount (precisión de céntimos enteros).
+ * 
+ * @param {object} dbInstance - Instancia de SQLite
+ * @param {object} params - Parámetros de asignación
+ * @returns {string} ID de la asignación creada
+ */
+function insertPaymentAllocationInternal(dbInstance, { id, paymentId, invoiceId, companyId, amount, allocatedAt, now }) {
+  if (!companyId) {
+    throw new Error("❌ [Payment Allocation] company_id es obligatorio.");
+  }
+  const allocAmount = Number(amount);
+  if (typeof allocAmount !== 'number' || isNaN(allocAmount) || allocAmount <= 0) {
+    throw new Error("❌ [Payment Allocation] El importe de la asignación debe ser estrictamente positivo (> 0).");
+  }
+
+  // 1. Validar que el pago existe y pertenece al mismo company_id
+  const paymentRow = dbInstance.prepare('SELECT id, company_id, amount FROM payments WHERE id = ?').get(paymentId);
+  if (!paymentRow) {
+    throw new Error(`❌ [Payment Allocation] El pago '${paymentId}' no existe.`);
+  }
+  if (paymentRow.company_id !== companyId) {
+    throw new Error(`❌ [Payment Allocation] Invariante violada: payment.company_id ('${paymentRow.company_id}') != allocation.company_id ('${companyId}').`);
+  }
+
+  // 2. Validar que la factura existe y pertenece al mismo company_id
+  const invoiceRow = dbInstance.prepare('SELECT id, company_id FROM invoices WHERE id = ?').get(invoiceId);
+  if (!invoiceRow) {
+    throw new Error(`❌ [Payment Allocation] La factura '${invoiceId}' no existe.`);
+  }
+  if (invoiceRow.company_id !== companyId) {
+    throw new Error(`❌ [Payment Allocation] Invariante violada: invoice.company_id ('${invoiceRow.company_id}') != allocation.company_id ('${companyId}').`);
+  }
+
+  // 3. Validar suma de allocations <= payment.amount (aritmética exacta en céntimos enteros)
+  const existingAllocs = dbInstance.prepare(
+    'SELECT id, amount FROM payment_allocations WHERE payment_id = ? AND company_id = ?'
+  ).all(paymentId, companyId);
+
+  const existingCents = existingAllocs.reduce((sum, a) => sum + Math.round(Number(a.amount) * 100), 0);
+  const newCents = Math.round(allocAmount * 100);
+  const paymentTotalCents = Math.round(Number(paymentRow.amount || 0) * 100);
+
+  if (existingCents + newCents > paymentTotalCents) {
+    const excessEur = ((existingCents + newCents - paymentTotalCents) / 100).toFixed(2);
+    throw new Error(
+      `❌ [Payment Allocation] Superación de importe: La suma de asignaciones (${(existingCents + newCents)/100} €) supera el total del pago (${paymentTotalCents/100} €) en ${excessEur} €.`
+    );
+  }
+
+  const allocId = id || `ALLOC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const allocTimestamp = allocatedAt || now;
+
+  dbInstance.prepare(`
+    INSERT INTO payment_allocations (id, payment_id, invoice_id, company_id, amount, allocated_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(allocId, paymentId, invoiceId, companyId, allocAmount, allocTimestamp, now, now);
+
+  return allocId;
+}
+
 export function savePayment(companyContextOrIdOrPhone, paymentOrBudgetId, maybePayment) {
   if (!companyContextOrIdOrPhone) {
     throw new Error("❌ [Tenant Boundary] savePayment requiere un companyId o contexto autenticado obligatorio.");
@@ -753,6 +818,12 @@ export function savePayment(companyContextOrIdOrPhone, paymentOrBudgetId, maybeP
     } catch (e) {}
   }
 
+  // DEUDA TÉCNICA DOCUMENTADA (Fase 2B-3):
+  // La columna legacy 'payments.budget_id' tiene una semántica ambigua porque históricamente
+  // ha almacenado tanto budget_id (PRE-...) como invoice_id (INV-...).
+  // La nueva arquitectura formal desacopla los cobros de las facturas a través de la tabla
+  // canónica 'payment_allocations', donde la relación con la factura se almacena unívocamente
+  // en la columna 'invoice_id'. Se mantiene 'payments.budget_id' estrictamente por retrocompatibilidad.
   const stmt = db.prepare(`
     INSERT INTO payments (id, company_id, budget_id, company_phone, amount, method, concept, data_json, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -769,30 +840,43 @@ export function savePayment(companyContextOrIdOrPhone, paymentOrBudgetId, maybeP
        OR (payments.company_phone = excluded.company_phone AND payments.company_id IS NULL)
   `);
 
-  stmt.run(
-    pId,
-    companyId,
-    targetId,
-    cleanPhone,
-    Number(payment.amount || 0),
-    payment.method || 'Bizum',
-    payment.concept || '',
-    JSON.stringify(payment),
-    now
-  );
+  // Ejecución transaccional estrictamente atómica
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    stmt.run(
+      pId,
+      companyId,
+      targetId,
+      cleanPhone,
+      Number(payment.amount || 0),
+      payment.method || 'Bizum',
+      payment.concept || '',
+      JSON.stringify(payment),
+      now
+    );
 
-  // Si targetId es una factura legítima del tenant, registrar automáticamente su allocation inicial si no existe
-  if (linkedInvoice && companyId) {
-    try {
+    // Si targetId es una factura legítima del tenant y el importe es estrictamente positivo (> 0),
+    // registrar automáticamente su allocation inicial si no existe previamente
+    if (linkedInvoice && companyId && Number(payment.amount || 0) > 0) {
       const existingAlloc = db.prepare('SELECT id FROM payment_allocations WHERE payment_id = ? AND invoice_id = ?').get(pId, linkedInvoice.id);
       if (!existingAlloc) {
         const allocId = `ALLOC-${pId}`;
-        db.prepare(`
-          INSERT INTO payment_allocations (id, payment_id, invoice_id, company_id, amount, allocated_at, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(allocId, pId, linkedInvoice.id, companyId, Number(payment.amount || 0), now, now, now);
+        insertPaymentAllocationInternal(db, {
+          id: allocId,
+          paymentId: pId,
+          invoiceId: linkedInvoice.id,
+          companyId,
+          amount: Number(payment.amount || 0),
+          allocatedAt: now,
+          now
+        });
       }
-    } catch (e) {}
+    }
+
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
   }
 
   return payment;
@@ -966,11 +1050,15 @@ export function createPaymentAllocation(companyContextOrIdOrPhone, allocationDat
 
   db.exec('BEGIN IMMEDIATE;');
   try {
-    db.prepare(`
-      INSERT INTO payment_allocations (id, payment_id, invoice_id, company_id, amount, allocated_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(allocId, paymentId, invoiceId, companyId, amount, allocatedAt, now, now);
-
+    insertPaymentAllocationInternal(db, {
+      id: allocId,
+      paymentId,
+      invoiceId,
+      companyId,
+      amount,
+      allocatedAt,
+      now
+    });
     db.exec('COMMIT;');
   } catch (err) {
     db.exec('ROLLBACK;');
