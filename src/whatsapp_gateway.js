@@ -168,6 +168,7 @@ export function setConversationState(remoteJid, state) {
 
 // Memoria multi-presupuesto y facturas por chat conectada a SQLite
 export const userSessions = new Map();
+export const botSentMessageIds = new Set();
 
 /**
  * ─── EXTRACTION & CORRESPONDENCE GATE: Remitente e Identidad ───
@@ -829,6 +830,763 @@ export function formatWorkMemoryForWhatsApp(workMem, onlyMissing = false) {
   return lines.join('\n');
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FORMATO Y GESTIÓN DE CITAS Y COMPRAS (TENANT-SCOPED Y HARDENED CONTRA MODEL INJECTION)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function formatAppointmentForWhatsApp(app, company) {
+  const query = app.clientAddress ? `${app.clientAddress}` : (app.clientName || 'Ubicación');
+  const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+
+  const dateParts = (app.date || '').split('-');
+  const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : app.date;
+
+  const lines = [
+    '📅 *VISITA TÉCNICA AGENDADA*',
+    '━━━━━━━━━━━━━━━━━━━━━━━━━',
+    `🆔 *Ref:* ${app.id}`,
+    `👤 *Cliente:* ${app.clientName}`,
+    app.clientPhone ? `📞 *Teléfono:* ${app.clientPhone}` : null,
+    `📍 *Dirección:* ${app.clientAddress || 'Por concretar'}`,
+    `🗓️ *Fecha:* ${formattedDate}`,
+    `⏰ *Hora:* ${app.time} h`,
+    `📝 *Motivo:* ${app.notes}`,
+    '━━━━━━━━━━━━━━━━━━━━━━━━━',
+    '🗺️ *Abrir ruta en Google Maps:*',
+    mapsUrl,
+    '',
+    '💬 *Mensaje listo para reenviar a tu cliente:*',
+    `_"Hola ${app.clientName.split(' ')[0]}, te confirmamos la visita técnica para valorar los trabajos el ${formattedDate} a las ${app.time} h${app.clientAddress ? ` en ${app.clientAddress}` : ''}. ¡Nos vemos entonces! (${company?.name || 'El técnico'})"_`
+  ].filter(Boolean);
+
+  return lines.join('\n');
+}
+
+export function formatAppointmentsListForWhatsApp(appointments, title = '📅 *TUS VISITAS TÉCNICAS AGENDADAS:*') {
+  if (!appointments || appointments.length === 0) {
+    return '📅 *AGENDA VACÍA*\n\nNo tienes visitas técnicas en tu agenda.\n\n💡 _Para apuntar una cita di por ejemplo: "Apunta visita con Juan el jueves a las 11:00 en Calle Mayor 14 para ver la caldera"_.';
+  }
+
+  let text = `${title}\n━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  appointments.forEach((app, idx) => {
+    const dateParts = (app.date || '').split('-');
+    const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : app.date;
+    const query = app.clientAddress ? `${app.clientAddress}` : app.clientName;
+    const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+
+    text += `\n${idx + 1}️⃣ *${formattedDate} a las ${app.time} h* · ${app.clientName}\n`;
+    if (app.clientPhone) text += `   📞 ${app.clientPhone}\n`;
+    if (app.clientAddress) text += `   📍 ${app.clientAddress}\n`;
+    if (app.notes) text += `   📝 ${app.notes}\n`;
+    if (app.clientAddress) text += `   🗺️ ${mapsUrl}\n`;
+  });
+
+  text += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para anular una cita di: "Cancela la cita con [Nombre]"_\n💡 _Para agendar otra di: "Apunta visita con [Nombre] el [Día] a las [Hora]"_';
+  return text;
+}
+
+export function formatShoppingListForWhatsApp(items, clientFilter = null) {
+  if (!items || items.length === 0) {
+    if (clientFilter) {
+      return `🛒 *No hay materiales pendientes para la obra de ${clientFilter}.*\n\n💡 Para añadir materiales para este cliente, di: _"comprar 14 m² de azulejo para ${clientFilter}"_.`;
+    }
+    return '🛒 *Tu lista de la compra está vacía.*\n\nNo tienes materiales pendientes por comprar.\n\n💡 Para añadir materiales, di: _"para la obra de Carlos comprar 2 sacos de cemento cola y 14 m² de azulejo"_ o mándame una nota de voz.';
+  }
+
+  const pending = items.filter(i => i.status === 'PENDING');
+  const bought = items.filter(i => i.status === 'BOUGHT');
+
+  const title = clientFilter
+    ? `🛒 *LISTA DE MATERIALES — OBRA DE ${clientFilter.toUpperCase()}*`
+    : '🛒 *LISTA GENERAL DE COMPRAS Y MATERIALES*';
+
+  const lines = [
+    title,
+    '━━━━━━━━━━━━━━━━━━━━━━━━━'
+  ];
+
+  if (pending.length > 0) {
+    const groups = new Map();
+    pending.forEach(it => {
+      const groupKey = it.clientName ? `🏠 *Obra de ${it.clientName}:*` : '📦 *Materiales Generales / Almacén:*';
+      if (!groups.has(groupKey)) groups.set(groupKey, []);
+      groups.get(groupKey).push(it);
+    });
+
+    let globalIdx = 1;
+    for (const [groupHeader, groupItems] of groups.entries()) {
+      lines.push(`\n${groupHeader}`);
+      groupItems.forEach(it => {
+        const qtyUnit = it.qty && it.unit ? `*${it.qty} ${it.unit}* ` : '';
+        lines.push(`  ${globalIdx}️⃣ ${qtyUnit}${it.description}`);
+        globalIdx++;
+      });
+    }
+  } else {
+    lines.push('\n✅ _¡No tienes ningún material pendiente de compra!_');
+  }
+
+  if (bought.length > 0) {
+    lines.push('\n━━━━━━━━━━━━━━━━━━━━━━━━━');
+    lines.push(`✔️ *Comprados / Tachados recientemente (${bought.length}):*`);
+    bought.slice(0, 5).forEach(it => {
+      const clientTag = it.clientName ? ` _(${it.clientName})_` : '';
+      lines.push(`   ~${it.description}~${clientTag}`);
+    });
+  }
+
+  lines.push('\n━━━━━━━━━━━━━━━━━━━━━━━━━');
+  if (!clientFilter) {
+    lines.push('💡 _Puedes consultar una obra concreta diciendo: "¿qué tengo que comprar para Carlos?" o tachar diciendo: "ya compré el cemento"._');
+  } else {
+    lines.push('💡 _Para tachar: "ya compré el cemento de ' + clientFilter + '" o "tachar azulejo"._');
+  }
+  return lines.join('\n');
+}
+
+export async function checkDisambiguation(sock, remoteJid, session, clientQuery, actionType, originalPayload = {}) {
+  if (!clientQuery) return false;
+  const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+  const candidates = findClientsByName(cleanPhone, clientQuery);
+
+  if (candidates && candidates.length > 1) {
+    session.pendingDisambiguation = {
+      actionType,
+      clientQuery,
+      candidates,
+      originalPayload
+    };
+
+    const text = formatDisambiguationPrompt(clientQuery, candidates);
+    if (sock?.sendMessage) {
+      const sent = await sock.sendMessage(remoteJid, { text });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    }
+    return true;
+  }
+  return false;
+}
+
+export async function handleRenameClient(sock, remoteJid, session, targetQuery, newName) {
+  try {
+    const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+    const candidates = findClientsByName(cleanPhone, targetQuery);
+
+    if (candidates.length > 1) {
+      session.pendingDisambiguation = {
+        actionType: 'rename_client',
+        clientQuery: targetQuery,
+        candidates,
+        originalPayload: { newName }
+      };
+      const text = formatDisambiguationPrompt(targetQuery, candidates) + `\n\n👉 Elige el número de obra que deseas renombrar a *"${newName}"*.`;
+      if (sock?.sendMessage) {
+        const sent = await sock.sendMessage(remoteJid, { text });
+        if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+      }
+      return;
+    }
+
+    const renamed = renameClientBudget(cleanPhone, targetQuery, newName);
+    if (!renamed) {
+      if (sock?.sendMessage) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: `ℹ️ No se ha encontrado ningún cliente o presupuesto que coincida con *"${targetQuery}"* para renombrar.`
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      }
+      return;
+    }
+
+    for (const b of session.budgets.values()) {
+      if (b.id === renamed.budgetId && b.client) {
+        b.client.name = renamed.newName;
+      }
+    }
+
+    const lines = [
+      '🏷️ *¡Distintivo / Nombre de cliente actualizado!* ✅',
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `👤 *Nombre anterior:* ${renamed.oldName}`,
+      `✨ *Nuevo nombre:* *${renamed.newName}*`,
+      `📍 *Ubicación:* ${renamed.clientAddress}`,
+      `📁 *Presupuesto:* ${renamed.budgetId}`,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      '💡 _A partir de ahora puedes referirte a esta obra como "' + renamed.newName + '" para evitar confusiones con otros clientes homónimos._'
+    ];
+
+    if (sock?.sendMessage) {
+      const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    }
+  } catch (err) {
+    console.error('❌ Error renombrando cliente:', err.message);
+    if (sock?.sendMessage) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error renombrando cliente:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+  }
+}
+
+export async function handleScheduleAppointment(sock, remoteJid, session, appointmentInfo = {}) {
+  try {
+    const companyId = session?.companyId || session?.authContext?.companyId;
+    if (!companyId) {
+      console.warn(`🛑 [Tenant Authority] handleScheduleAppointment rechazado: sesión sin companyId para JID '${remoteJid}'`);
+      if (sock?.sendMessage) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      }
+      return { success: false, error: 'UNAUTHORIZED_NO_COMPANY_ID' };
+    }
+    const tenantContext = { companyId, company: session.company, phone: session.phone };
+
+    // Defensas contra Model Injection: descartar identificadores de tenant externos
+    const safeInfo = (appointmentInfo && typeof appointmentInfo === 'object') ? { ...appointmentInfo } : {};
+    delete safeInfo.company_id;
+    delete safeInfo.companyId;
+    delete safeInfo.company_phone;
+    delete safeInfo.companyPhone;
+
+    // Chequeo de colisión de horario (Aviso sin bloquear)
+    const conflicts = findConflictingAppointments(tenantContext, safeInfo.date, safeInfo.time);
+
+    const saved = saveAppointment(tenantContext, safeInfo);
+    console.log(`📅 Cita técnica agendada para ${session.phone || remoteJid}: ${saved.id} - ${saved.clientName} (${saved.date} ${saved.time}) (companyId: ${companyId})`);
+
+    let conflictWarning = '';
+    if (conflicts.length > 0) {
+      conflictWarning = `\n\n⚠️ *Aviso de horario:* Ya tenías una visita agendada a esa misma hora con *${conflicts[0].clientName}*. He registrado ambas en tu agenda.`;
+    }
+
+    if (sock?.sendMessage) {
+      const text = formatAppointmentForWhatsApp(saved, session.company) + conflictWarning;
+      const sent = await sock.sendMessage(remoteJid, { text });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    }
+    return { success: true, saved, conflicts };
+  } catch (err) {
+    console.error('❌ Error agendando cita:', err.message);
+    if (sock?.sendMessage) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error guardando la cita:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+    return { success: false, error: err.message };
+  }
+}
+
+export async function handleListAppointments(sock, remoteJid, session, filter = 'all') {
+  try {
+    const companyId = session?.companyId || session?.authContext?.companyId;
+    if (!companyId) {
+      console.warn(`🛑 [Tenant Authority] handleListAppointments rechazado: sesión sin companyId para JID '${remoteJid}'`);
+      if (sock?.sendMessage) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      }
+      return { success: false, error: 'UNAUTHORIZED_NO_COMPANY_ID' };
+    }
+    const tenantContext = { companyId, company: session.company, phone: session.phone };
+    const appointments = listAppointments(tenantContext, filter);
+
+    let title = '📅 *TUS VISITAS TÉCNICAS AGENDADAS:*';
+    if (filter === 'today') title = '📅 *TUS VISITAS TÉCNICAS DE HOY:*';
+    else if (filter === 'tomorrow') title = '📅 *TUS VISITAS TÉCNICAS DE MAÑANA:*';
+    else if (filter === 'completed') title = '✅ *VISITAS TÉCNICAS REALIZADAS:*';
+    else if (filter === 'past') title = '🕒 *HISTORIAL DE VISITAS PASADAS:*';
+
+    if (sock?.sendMessage) {
+      const text = formatAppointmentsListForWhatsApp(appointments, title);
+      const sent = await sock.sendMessage(remoteJid, { text });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    }
+    return { success: true, appointments };
+  } catch (err) {
+    console.error('❌ Error listando citas:', err.message);
+    if (sock?.sendMessage) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error consultando la agenda:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+    return { success: false, error: err.message };
+  }
+}
+
+export async function handleCancelAppointment(sock, remoteJid, session, query) {
+  try {
+    const companyId = session?.companyId || session?.authContext?.companyId;
+    if (!companyId) {
+      console.warn(`🛑 [Tenant Authority] handleCancelAppointment rechazado: sesión sin companyId para JID '${remoteJid}'`);
+      if (sock?.sendMessage) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      }
+      return { success: false, error: 'UNAUTHORIZED_NO_COMPANY_ID' };
+    }
+    const tenantContext = { companyId, company: session.company, phone: session.phone };
+    const cancelled = cancelAppointment(tenantContext, query);
+    if (!cancelled) {
+      if (sock?.sendMessage) {
+        const sentNotFound = await sock.sendMessage(remoteJid, {
+          text: `⚠️ *No se encontró ninguna visita activa* que coincida con "${query}".\n\nEscribe *"agenda"* para ver tus citas programadas.`
+        });
+        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+      }
+      return { success: false, error: 'NOT_FOUND' };
+    }
+
+    if (cancelled.ambiguous) {
+      if (sock?.sendMessage) {
+        const lines = [
+          `⚠️ *Tienes varias visitas con "${query}":*`,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━'
+        ];
+        cancelled.matches.forEach((m, idx) => {
+          lines.push(`${idx + 1}️⃣ *${m.date} a las ${m.time} h* — ${m.clientName} (${m.id})`);
+        });
+        lines.push('\n¿Cuál de ellas deseas anular?');
+        const sentAmb = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+        if (sentAmb?.key?.id) botSentMessageIds.add(sentAmb.key.id);
+      }
+      return { success: true, ambiguous: true, matches: cancelled.matches };
+    }
+
+    const dateParts = (cancelled.date || '').split('-');
+    const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : cancelled.date;
+
+    if (sock?.sendMessage) {
+      const sentOk = await sock.sendMessage(remoteJid, {
+        text: `❌ *Visita cancelada*\n\nHe anulado la visita con *${cancelled.clientName}* prevista para el ${formattedDate} a las ${cancelled.time} h (${cancelled.id}).\n\nEl hueco ha quedado libre en tu agenda.`
+      });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    }
+    console.log(`❌ Cita ${cancelled.id} cancelada para ${session.phone || remoteJid} (companyId: ${companyId})`);
+    return { success: true, cancelled };
+  } catch (err) {
+    console.error('❌ Error cancelando cita:', err.message);
+    if (sock?.sendMessage) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error cancelando la cita:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+    return { success: false, error: err.message };
+  }
+}
+
+export async function handleUpdateAppointment(sock, remoteJid, session, updateInfo = {}) {
+  try {
+    const companyId = session?.companyId || session?.authContext?.companyId;
+    if (!companyId) {
+      console.warn(`🛑 [Tenant Authority] handleUpdateAppointment rechazado: sesión sin companyId para JID '${remoteJid}'`);
+      if (sock?.sendMessage) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      }
+      return { success: false, error: 'UNAUTHORIZED_NO_COMPANY_ID' };
+    }
+    const tenantContext = { companyId, company: session.company, phone: session.phone };
+
+    // Defensas contra Model Injection
+    const safeUpdate = (updateInfo && typeof updateInfo === 'object') ? { ...updateInfo } : {};
+    delete safeUpdate.company_id;
+    delete safeUpdate.companyId;
+    delete safeUpdate.company_phone;
+    delete safeUpdate.companyPhone;
+
+    const query = safeUpdate.appointmentQuery || safeUpdate.clientName || '';
+    
+    // Si el usuario pide cambiar fecha u hora, usamos rescheduleAppointment para trazabilidad total
+    if (safeUpdate.date || safeUpdate.time) {
+      const res = rescheduleAppointment(tenantContext, query, safeUpdate.date, safeUpdate.time, 'Reagendamiento por WhatsApp');
+      if (!res.success) {
+        if (res.error === 'AMBIGUOUS') {
+          if (sock?.sendMessage) {
+            const lines = [
+              `⚠️ *Tienes varias visitas con "${query}":*`,
+              '━━━━━━━━━━━━━━━━━━━━━━━━━'
+            ];
+            res.matches.forEach((m, idx) => {
+              lines.push(`${idx + 1}️⃣ *${m.date} a las ${m.time} h* — ${m.clientName}`);
+            });
+            lines.push('\n¿A cuál de ellas te refieres? Indícame la fecha o la hora.');
+            const sentAmb = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+            if (sentAmb?.key?.id) botSentMessageIds.add(sentAmb.key.id);
+          }
+          return { success: false, error: 'AMBIGUOUS', matches: res.matches };
+        }
+        if (sock?.sendMessage) {
+          const sentNotFound = await sock.sendMessage(remoteJid, {
+            text: `⚠️ No encontré ninguna visita activa que coincida con *"${query}"*.\n\nEscribe *"agenda"* para ver tus citas.`
+          });
+          if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+        }
+        return { success: false, error: 'NOT_FOUND' };
+      }
+
+      const apt = res.appointment;
+      const dp = (apt.date || '').split('-');
+      const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}/${dp[0]}` : apt.date;
+      if (sock?.sendMessage) {
+        const sentOk = await sock.sendMessage(remoteJid, {
+          text: `🗓️ *Visita reagendada con éxito*\n\nHe movido la visita con *${apt.clientName}* al *${fd}* a las *${apt.time} h*.\n\n_Se ha actualizado en tu agenda y el contador de reagendamientos es ${apt.rescheduleCount}._`
+        });
+        if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+      }
+      return { success: true, appointment: apt };
+    }
+
+    // Modificación de dirección, notas o nombre
+    const changes = {
+      clientAddress: safeUpdate.clientAddress || null,
+      notes: safeUpdate.notes || null,
+      clientName: safeUpdate.newClientName || null,
+      clientPhone: safeUpdate.clientPhone || null
+    };
+    Object.keys(changes).forEach(k => { if (!changes[k]) delete changes[k]; });
+
+    const updated = updateAppointment(tenantContext, query, changes);
+    if (!updated) {
+      if (sock?.sendMessage) {
+        const sentNotFound = await sock.sendMessage(remoteJid, {
+          text: `⚠️ No encontré ninguna visita activa que coincida con *"${query}"*.\n\nEscribe *"agenda"* para ver tus citas.`
+        });
+        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+      }
+      return { success: false, error: 'NOT_FOUND' };
+    }
+
+    if (updated.ambiguous) {
+      if (sock?.sendMessage) {
+        const lines = [
+          `⚠️ *Tienes varias visitas con "${query}":*`,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━'
+        ];
+        updated.matches.forEach((m, idx) => {
+          lines.push(`${idx + 1}️⃣ *${m.date} a las ${m.time} h* — ${m.clientName}`);
+        });
+        lines.push('\n¿A cuál de ellas te refieres?');
+        const sentAmb = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+        if (sentAmb?.key?.id) botSentMessageIds.add(sentAmb.key.id);
+      }
+      return { success: false, error: 'AMBIGUOUS', matches: updated.matches };
+    }
+
+    const dp = (updated.date || '').split('-');
+    const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}/${dp[0]}` : updated.date;
+
+    const lines = [
+      `✅ *Visita actualizada con éxito*`,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `👤 *Cliente:* ${updated.clientName}`,
+      updated.clientPhone ? `📞 *Teléfono:* ${updated.clientPhone}` : null,
+      `📍 *Dirección:* ${updated.clientAddress || 'Por concretar'}`,
+      `🗓️ *Fecha:* ${fd}`,
+      `⏰ *Hora:* ${updated.time} h`,
+      updated.notes ? `📝 *Notas:* ${updated.notes}` : null
+    ].filter(Boolean);
+
+    if (sock?.sendMessage) {
+      const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    }
+    return { success: true, updated };
+  } catch (err) {
+    console.error('❌ Error modificando cita:', err.message);
+    if (sock?.sendMessage) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error modificando la visita:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+    return { success: false, error: err.message };
+  }
+}
+
+export async function handleCompleteAppointments(sock, remoteJid, session, completionInfo = {}, rescheduleInfo = null) {
+  try {
+    const companyId = session?.companyId || session?.authContext?.companyId;
+    if (!companyId) {
+      console.warn(`🛑 [Tenant Authority] handleCompleteAppointments rechazado: sesión sin companyId para JID '${remoteJid}'`);
+      if (sock?.sendMessage) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      }
+      return { success: false, error: 'UNAUTHORIZED_NO_COMPANY_ID' };
+    }
+    const tenantContext = { companyId, company: session.company, phone: session.phone };
+
+    // Defensas contra Model Injection
+    const safeComp = (completionInfo && typeof completionInfo === 'object') ? { ...completionInfo } : {};
+    delete safeComp.company_id;
+    delete safeComp.companyId;
+    delete safeComp.company_phone;
+    delete safeComp.companyPhone;
+
+    const safeResch = (rescheduleInfo && typeof rescheduleInfo === 'object') ? { ...rescheduleInfo } : null;
+    if (safeResch) {
+      delete safeResch.company_id;
+      delete safeResch.companyId;
+      delete safeResch.company_phone;
+      delete safeResch.companyPhone;
+    }
+
+    const messagesToSend = [];
+    let completedResult = null;
+
+    // 1. Si el usuario dijo "todas hechas" o similar
+    if (safeComp.allCompleted) {
+      const pendingToday = listAppointments(tenantContext, 'today');
+      const ids = pendingToday.map(a => a.id);
+      completedResult = completeAppointments(tenantContext, ids, 'SUCCESSFUL', 'Confirmado por profesional al fin de día');
+      messagesToSend.push(`✅ *¡Estupendo!* He marcado tus *${completedResult.completed.length} visitas* de hoy como finalizadas.`);
+    } else if (safeComp.completedQueries && safeComp.completedQueries.length > 0) {
+      completedResult = completeAppointments(tenantContext, safeComp.completedQueries, 'SUCCESSFUL');
+      const names = completedResult.completed.map(c => `*${c.clientName}*`).join(', ');
+      messagesToSend.push(`✅ He marcado como realizada${completedResult.completed.length === 1 ? '' : 's'} la visita con ${names}.`);
+    }
+
+    // 2. Si además pidió reagendar otra visita no realizada
+    if (safeResch && safeResch.query && (safeResch.date || safeResch.time)) {
+      const resch = rescheduleAppointment(tenantContext, safeResch.query, safeResch.date, safeResch.time, 'Reagendada tras fin de jornada');
+      if (resch.success) {
+        const a = resch.appointment;
+        const dp = (a.date || '').split('-');
+        const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}/${dp[0]}` : a.date;
+        messagesToSend.push(`🗓️ La visita con *${a.clientName}* la he movido al *${fd}* a las *${a.time} h*.`);
+      }
+    }
+
+    // Si quedaron visitas sin resolver
+    if (safeComp.uncompletedQueries && safeComp.uncompletedQueries.length > 0 && (!safeResch || !safeResch.query)) {
+      const unDone = safeComp.uncompletedQueries.join(', ');
+      messagesToSend.push(`ℹ️ La visita con *${unDone}* queda pendiente. ¿Deseas que la pasemos a otro día? Dímelo y la reagendo.`);
+    }
+
+    const finalText = messagesToSend.join('\n\n') || '✅ Anotado todo en tu agenda.';
+    if (sock?.sendMessage) {
+      const sentOk = await sock.sendMessage(remoteJid, { text: finalText });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    }
+    return { success: true, completedResult };
+  } catch (err) {
+    console.error('❌ Error completando visitas:', err.message);
+    if (sock?.sendMessage) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error guardando estado de visitas:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+    return { success: false, error: err.message };
+  }
+}
+
+export async function handleAddShoppingItems(sock, remoteJid, session, items, clientName = null, explicitBudgetId = null) {
+  try {
+    const companyId = session?.companyId || session?.authContext?.companyId;
+    if (!companyId) {
+      console.warn(`🛑 [Tenant Authority] handleAddShoppingItems rechazado: sesión sin companyId para JID '${remoteJid}'`);
+      if (sock?.sendMessage) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      }
+      return { success: false, error: 'UNAUTHORIZED_NO_COMPANY_ID' };
+    }
+    const tenantContext = { companyId, company: session.company, phone: session.phone };
+
+    // Defensas contra Model Injection: descartar identificadores externos
+    const rawItems = Array.isArray(items) ? items : [items];
+    const safeItems = rawItems.filter(Boolean).map(item => {
+      if (typeof item === 'object') {
+        const clone = { ...item };
+        delete clone.company_id;
+        delete clone.companyId;
+        delete clone.company_phone;
+        delete clone.companyPhone;
+        return clone;
+      }
+      return item;
+    });
+
+    const activeBudget = session.activeBudgetId ? session.budgets.get(session.activeBudgetId) : null;
+    const effectiveClient = clientName || (activeBudget?.client?.name !== 'Cliente Particular' ? activeBudget?.client?.name : null);
+    const budgetId = explicitBudgetId || activeBudget?.id || null;
+
+    if (effectiveClient && !explicitBudgetId) {
+      const isDis = await checkDisambiguation(sock, remoteJid, session, effectiveClient, 'add_shopping_items', { items: safeItems });
+      if (isDis) return { success: true, disambiguation: true };
+    }
+
+    const added = addShoppingItems(tenantContext, safeItems, { clientName: effectiveClient, budgetId });
+    if (added.length === 0) {
+      if (sock?.sendMessage) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ No he podido identificar los materiales a comprar. Prueba diciendo: _"para la obra de Carlos comprar 14 m² azulejo gris y 2 sacos cemento cola"_.'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      }
+      return { success: false, error: 'NO_ITEMS_PARSED' };
+    }
+
+    const clientTitle = effectiveClient ? ` para la obra de *${effectiveClient}*` : '';
+    const lines = [
+      `🛒 *¡${added.length === 1 ? 'Material añadido' : `${added.length} materiales añadidos`}${clientTitle}!* ✅`,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━'
+    ];
+    added.forEach(it => {
+      const qtyUnit = it.qty && it.unit ? `*${it.qty} ${it.unit}* ` : '';
+      lines.push(`• ${qtyUnit}${it.description}`);
+    });
+    lines.push('');
+    lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+    lines.push('💡 _Guardado por obra. Te lo recordaré en tu briefing matinal o cuando preguntes "¿qué tengo que comprar?"._');
+
+    if (sock?.sendMessage) {
+      const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    }
+    return { success: true, added };
+  } catch (err) {
+    console.error('❌ Error añadiendo materiales a la compra:', err.message);
+    if (sock?.sendMessage) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error guardando materiales:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+    return { success: false, error: err.message };
+  }
+}
+
+export async function handleListShoppingItems(sock, remoteJid, session, clientQuery = null, explicitBudgetId = null) {
+  try {
+    const companyId = session?.companyId || session?.authContext?.companyId;
+    if (!companyId) {
+      console.warn(`🛑 [Tenant Authority] handleListShoppingItems rechazado: sesión sin companyId para JID '${remoteJid}'`);
+      if (sock?.sendMessage) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      }
+      return { success: false, error: 'UNAUTHORIZED_NO_COMPANY_ID' };
+    }
+    const tenantContext = { companyId, company: session.company, phone: session.phone };
+
+    if (clientQuery && !explicitBudgetId) {
+      const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'list_shopping_items', {});
+      if (isDis) return { success: true, disambiguation: true };
+    }
+
+    const items = listShoppingItems(tenantContext, 'all', clientQuery);
+    if (sock?.sendMessage) {
+      const text = formatShoppingListForWhatsApp(items, clientQuery);
+      const sent = await sock.sendMessage(remoteJid, { text });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    }
+    return { success: true, items };
+  } catch (err) {
+    console.error('❌ Error listando compras:', err.message);
+    if (sock?.sendMessage) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error consultando la lista de compras:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+    return { success: false, error: err.message };
+  }
+}
+
+export async function handleMarkShoppingItemBought(sock, remoteJid, session, query, clientQuery = null, explicitBudgetId = null) {
+  try {
+    const companyId = session?.companyId || session?.authContext?.companyId;
+    if (!companyId) {
+      console.warn(`🛑 [Tenant Authority] handleMarkShoppingItemBought rechazado: sesión sin companyId para JID '${remoteJid}'`);
+      if (sock?.sendMessage) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      }
+      return { success: false, error: 'UNAUTHORIZED_NO_COMPANY_ID' };
+    }
+    const tenantContext = { companyId, company: session.company, phone: session.phone };
+
+    if (clientQuery && !explicitBudgetId) {
+      const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'mark_shopping_items', { query });
+      if (isDis) return { success: true, disambiguation: true };
+    }
+
+    const updated = markShoppingItemBought(tenantContext, query, clientQuery);
+    if (updated.length === 0) {
+      if (sock?.sendMessage) {
+        const sentNotFound = await sock.sendMessage(remoteJid, {
+          text: `ℹ️ No he encontrado ningún material pendiente que coincida con *"${query}"*${clientQuery ? ` para la obra de ${clientQuery}` : ''}.\n\nEscribe *"lista de la compra"* para ver todos tus materiales pendientes.`
+        });
+        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+      }
+      return { success: false, error: 'NOT_FOUND' };
+    }
+
+    const names = updated.map(u => `*${u.description}*${u.clientName ? ` (Obra: ${u.clientName})` : ''}`).join(', ');
+    if (sock?.sendMessage) {
+      const sentOk = await sock.sendMessage(remoteJid, {
+        text: `✔️ *¡Tachado de la lista:* ${names}! ✅\n\nMarcado como comprado en tu historial.`
+      });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    }
+    return { success: true, updated };
+  } catch (err) {
+    console.error('❌ Error marcando material comprado:', err.message);
+    if (sock?.sendMessage) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error actualizando material:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+    return { success: false, error: err.message };
+  }
+}
+
+export async function handleClearShoppingList(sock, remoteJid, session) {
+  const companyId = session?.companyId || session?.authContext?.companyId;
+  if (!companyId) {
+    console.warn(`🛑 [Tenant Authority] handleClearShoppingList rechazado: sesión sin companyId para JID '${remoteJid}'`);
+    if (sock?.sendMessage) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+    return { success: false, error: 'UNAUTHORIZED_NO_COMPANY_ID' };
+  }
+  session.pendingAction = createProposedAction('B', 'clear_shopping_list', {}, 'Vaciar lista de compras');
+  if (sock?.sendMessage) {
+    const sentReq = await sock.sendMessage(remoteJid, {
+      text: '🗑️ *¿Deseas vaciar todos los materiales de tu lista de la compra?*\n\nResponde *"Sí"* para confirmar o *"No"* para cancelarlo.'
+    });
+    if (sentReq?.key?.id) botSentMessageIds.add(sentReq.key.id);
+  }
+  return { success: true };
+}
+
 async function startWhatsAppGateway() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
   const { version } = await fetchLatestBaileysVersion();
@@ -1015,7 +1773,7 @@ async function startWhatsAppGateway() {
     }
   });
 
-  const botSentMessageIds = new Set();
+  // botSentMessageIds exportado a nivel de módulo
   const processedIncomingMsgIds = new Set();
   const recentMessageTexts = new Map();
   const activeProcessingJids = new Set();
@@ -1656,546 +2414,15 @@ async function startWhatsAppGateway() {
     }
   }
 
-  function formatAppointmentForWhatsApp(app, company) {
-    const query = app.clientAddress ? `${app.clientAddress}` : (app.clientName || 'Ubicación');
-    const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+  // Los handlers de citas (formatAppointmentForWhatsApp, formatAppointmentsListForWhatsApp,
+  // handleScheduleAppointment, handleListAppointments, handleCancelAppointment,
+  // handleUpdateAppointment, handleCompleteAppointments) están exportados a nivel de módulo con
+  // validación estricta de tenant authority y model injection defense.
 
-    const dateParts = (app.date || '').split('-');
-    const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : app.date;
-
-    const lines = [
-      '📅 *VISITA TÉCNICA AGENDADA*',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      `🆔 *Ref:* ${app.id}`,
-      `👤 *Cliente:* ${app.clientName}`,
-      app.clientPhone ? `📞 *Teléfono:* ${app.clientPhone}` : null,
-      `📍 *Dirección:* ${app.clientAddress || 'Por concretar'}`,
-      `🗓️ *Fecha:* ${formattedDate}`,
-      `⏰ *Hora:* ${app.time} h`,
-      `📝 *Motivo:* ${app.notes}`,
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      '🗺️ *Abrir ruta en Google Maps:*',
-      mapsUrl,
-      '',
-      '💬 *Mensaje listo para reenviar a tu cliente:*',
-      `_"Hola ${app.clientName.split(' ')[0]}, te confirmamos la visita técnica para valorar los trabajos el ${formattedDate} a las ${app.time} h${app.clientAddress ? ` en ${app.clientAddress}` : ''}. ¡Nos vemos entonces! (${company?.name || 'El técnico'})"_`
-    ].filter(Boolean);
-
-    return lines.join('\n');
-  }
-
-  function formatAppointmentsListForWhatsApp(appointments, title = '📅 *TUS VISITAS TÉCNICAS AGENDADAS:*') {
-    if (!appointments || appointments.length === 0) {
-      return '📅 *AGENDA VACÍA*\n\nNo tienes visitas técnicas en tu agenda.\n\n💡 _Para apuntar una cita di por ejemplo: "Apunta visita con Juan el jueves a las 11:00 en Calle Mayor 14 para ver la caldera"_.';
-    }
-
-    let text = `${title}\n━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    appointments.forEach((app, idx) => {
-      const dateParts = (app.date || '').split('-');
-      const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : app.date;
-      const query = app.clientAddress ? `${app.clientAddress}` : app.clientName;
-      const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
-
-      text += `\n${idx + 1}️⃣ *${formattedDate} a las ${app.time} h* · ${app.clientName}\n`;
-      if (app.clientPhone) text += `   📞 ${app.clientPhone}\n`;
-      if (app.clientAddress) text += `   📍 ${app.clientAddress}\n`;
-      if (app.notes) text += `   📝 ${app.notes}\n`;
-      if (app.clientAddress) text += `   🗺️ ${mapsUrl}\n`;
-    });
-
-    text += '\n━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Para anular una cita di: "Cancela la cita con [Nombre]"_\n💡 _Para agendar otra di: "Apunta visita con [Nombre] el [Día] a las [Hora]"_';
-    return text;
-  }
-
-  async function handleScheduleAppointment(sock, remoteJid, session, appointmentInfo = {}) {
-    try {
-      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const tenantContext = session.companyId || cleanPhone;
-      
-      // Chequeo de colisión de horario (Aviso sin bloquear)
-      const conflicts = findConflictingAppointments(tenantContext, appointmentInfo.date, appointmentInfo.time);
-      
-      const saved = saveAppointment(tenantContext, appointmentInfo);
-      console.log(`📅 Cita técnica agendada para ${cleanPhone}: ${saved.id} - ${saved.clientName} (${saved.date} ${saved.time})`);
-      
-      let conflictWarning = '';
-      if (conflicts.length > 0) {
-        conflictWarning = `\n\n⚠️ *Aviso de horario:* Ya tenías una visita agendada a esa misma hora con *${conflicts[0].clientName}*. He registrado ambas en tu agenda.`;
-      }
-
-      const text = formatAppointmentForWhatsApp(saved, session.company) + conflictWarning;
-      const sent = await sock.sendMessage(remoteJid, { text });
-      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-    } catch (err) {
-      console.error('❌ Error agendando cita:', err.message);
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *Error guardando la cita:* ${err.message}`
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-    }
-  }
-
-  async function handleListAppointments(sock, remoteJid, session, filter = 'all') {
-    try {
-      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const tenantContext = session.companyId || cleanPhone;
-      const appointments = listAppointments(tenantContext, filter);
-
-      let title = '📅 *TUS VISITAS TÉCNICAS AGENDADAS:*';
-      if (filter === 'today') title = '📅 *TUS VISITAS TÉCNICAS DE HOY:*';
-      else if (filter === 'tomorrow') title = '📅 *TUS VISITAS TÉCNICAS DE MAÑANA:*';
-      else if (filter === 'completed') title = '✅ *VISITAS TÉCNICAS REALIZADAS:*';
-      else if (filter === 'past') title = '🕒 *HISTORIAL DE VISITAS PASADAS:*';
-
-      const text = formatAppointmentsListForWhatsApp(appointments, title);
-      const sent = await sock.sendMessage(remoteJid, { text });
-      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-    } catch (err) {
-      console.error('❌ Error listando citas:', err.message);
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *Error consultando la agenda:* ${err.message}`
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-    }
-  }
-
-  async function handleCancelAppointment(sock, remoteJid, session, query) {
-    try {
-      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const tenantContext = session.companyId || cleanPhone;
-      const cancelled = cancelAppointment(tenantContext, query);
-      if (!cancelled) {
-        const sentNotFound = await sock.sendMessage(remoteJid, {
-          text: `⚠️ *No se encontró ninguna visita activa* que coincida con "${query}".\n\nEscribe *"agenda"* para ver tus citas programadas.`
-        });
-        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
-        return;
-      }
-
-      if (cancelled.ambiguous) {
-        const lines = [
-          `⚠️ *Tienes varias visitas con "${query}":*`,
-          '━━━━━━━━━━━━━━━━━━━━━━━━━'
-        ];
-        cancelled.matches.forEach((m, idx) => {
-          lines.push(`${idx + 1}️⃣ *${m.date} a las ${m.time} h* — ${m.clientName} (${m.id})`);
-        });
-        lines.push('\n¿Cuál de ellas deseas anular?');
-        const sentAmb = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
-        if (sentAmb?.key?.id) botSentMessageIds.add(sentAmb.key.id);
-        return;
-      }
-
-      const dateParts = (cancelled.date || '').split('-');
-      const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : cancelled.date;
-
-      const sentOk = await sock.sendMessage(remoteJid, {
-        text: `❌ *Visita cancelada*\n\nHe anulado la visita con *${cancelled.clientName}* prevista para el ${formattedDate} a las ${cancelled.time} h (${cancelled.id}).\n\nEl hueco ha quedado libre en tu agenda.`
-      });
-      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
-      console.log(`❌ Cita ${cancelled.id} cancelada para ${cleanPhone}`);
-    } catch (err) {
-      console.error('❌ Error cancelando cita:', err.message);
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *Error cancelando la cita:* ${err.message}`
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-    }
-  }
-
-  async function handleUpdateAppointment(sock, remoteJid, session, updateInfo = {}) {
-    try {
-      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const tenantContext = session.companyId || cleanPhone;
-      const query = updateInfo.appointmentQuery || updateInfo.clientName || '';
-      
-      // Si el usuario pide cambiar fecha u hora, usamos rescheduleAppointment para trazabilidad total
-      if (updateInfo.date || updateInfo.time) {
-        const res = rescheduleAppointment(tenantContext, query, updateInfo.date, updateInfo.time, 'Reagendamiento por WhatsApp');
-        if (!res.success) {
-          if (res.error === 'AMBIGUOUS') {
-            const lines = [
-              `⚠️ *Tienes varias visitas con "${query}":*`,
-              '━━━━━━━━━━━━━━━━━━━━━━━━━'
-            ];
-            res.matches.forEach((m, idx) => {
-              lines.push(`${idx + 1}️⃣ *${m.date} a las ${m.time} h* — ${m.clientName}`);
-            });
-            lines.push('\n¿A cuál de ellas te refieres? Indícame la fecha o la hora.');
-            const sentAmb = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
-            if (sentAmb?.key?.id) botSentMessageIds.add(sentAmb.key.id);
-            return;
-          }
-          const sentNotFound = await sock.sendMessage(remoteJid, {
-            text: `⚠️ No encontré ninguna visita activa que coincida con *"${query}"*.\n\nEscribe *"agenda"* para ver tus citas.`
-          });
-          if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
-          return;
-        }
-
-        const apt = res.appointment;
-        const dp = (apt.date || '').split('-');
-        const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}/${dp[0]}` : apt.date;
-        const sentOk = await sock.sendMessage(remoteJid, {
-          text: `🗓️ *Visita reagendada con éxito*\n\nHe movido la visita con *${apt.clientName}* al *${fd}* a las *${apt.time} h*.\n\n_Se ha actualizado en tu agenda y el contador de reagendamientos es ${apt.rescheduleCount}._`
-        });
-        if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
-        return;
-      }
-
-      // Modificación de dirección, notas o nombre
-      const changes = {
-        clientAddress: updateInfo.clientAddress || null,
-        notes: updateInfo.notes || null,
-        clientName: updateInfo.newClientName || null,
-        clientPhone: updateInfo.clientPhone || null
-      };
-      Object.keys(changes).forEach(k => { if (!changes[k]) delete changes[k]; });
-
-      const updated = updateAppointment(tenantContext, query, changes);
-      if (!updated) {
-        const sentNotFound = await sock.sendMessage(remoteJid, {
-          text: `⚠️ No encontré ninguna visita activa que coincida con *"${query}"*.\n\nEscribe *"agenda"* para ver tus citas.`
-        });
-        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
-        return;
-      }
-
-      if (updated.ambiguous) {
-        const lines = [
-          `⚠️ *Tienes varias visitas con "${query}":*`,
-          '━━━━━━━━━━━━━━━━━━━━━━━━━'
-        ];
-        updated.matches.forEach((m, idx) => {
-          lines.push(`${idx + 1}️⃣ *${m.date} a las ${m.time} h* — ${m.clientName}`);
-        });
-        lines.push('\n¿A cuál de ellas te refieres?');
-        const sentAmb = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
-        if (sentAmb?.key?.id) botSentMessageIds.add(sentAmb.key.id);
-        return;
-      }
-
-      const dp = (updated.date || '').split('-');
-      const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}/${dp[0]}` : updated.date;
-
-      const lines = [
-        `✅ *Visita actualizada con éxito*`,
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        `👤 *Cliente:* ${updated.clientName}`,
-        updated.clientPhone ? `📞 *Teléfono:* ${updated.clientPhone}` : null,
-        `📍 *Dirección:* ${updated.clientAddress || 'Por concretar'}`,
-        `🗓️ *Fecha:* ${fd}`,
-        `⏰ *Hora:* ${updated.time} h`,
-        updated.notes ? `📝 *Notas:* ${updated.notes}` : null
-      ].filter(Boolean);
-
-      const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
-      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
-    } catch (err) {
-      console.error('❌ Error modificando cita:', err.message);
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *Error modificando la visita:* ${err.message}`
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-    }
-  }
-
-  async function handleCompleteAppointments(sock, remoteJid, session, completionInfo = {}, rescheduleInfo = null) {
-    try {
-      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const tenantContext = session.companyId || cleanPhone;
-      const messagesToSend = [];
-
-      // 1. Si el usuario dijo "todas hechas" o similar
-      if (completionInfo.allCompleted) {
-        const pendingToday = listAppointments(tenantContext, 'today');
-        const ids = pendingToday.map(a => a.id);
-        const res = completeAppointments(tenantContext, ids, 'SUCCESSFUL', 'Confirmado por profesional al fin de día');
-        messagesToSend.push(`✅ *¡Estupendo!* He marcado tus *${res.completed.length} visitas* de hoy como finalizadas.`);
-      } else if (completionInfo.completedQueries && completionInfo.completedQueries.length > 0) {
-        const res = completeAppointments(tenantContext, completionInfo.completedQueries, 'SUCCESSFUL');
-        const names = res.completed.map(c => `*${c.clientName}*`).join(', ');
-        messagesToSend.push(`✅ He marcado como realizada${res.completed.length === 1 ? '' : 's'} la visita con ${names}.`);
-      }
-
-      // 2. Si además pidió reagendar otra visita no realizada
-      if (rescheduleInfo && rescheduleInfo.query && (rescheduleInfo.date || rescheduleInfo.time)) {
-        const resch = rescheduleAppointment(tenantContext, rescheduleInfo.query, rescheduleInfo.date, rescheduleInfo.time, 'Reagendada tras fin de jornada');
-        if (resch.success) {
-          const a = resch.appointment;
-          const dp = (a.date || '').split('-');
-          const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}/${dp[0]}` : a.date;
-          messagesToSend.push(`🗓️ La visita con *${a.clientName}* la he movido al *${fd}* a las *${a.time} h*.`);
-        }
-      }
-
-      // Si quedaron visitas sin resolver
-      if (completionInfo.uncompletedQueries && completionInfo.uncompletedQueries.length > 0 && (!rescheduleInfo || !rescheduleInfo.query)) {
-        const unDone = completionInfo.uncompletedQueries.join(', ');
-        messagesToSend.push(`ℹ️ La visita con *${unDone}* queda pendiente. ¿Deseas que la pasemos a otro día? Dímelo y la reagendo.`);
-      }
-
-      const finalText = messagesToSend.join('\n\n') || '✅ Anotado todo en tu agenda.';
-      const sentOk = await sock.sendMessage(remoteJid, { text: finalText });
-      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
-    } catch (err) {
-      console.error('❌ Error completando visitas:', err.message);
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *Error guardando estado de visitas:* ${err.message}`
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-    }
-  }
-
-  function formatShoppingListForWhatsApp(items, clientFilter = null) {
-    if (!items || items.length === 0) {
-      if (clientFilter) {
-        return `🛒 *No hay materiales pendientes para la obra de ${clientFilter}.*\n\n💡 Para añadir materiales para este cliente, di: _"comprar 14 m² de azulejo para ${clientFilter}"_.`;
-      }
-      return '🛒 *Tu lista de la compra está vacía.*\n\nNo tienes materiales pendientes por comprar.\n\n💡 Para añadir materiales, di: _"para la obra de Carlos comprar 2 sacos de cemento cola y 14 m² de azulejo"_ o mándame una nota de voz.';
-    }
-
-    const pending = items.filter(i => i.status === 'PENDING');
-    const bought = items.filter(i => i.status === 'BOUGHT');
-
-    const title = clientFilter
-      ? `🛒 *LISTA DE MATERIALES — OBRA DE ${clientFilter.toUpperCase()}*`
-      : '🛒 *LISTA GENERAL DE COMPRAS Y MATERIALES*';
-
-    const lines = [
-      title,
-      '━━━━━━━━━━━━━━━━━━━━━━━━━'
-    ];
-
-    if (pending.length > 0) {
-      // Agrupar pendientes por obra/cliente
-      const groups = new Map();
-      pending.forEach(it => {
-        const groupKey = it.clientName ? `🏠 *Obra de ${it.clientName}:*` : '📦 *Materiales Generales / Almacén:*';
-        if (!groups.has(groupKey)) groups.set(groupKey, []);
-        groups.get(groupKey).push(it);
-      });
-
-      let globalIdx = 1;
-      for (const [groupHeader, groupItems] of groups.entries()) {
-        lines.push(`\n${groupHeader}`);
-        groupItems.forEach(it => {
-          const qtyUnit = it.qty && it.unit ? `*${it.qty} ${it.unit}* ` : '';
-          lines.push(`  ${globalIdx}️⃣ ${qtyUnit}${it.description}`);
-          globalIdx++;
-        });
-      }
-    } else {
-      lines.push('\n✅ _¡No tienes ningún material pendiente de compra!_');
-    }
-
-    if (bought.length > 0) {
-      lines.push('\n━━━━━━━━━━━━━━━━━━━━━━━━━');
-      lines.push(`✔️ *Comprados / Tachados recientemente (${bought.length}):*`);
-      bought.slice(0, 5).forEach(it => {
-        const clientTag = it.clientName ? ` _(${it.clientName})_` : '';
-        lines.push(`   ~${it.description}~${clientTag}`);
-      });
-    }
-
-    lines.push('\n━━━━━━━━━━━━━━━━━━━━━━━━━');
-    if (!clientFilter) {
-      lines.push('💡 _Puedes consultar una obra concreta diciendo: "¿qué tengo que comprar para Carlos?" o tachar diciendo: "ya compré el cemento"._');
-    } else {
-      lines.push('💡 _Para tachar: "ya compré el cemento de ' + clientFilter + '" o "tachar azulejo"._');
-    }
-    return lines.join('\n');
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // DESAMBIGUACIÓN DE HOMÓNIMOS Y DISTINTIVOS DE CLIENTE
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  async function checkDisambiguation(sock, remoteJid, session, clientQuery, actionType, originalPayload = {}) {
-    if (!clientQuery) return false;
-    const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-    const candidates = findClientsByName(cleanPhone, clientQuery);
-
-    if (candidates && candidates.length > 1) {
-      session.pendingDisambiguation = {
-        actionType,
-        clientQuery,
-        candidates,
-        originalPayload
-      };
-
-      const text = formatDisambiguationPrompt(clientQuery, candidates);
-      const sent = await sock.sendMessage(remoteJid, { text });
-      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-      return true;
-    }
-    return false;
-  }
-
-  async function handleRenameClient(sock, remoteJid, session, targetQuery, newName) {
-    try {
-      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const candidates = findClientsByName(cleanPhone, targetQuery);
-
-      if (candidates.length > 1) {
-        session.pendingDisambiguation = {
-          actionType: 'rename_client',
-          clientQuery: targetQuery,
-          candidates,
-          originalPayload: { newName }
-        };
-        const text = formatDisambiguationPrompt(targetQuery, candidates) + `\n\n👉 Elige el número de obra que deseas renombrar a *"${newName}"*.`;
-        const sent = await sock.sendMessage(remoteJid, { text });
-        if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-        return;
-      }
-
-      const renamed = renameClientBudget(cleanPhone, targetQuery, newName);
-      if (!renamed) {
-        const sentErr = await sock.sendMessage(remoteJid, {
-          text: `ℹ️ No se ha encontrado ningún cliente o presupuesto que coincida con *"${targetQuery}"* para renombrar.`
-        });
-        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-        return;
-      }
-
-      for (const b of session.budgets.values()) {
-        if (b.id === renamed.budgetId && b.client) {
-          b.client.name = renamed.newName;
-        }
-      }
-
-      const lines = [
-        '🏷️ *¡Distintivo / Nombre de cliente actualizado!* ✅',
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        `👤 *Nombre anterior:* ${renamed.oldName}`,
-        `✨ *Nuevo nombre:* *${renamed.newName}*`,
-        `📍 *Ubicación:* ${renamed.clientAddress}`,
-        `📁 *Presupuesto:* ${renamed.budgetId}`,
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        '💡 _A partir de ahora puedes referirte a esta obra como "' + renamed.newName + '" para evitar confusiones con otros clientes homónimos._'
-      ];
-
-      const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
-      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
-    } catch (err) {
-      console.error('❌ Error renombrando cliente:', err.message);
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *Error renombrando cliente:* ${err.message}`
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-    }
-  }
-
-  async function handleAddShoppingItems(sock, remoteJid, session, items, clientName = null, explicitBudgetId = null) {
-    try {
-      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const tenantContext = session.companyId || cleanPhone;
-      const activeBudget = session.activeBudgetId ? session.budgets.get(session.activeBudgetId) : null;
-      const effectiveClient = clientName || (activeBudget?.client?.name !== 'Cliente Particular' ? activeBudget?.client?.name : null);
-      const budgetId = explicitBudgetId || activeBudget?.id || null;
-
-      if (effectiveClient && !explicitBudgetId) {
-        const isDis = await checkDisambiguation(sock, remoteJid, session, effectiveClient, 'add_shopping_items', { items });
-        if (isDis) return;
-      }
-
-      const added = addShoppingItems(tenantContext, items, { clientName: effectiveClient, budgetId });
-      if (added.length === 0) {
-        const sentErr = await sock.sendMessage(remoteJid, {
-          text: '⚠️ No he podido identificar los materiales a comprar. Prueba diciendo: _"para la obra de Carlos comprar 14 m² azulejo gris y 2 sacos cemento cola"_.'
-        });
-        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-        return;
-      }
-
-      const clientTitle = effectiveClient ? ` para la obra de *${effectiveClient}*` : '';
-      const lines = [
-        `🛒 *¡${added.length === 1 ? 'Material añadido' : `${added.length} materiales añadidos`}${clientTitle}!* ✅`,
-        '━━━━━━━━━━━━━━━━━━━━━━━━━'
-      ];
-      added.forEach(it => {
-        const qtyUnit = it.qty && it.unit ? `*${it.qty} ${it.unit}* ` : '';
-        lines.push(`• ${qtyUnit}${it.description}`);
-      });
-      lines.push('');
-      lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
-      lines.push('💡 _Guardado por obra. Te lo recordaré en tu briefing matinal o cuando preguntes "¿qué tengo que comprar?"._');
-
-      const sentOk = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
-      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
-    } catch (err) {
-      console.error('❌ Error añadiendo materiales a la compra:', err.message);
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *Error guardando materiales:* ${err.message}`
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-    }
-  }
-
-  async function handleListShoppingItems(sock, remoteJid, session, clientQuery = null, explicitBudgetId = null) {
-    try {
-      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const tenantContext = session.companyId || cleanPhone;
-
-      if (clientQuery && !explicitBudgetId) {
-        const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'list_shopping_items', {});
-        if (isDis) return;
-      }
-
-      const items = listShoppingItems(tenantContext, 'all', clientQuery);
-      const text = formatShoppingListForWhatsApp(items, clientQuery);
-      const sent = await sock.sendMessage(remoteJid, { text });
-      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-    } catch (err) {
-      console.error('❌ Error listando compras:', err.message);
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *Error consultando la lista de compras:* ${err.message}`
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-    }
-  }
-
-  async function handleMarkShoppingItemBought(sock, remoteJid, session, query, clientQuery = null, explicitBudgetId = null) {
-    try {
-      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const tenantContext = session.companyId || cleanPhone;
-
-      if (clientQuery && !explicitBudgetId) {
-        const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'mark_shopping_items', { query });
-        if (isDis) return;
-      }
-
-      const updated = markShoppingItemBought(tenantContext, query, clientQuery);
-      if (updated.length === 0) {
-        const sentNotFound = await sock.sendMessage(remoteJid, {
-          text: `ℹ️ No he encontrado ningún material pendiente que coincida con *"${query}"*${clientQuery ? ` para la obra de ${clientQuery}` : ''}.\n\nEscribe *"lista de la compra"* para ver todos tus materiales pendientes.`
-        });
-        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
-        return;
-      }
-
-      const names = updated.map(u => `*${u.description}*${u.clientName ? ` (Obra: ${u.clientName})` : ''}`).join(', ');
-      const sentOk = await sock.sendMessage(remoteJid, {
-        text: `✔️ *¡Tachado de la lista:* ${names}! ✅\n\nMarcado como comprado en tu historial.`
-      });
-      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
-    } catch (err) {
-      console.error('❌ Error marcando material comprado:', err.message);
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *Error actualizando material:* ${err.message}`
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-    }
-  }
-
-  async function handleClearShoppingList(sock, remoteJid, session) {
-    session.pendingAction = createProposedAction('B', 'clear_shopping_list', {}, 'Vaciar lista de compras');
-    const sentReq = await sock.sendMessage(remoteJid, {
-      text: '🗑️ *¿Deseas vaciar todos los materiales de tu lista de la compra?*\n\nResponde *"Sí"* para confirmar o *"No"* para cancelarlo.'
-    });
-    if (sentReq?.key?.id) botSentMessageIds.add(sentReq.key.id);
-  }
+  // Los handlers de compras, materiales y desambiguación (formatShoppingListForWhatsApp,
+  // checkDisambiguation, handleRenameClient, handleAddShoppingItems, handleListShoppingItems,
+  // handleMarkShoppingItemBought, handleClearShoppingList) están exportados a nivel de módulo con
+  // validación estricta de tenant authority y model injection defense.
 
   // ─────────────────────────────────────────────────────────────────────────────
   // MODO OBRA: Memoria Viva y Ficha de Seguimiento por Obra
@@ -3333,7 +3560,16 @@ async function startWhatsAppGateway() {
           }
 
           if (act.type === 'clear_shopping_list') {
-            const tenantContext = session.companyId || session.phone || String(remoteJid).replace(/\D/g, '');
+            const companyId = session?.companyId || session?.authContext?.companyId;
+            if (!companyId) {
+              console.warn(`🛑 [Tenant Authority] pendingAction 'clear_shopping_list' rechazada: sesión sin companyId para JID '${remoteJid}'`);
+              const sentErr = await sock.sendMessage(remoteJid, {
+                text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+              });
+              if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+              return;
+            }
+            const tenantContext = { companyId, company: session.company, phone: session.phone };
             const res = clearShoppingList(tenantContext);
             const sentClr = await sock.sendMessage(remoteJid, {
               text: `🗑️ *Lista de compras vaciada con éxito.* Se han eliminado ${res.deletedCount} materiales de tu lista.`

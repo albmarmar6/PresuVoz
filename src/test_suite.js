@@ -11,7 +11,16 @@ import {
   authenticateWhatsAppSession,
   getUserSession,
   extractCanonicalSenderIdentifier,
-  userSessions
+  userSessions,
+  handleScheduleAppointment,
+  handleListAppointments,
+  handleCancelAppointment,
+  handleUpdateAppointment,
+  handleCompleteAppointments,
+  handleAddShoppingItems,
+  handleListShoppingItems,
+  handleMarkShoppingItemBought,
+  handleClearShoppingList
 } from './whatsapp_gateway.js';
 
 export function computeFileSha256(filePath) {
@@ -4116,6 +4125,213 @@ cleanupTest32(phoneTenantA32);
 cleanupTest32(phoneTenantB32);
 userSessions.delete(`${phoneTenantA32}@s.whatsapp.net`);
 userSessions.delete(`${phoneTenantB32}@s.whatsapp.net`);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEST 33: Micro-Hardening de Tenant Authority en WhatsApp Gateway (Fase 2C)
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\nTEST 33: Micro-Hardening de Tenant Authority en WhatsApp Gateway & Model Injection Defense");
+
+const phoneHardA = '34699112233';
+const phoneHardB = '34699445566';
+const phoneAttacker = '34699778899';
+
+// Limpieza previa
+const cleanupTest33 = (p) => {
+  currentDb.prepare("DELETE FROM appointments WHERE company_phone = ?").run(p);
+  currentDb.prepare("DELETE FROM shopping_items WHERE company_phone = ?").run(p);
+  currentDb.prepare("DELETE FROM channel_identities WHERE channel_identifier = ?").run(p);
+  currentDb.prepare("DELETE FROM companies WHERE phone = ?").run(p);
+};
+cleanupTest33(phoneHardA);
+cleanupTest33(phoneHardB);
+cleanupTest33(phoneAttacker);
+
+// Empresas A y B registradas (saveCompany crea automáticamente companies y channel_identities)
+const compA33 = saveCompanyTenant32(phoneHardA, { name: 'Empresa Alpha Hardening' });
+const compB33 = saveCompanyTenant32(phoneHardB, { name: 'Empresa Beta Hardening' });
+
+const sessionHardA = {
+  phone: phoneHardA,
+  companyId: compA33.id,
+  authContext: { companyId: compA33.id, company: compA33 },
+  company: compA33,
+  budgets: new Map()
+};
+
+const sessionHardB = {
+  phone: phoneHardB,
+  companyId: compB33.id,
+  authContext: { companyId: compB33.id, company: compB33 },
+  company: compB33,
+  budgets: new Map()
+};
+
+// Sesión sin autenticar (sin companyId)
+const sessionNoAuth = {
+  phone: phoneAttacker,
+  companyId: null,
+  authContext: null,
+  company: null,
+  budgets: new Map()
+};
+
+// Sesión atacante que suplanta el teléfono de Alpha pero no tiene companyId autenticado
+const sessionSpoofing = {
+  phone: phoneHardA,
+  companyId: null,
+  authContext: null,
+  company: null,
+  budgets: new Map()
+};
+
+const sentMessagesHard = [];
+const mockSockHard = {
+  sendMessage: async (jid, content) => {
+    sentMessagesHard.push({ jid, content });
+    return { key: { id: `mock_${Date.now()}_${Math.random()}` } };
+  }
+};
+
+// 1. Operación legítima con session.companyId válido -> Éxito en su tenant
+const aptResA = await handleScheduleAppointment(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionHardA, {
+  clientName: 'Visita Legítima Alpha',
+  date: '2026-10-25',
+  time: '10:00',
+  notes: 'Revisión fontanería'
+});
+assert(aptResA.success === true, "1. Authority legítima: handleScheduleAppointment crea cita con éxito para tenant autenticado");
+assert(aptResA.saved && aptResA.saved.companyId === compA33.id, "2. Authority legítima: apt.companyId coincide con compA33.id");
+
+const shopResA = await handleAddShoppingItems(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionHardA, [
+  { description: 'Cable cobre libre de halógenos', qty: 50, unit: 'm' }
+]);
+assert(shopResA.success === true && shopResA.added.length === 1, "3. Authority legítima: handleAddShoppingItems añade materiales para tenant autenticado");
+assert(shopResA.added[0].companyId === compA33.id, "4. Authority legítima: shopping_item.companyId coincide con compA33.id");
+
+// 2. Intento de Model Injection: LLM inyecta companyId / company_phone de OTRA empresa
+const aptInjectionRes = await handleScheduleAppointment(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionHardA, {
+  clientName: 'Cita con Inyección Maliciosa',
+  date: '2026-10-26',
+  time: '11:00',
+  companyId: compB33.id,
+  company_id: compB33.id,
+  companyPhone: phoneHardB,
+  company_phone: phoneHardB
+});
+assert(aptInjectionRes.success === true, "5. Model Injection: handleScheduleAppointment procesa la solicitud");
+const injectedDbApt = currentDb.prepare("SELECT company_id, company_phone FROM appointments WHERE id = ?").get(aptInjectionRes.saved.id);
+assert(injectedDbApt.company_id === compA33.id, "6. Model Injection: appointment.company_id es forzado al tenant autenticado (NUNCA al inyectado de Beta)");
+assert(injectedDbApt.company_phone === phoneHardA, "7. Model Injection: appointment.company_phone es forzado al teléfono autenticado (NUNCA al inyectado de Beta)");
+
+const shopInjectionRes = await handleAddShoppingItems(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionHardA, [
+  {
+    description: 'Material Inyectado',
+    qty: 10,
+    unit: 'ud',
+    companyId: compB33.id,
+    company_id: compB33.id,
+    companyPhone: phoneHardB,
+    company_phone: phoneHardB
+  }
+]);
+assert(shopInjectionRes.success === true && shopInjectionRes.added.length === 1, "8. Model Injection: handleAddShoppingItems procesa la solicitud");
+const injectedDbShop = currentDb.prepare("SELECT company_id, company_phone FROM shopping_items WHERE id = ?").get(shopInjectionRes.added[0].id);
+assert(injectedDbShop.company_id === compA33.id, "9. Model Injection: shopping_item.company_id es forzado al tenant autenticado");
+assert(injectedDbShop.company_phone === phoneHardA, "10. Model Injection: shopping_item.company_phone es forzado al teléfono autenticado");
+
+// 3. Operación sin session.companyId (null / undefined): Rechazo absoluto, NUNCA fallback a cleanPhone
+const noAuthAptRes = await handleScheduleAppointment(mockSockHard, `${phoneAttacker}@s.whatsapp.net`, sessionNoAuth, {
+  clientName: 'Intruso Sin Auth',
+  date: '2026-10-27',
+  time: '12:00'
+});
+assert(noAuthAptRes.success === false && noAuthAptRes.error === 'UNAUTHORIZED_NO_COMPANY_ID', "11. Tenant Boundary: handleScheduleAppointment rechaza sesión sin companyId");
+
+// Ataque de suplantación: El atacante envía cleanPhone de Alpha pero sin autenticación de companyId
+const spoofAptRes = await handleScheduleAppointment(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionSpoofing, {
+  clientName: 'Ataque Suplantación Cita',
+  date: '2026-10-27',
+  time: '12:00'
+});
+assert(spoofAptRes.success === false && spoofAptRes.error === 'UNAUTHORIZED_NO_COMPANY_ID', "12. Tenant Boundary: Rechaza sesión con cleanPhone de otra empresa si companyId es nulo (cero fallback de autorización)");
+
+const spoofListAptRes = await handleListAppointments(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionSpoofing);
+assert(spoofListAptRes.success === false && spoofListAptRes.error === 'UNAUTHORIZED_NO_COMPANY_ID', "13. Tenant Boundary: handleListAppointments rechaza sesión sin companyId");
+
+const spoofCancelAptRes = await handleCancelAppointment(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionSpoofing, 'Visita Legítima Alpha');
+assert(spoofCancelAptRes.success === false && spoofCancelAptRes.error === 'UNAUTHORIZED_NO_COMPANY_ID', "14. Tenant Boundary: handleCancelAppointment rechaza sesión sin companyId");
+
+const spoofUpdateAptRes = await handleUpdateAppointment(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionSpoofing, {
+  appointmentQuery: 'Visita Legítima Alpha',
+  notes: 'Hack'
+});
+assert(spoofUpdateAptRes.success === false && spoofUpdateAptRes.error === 'UNAUTHORIZED_NO_COMPANY_ID', "15. Tenant Boundary: handleUpdateAppointment rechaza sesión sin companyId");
+
+const spoofCompleteAptRes = await handleCompleteAppointments(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionSpoofing, {
+  completedQueries: ['Visita Legítima Alpha']
+});
+assert(spoofCompleteAptRes.success === false && spoofCompleteAptRes.error === 'UNAUTHORIZED_NO_COMPANY_ID', "16. Tenant Boundary: handleCompleteAppointments rechaza sesión sin companyId");
+
+const spoofAddShopRes = await handleAddShoppingItems(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionSpoofing, [
+  { description: 'Material Hack' }
+]);
+assert(spoofAddShopRes.success === false && spoofAddShopRes.error === 'UNAUTHORIZED_NO_COMPANY_ID', "17. Tenant Boundary: handleAddShoppingItems rechaza sesión sin companyId");
+
+const spoofListShopRes = await handleListShoppingItems(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionSpoofing);
+assert(spoofListShopRes.success === false && spoofListShopRes.error === 'UNAUTHORIZED_NO_COMPANY_ID', "18. Tenant Boundary: handleListShoppingItems rechaza sesión sin companyId");
+
+const spoofMarkShopRes = await handleMarkShoppingItemBought(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionSpoofing, 'Cable cobre');
+assert(spoofMarkShopRes.success === false && spoofMarkShopRes.error === 'UNAUTHORIZED_NO_COMPANY_ID', "19. Tenant Boundary: handleMarkShoppingItemBought rechaza sesión sin companyId");
+
+const spoofClearShopRes = await handleClearShoppingList(mockSockHard, `${phoneHardA}@s.whatsapp.net`, sessionSpoofing);
+assert(spoofClearShopRes.success === false && spoofClearShopRes.error === 'UNAUTHORIZED_NO_COMPANY_ID', "20. Tenant Boundary: handleClearShoppingList rechaza sesión sin companyId");
+
+// 4. Intento cross-tenant entre Tenant A y Tenant B (Zero-Disclosure & Mutación bloqueada)
+// Tenant B intenta listar citas de Alpha
+const listHardB = await handleListAppointments(mockSockHard, `${phoneHardB}@s.whatsapp.net`, sessionHardB);
+assert(listHardB.success === true && listHardB.appointments.length === 0, "21. Aislamiento Cross-Tenant: Tenant B no ve las citas de Tenant A en handleListAppointments");
+
+// Tenant B intenta cancelar cita de Alpha
+const cancelHardB = await handleCancelAppointment(mockSockHard, `${phoneHardB}@s.whatsapp.net`, sessionHardB, 'Visita Legítima Alpha');
+assert(cancelHardB.success === false && cancelHardB.error === 'NOT_FOUND', "22. Aislamiento Cross-Tenant: Tenant B no puede cancelar citas de Tenant A");
+const checkAptA = currentDb.prepare("SELECT status FROM appointments WHERE id = ?").get(aptResA.saved.id);
+assert(checkAptA.status === 'CONFIRMED', "23. Aislamiento Cross-Tenant: La cita de Tenant A permanece CONFIRMED tras intento ajeno");
+
+// Tenant B intenta modificar cita de Alpha
+const updateHardB = await handleUpdateAppointment(mockSockHard, `${phoneHardB}@s.whatsapp.net`, sessionHardB, {
+  appointmentQuery: 'Visita Legítima Alpha',
+  notes: 'Intento de alteración por Beta'
+});
+assert(updateHardB.success === false && updateHardB.error === 'NOT_FOUND', "24. Aislamiento Cross-Tenant: Tenant B no puede modificar citas de Tenant A");
+
+// Tenant B intenta completar citas de Alpha
+const completeHardB = await handleCompleteAppointments(mockSockHard, `${phoneHardB}@s.whatsapp.net`, sessionHardB, {
+  completedQueries: ['Visita Legítima Alpha']
+});
+assert(completeHardB.success === true && (completeHardB.completedResult?.completed?.length || 0) === 0, "25. Aislamiento Cross-Tenant: Tenant B no puede completar visitas de Tenant A");
+
+// Tenant B intenta listar compras de Alpha
+const listShopHardB = await handleListShoppingItems(mockSockHard, `${phoneHardB}@s.whatsapp.net`, sessionHardB);
+assert(listShopHardB.success === true && listShopHardB.items.length === 0, "26. Aislamiento Cross-Tenant: Tenant B no ve los materiales de compra de Tenant A");
+
+// Tenant B intenta tachar compra de Alpha
+const markShopHardB = await handleMarkShoppingItemBought(mockSockHard, `${phoneHardB}@s.whatsapp.net`, sessionHardB, 'Cable cobre');
+assert(markShopHardB.success === false && markShopHardB.error === 'NOT_FOUND', "27. Aislamiento Cross-Tenant: Tenant B no puede tachar compras de Tenant A");
+
+// 5. Integridad relacional y SQLite PRAGMAs
+const fkHardCheck = currentDb.prepare('PRAGMA foreign_key_check').all();
+assert(fkHardCheck.length === 0, "28. Integridad: PRAGMA foreign_key_check cero violaciones tras batería de hardening");
+
+const integrityHardCheck = currentDb.prepare('PRAGMA integrity_check').get();
+assert(integrityHardCheck.integrity_check === 'ok', "29. Integridad: PRAGMA integrity_check confirma base de datos 100% íntegra (ok)");
+
+// Limpieza final de TEST 33
+cleanupTest33(phoneHardA);
+cleanupTest33(phoneHardB);
+cleanupTest33(phoneAttacker);
+userSessions.delete(`${phoneHardA}@s.whatsapp.net`);
+userSessions.delete(`${phoneHardB}@s.whatsapp.net`);
+userSessions.delete(`${phoneAttacker}@s.whatsapp.net`);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {
