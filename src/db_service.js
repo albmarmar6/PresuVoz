@@ -685,45 +685,93 @@ export function listInvoices(companyContextOrIdOrPhone, limit = 20) {
 
 // ─── Métodos de Cobros ────────────────────────────────────────────────────────
 
-export function savePayment(phone, paymentOrBudgetId, maybePayment) {
-  let cleanPhone = String(phone).replace(/\D/g, '');
+export function savePayment(companyContextOrIdOrPhone, paymentOrBudgetId, maybePayment) {
+  if (!companyContextOrIdOrPhone) {
+    throw new Error("❌ [Tenant Boundary] savePayment requiere un companyId o contexto autenticado obligatorio.");
+  }
+
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId || null;
+  const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
+
   let payment = maybePayment || paymentOrBudgetId;
-  let targetId = maybePayment ? paymentOrBudgetId : (payment?.budgetId || payment?.invoiceId || '');
+  let targetId = maybePayment ? paymentOrBudgetId : (payment?.targetId || payment?.budgetId || payment?.invoiceId || '');
   if (!payment) return null;
   const pId = payment.id || `PAY-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
   const now = new Date().toISOString();
 
+  // Defensa activa contra inyección de companyId / company_phone
+  if (payment.companyId && companyId && payment.companyId !== companyId) {
+    console.warn(`⚠️ [DEFENSA ACTIVA] Intento de inyección de companyId detectado en pago: '${payment.companyId}' ignorado. Se fuerza '${companyId}'.`);
+  }
+  if (payment.company_id && companyId && payment.company_id !== companyId) {
+    console.warn(`⚠️ [DEFENSA ACTIVA] Intento de inyección de company_id detectado en pago: '${payment.company_id}' ignorado. Se fuerza '${companyId}'.`);
+  }
+  payment.companyId = companyId;
+  payment.company_id = companyId;
+
+  if (payment.company_phone && cleanPhone && String(payment.company_phone).replace(/\D/g, '') !== cleanPhone) {
+    console.warn(`⚠️ [DEFENSA ACTIVA] Intento de inyección de company_phone detectado en pago: '${payment.company_phone}' ignorado. Se fuerza '${cleanPhone}'.`);
+  }
+  payment.company_phone = cleanPhone;
+
   payment.id = pId;
   payment.budgetId = targetId;
 
-  // Si también está asociado a una factura en invoices, actualizar sus pagos dentro de data_json
+  // Validación de relación con targetId (si targetId es factura o presupuesto)
+  let linkedInvoice = null;
   if (targetId) {
-    const invRow = db.prepare('SELECT data_json FROM invoices WHERE id = ?').get(targetId);
-    if (invRow) {
-      try {
-        const inv = JSON.parse(invRow.data_json);
-        if (!inv.payments) inv.payments = [];
-        inv.payments.push({
-          id: pId,
-          amount: Number(payment.amount || 0),
-          date: payment.date || now.split('T')[0],
-          method: payment.method || 'Transferencia',
-          concept: payment.concept || ''
-        });
-        db.prepare('UPDATE invoices SET data_json = ? WHERE id = ?').run(JSON.stringify(inv), targetId);
-      } catch (e) {}
+    linkedInvoice = getInvoice(companyContextOrIdOrPhone, targetId);
+    if (!linkedInvoice) {
+      // Verificar si targetId pertenece a una factura de OTRA empresa (intento cross-tenant)
+      const foreignInv = db.prepare('SELECT id, company_id FROM invoices WHERE id = ?').get(targetId);
+      if (foreignInv && foreignInv.company_id !== companyId) {
+        throw new Error(`❌ [Tenant Boundary] Violación de aislamiento: No se puede asociar el pago a la factura '${targetId}' de otra empresa.`);
+      }
+      // Verificar si targetId pertenece a un presupuesto de OTRA empresa (intento cross-tenant)
+      const foreignBud = db.prepare('SELECT id, company_id FROM budgets WHERE id = ?').get(targetId);
+      if (foreignBud && foreignBud.company_id !== companyId) {
+        throw new Error(`❌ [Tenant Boundary] Violación de aislamiento: No se puede asociar el pago al presupuesto '${targetId}' de otra empresa.`);
+      }
     }
   }
 
+  // Si está asociado a una factura en invoices, actualizar sus pagos dentro de data_json (retrocompatibilidad)
+  if (linkedInvoice) {
+    try {
+      if (!linkedInvoice.payments) linkedInvoice.payments = [];
+      linkedInvoice.payments.push({
+        id: pId,
+        amount: Number(payment.amount || 0),
+        date: payment.date || now.split('T')[0],
+        method: payment.method || 'Transferencia',
+        concept: payment.concept || ''
+      });
+      db.prepare('UPDATE invoices SET data_json = ? WHERE id = ? AND company_id = ?').run(
+        JSON.stringify(linkedInvoice), targetId, companyId
+      );
+    } catch (e) {}
+  }
+
   const stmt = db.prepare(`
-    INSERT INTO payments (id, budget_id, company_phone, amount, method, concept, data_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO payments (id, company_id, budget_id, company_phone, amount, method, concept, data_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
+      company_id = COALESCE(excluded.company_id, payments.company_id),
+      company_phone = COALESCE(excluded.company_phone, payments.company_phone),
+      budget_id = excluded.budget_id,
+      amount = excluded.amount,
+      method = excluded.method,
+      concept = excluded.concept,
       data_json = excluded.data_json
+    WHERE payments.company_id = excluded.company_id 
+       OR payments.company_id IS NULL
+       OR (payments.company_phone = excluded.company_phone AND payments.company_id IS NULL)
   `);
 
   stmt.run(
     pId,
+    companyId,
     targetId,
     cleanPhone,
     Number(payment.amount || 0),
@@ -732,10 +780,110 @@ export function savePayment(phone, paymentOrBudgetId, maybePayment) {
     JSON.stringify(payment),
     now
   );
+
+  // Si targetId es una factura legítima del tenant, registrar automáticamente su allocation inicial si no existe
+  if (linkedInvoice && companyId) {
+    try {
+      const existingAlloc = db.prepare('SELECT id FROM payment_allocations WHERE payment_id = ? AND invoice_id = ?').get(pId, linkedInvoice.id);
+      if (!existingAlloc) {
+        const allocId = `ALLOC-${pId}`;
+        db.prepare(`
+          INSERT INTO payment_allocations (id, payment_id, invoice_id, company_id, amount, allocated_at, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(allocId, pId, linkedInvoice.id, companyId, Number(payment.amount || 0), now, now, now);
+      }
+    } catch (e) {}
+  }
+
   return payment;
 }
 
-export function getPayments(budgetId) {
+export function getPayment(companyContextOrIdOrPhone, id) {
+  if (id !== undefined && id !== null) {
+    if (!companyContextOrIdOrPhone || !id) return null;
+    const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+    const companyId = tenant?.companyId;
+    const phone = tenant?.phone;
+
+    let row = null;
+    if (companyId) {
+      row = db.prepare('SELECT data_json, company_id FROM payments WHERE id = ? AND company_id = ?').get(id, companyId);
+      if (!row && phone) {
+        row = db.prepare('SELECT data_json, company_id FROM payments WHERE id = ? AND company_phone = ? AND company_id IS NULL').get(id, phone);
+      }
+    } else if (phone) {
+      row = db.prepare('SELECT data_json, company_id FROM payments WHERE id = ? AND company_phone = ?').get(id, phone);
+    }
+
+    if (!row) return null;
+    try { return JSON.parse(row.data_json); } catch(e) { return null; }
+  }
+
+  console.warn("🛑 [Seguridad Tenant] getPayment invocado sin tenant context obligatorio. Retornando null.");
+  return null;
+}
+
+export function listPayments(companyContextOrIdOrPhone, limit = 50) {
+  if (!companyContextOrIdOrPhone) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const phone = tenant?.phone;
+
+  let rows = [];
+  if (companyId) {
+    rows = db.prepare('SELECT data_json FROM payments WHERE company_id = ? ORDER BY created_at DESC LIMIT ?').all(companyId, limit);
+  } else if (phone) {
+    rows = db.prepare('SELECT data_json FROM payments WHERE company_phone = ? ORDER BY created_at DESC LIMIT ?').all(phone, limit);
+  }
+
+  const results = [];
+  for (const r of rows) {
+    try { results.push(JSON.parse(r.data_json)); } catch(e) {}
+  }
+  return results;
+}
+
+export function updatePayment(companyContextOrIdOrPhone, payment) {
+  if (!companyContextOrIdOrPhone || !payment || !payment.id) return null;
+  const existing = getPayment(companyContextOrIdOrPhone, payment.id);
+  if (!existing) return null;
+  return savePayment(companyContextOrIdOrPhone, payment);
+}
+
+export function deletePayment(companyContextOrIdOrPhone, id) {
+  if (!companyContextOrIdOrPhone || !id) return { deleted: false };
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const phone = tenant?.phone;
+
+  let result = { changes: 0 };
+  if (companyId) {
+    result = db.prepare('DELETE FROM payments WHERE id = ? AND company_id = ?').run(id, companyId);
+  } else if (phone) {
+    result = db.prepare('DELETE FROM payments WHERE id = ? AND company_phone = ?').run(id, phone);
+  }
+
+  return { deleted: result.changes > 0, id };
+}
+
+export function getPayments(companyContextOrIdOrPhone, maybeBudgetId) {
+  let budgetId = maybeBudgetId !== undefined ? maybeBudgetId : companyContextOrIdOrPhone;
+  let companyContext = maybeBudgetId !== undefined ? companyContextOrIdOrPhone : null;
+
+  if (companyContext) {
+    const tenant = resolveCompanyTenant(companyContext);
+    const companyId = tenant?.companyId;
+    if (companyId) {
+      const stmt = db.prepare('SELECT data_json FROM payments WHERE budget_id = ? AND company_id = ? ORDER BY created_at ASC');
+      const rows = stmt.all(budgetId, companyId);
+      const results = [];
+      for (const r of rows) {
+        try { results.push(JSON.parse(r.data_json)); } catch(e) {}
+      }
+      return results;
+    }
+  }
+
   const stmt = db.prepare('SELECT data_json FROM payments WHERE budget_id = ? ORDER BY created_at ASC');
   const rows = stmt.all(budgetId);
   const results = [];
@@ -743,6 +891,170 @@ export function getPayments(budgetId) {
     try { results.push(JSON.parse(r.data_json)); } catch(e) {}
   }
   return results;
+}
+
+// ─── Métodos de Payment Allocations (Aplicación de Cobros a Facturas) ────────
+
+export function createPaymentAllocation(companyContextOrIdOrPhone, allocationData) {
+  if (!companyContextOrIdOrPhone) {
+    throw new Error("❌ [Tenant Boundary] createPaymentAllocation requiere un companyId o contexto autenticado obligatorio.");
+  }
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  if (!companyId) {
+    throw new Error("❌ [Tenant Boundary] No se pudo resolver companyId para la asignación.");
+  }
+
+  const paymentId = allocationData.paymentId || allocationData.payment_id;
+  const invoiceId = allocationData.invoiceId || allocationData.invoice_id;
+  const amount = Number(allocationData.amount);
+
+  // 1. Validar importe positivo
+  if (isNaN(amount) || amount <= 0) {
+    throw new Error("❌ [Payment Allocation] El importe de la asignación debe ser un número positivo mayor que cero.");
+  }
+
+  // 2. Obtener y validar payment en el tenant autenticado
+  const payment = getPayment(companyContextOrIdOrPhone, paymentId);
+  if (!payment) {
+    const foreignPayment = db.prepare('SELECT id, company_id FROM payments WHERE id = ?').get(paymentId);
+    if (foreignPayment && foreignPayment.company_id !== companyId) {
+      throw new Error(`❌ [Tenant Boundary] Violación de aislamiento: El pago '${paymentId}' pertenece a otra empresa.`);
+    }
+    throw new Error(`❌ [Payment Allocation] Pago '${paymentId}' no encontrado en la empresa autenticada.`);
+  }
+
+  // 3. Obtener y validar invoice en el tenant autenticado
+  const invoice = getInvoice(companyContextOrIdOrPhone, invoiceId);
+  if (!invoice) {
+    const foreignInvoice = db.prepare('SELECT id, company_id FROM invoices WHERE id = ?').get(invoiceId);
+    if (foreignInvoice && foreignInvoice.company_id !== companyId) {
+      throw new Error(`❌ [Tenant Boundary] Violación de aislamiento: La factura '${invoiceId}' pertenece a otra empresa.`);
+    }
+    throw new Error(`❌ [Payment Allocation] Factura '${invoiceId}' no encontrada en la empresa autenticada.`);
+  }
+
+  // Invariantes estrictas
+  if (payment.companyId && payment.companyId !== companyId) {
+    throw new Error("❌ [Payment Allocation] Invariante violada: payment.company_id != allocation.company_id.");
+  }
+  if (invoice.companyId && invoice.companyId !== companyId) {
+    throw new Error("❌ [Payment Allocation] Invariante violada: invoice.company_id != allocation.company_id.");
+  }
+
+  // 4. Validar suma de allocations <= payment.amount (utilizando aritmética entera en céntimos)
+  const existingAllocs = db.prepare(`
+    SELECT id, amount FROM payment_allocations 
+    WHERE payment_id = ? AND company_id = ?
+  `).all(paymentId, companyId);
+
+  const existingCents = existingAllocs.reduce((sum, a) => sum + Math.round(Number(a.amount) * 100), 0);
+  const newCents = Math.round(amount * 100);
+  const paymentTotalCents = Math.round(Number(payment.amount || 0) * 100);
+
+  if (existingCents + newCents > paymentTotalCents) {
+    const excessEur = ((existingCents + newCents - paymentTotalCents) / 100).toFixed(2);
+    throw new Error(
+      `❌ [Payment Allocation] Superación de importe: La suma de asignaciones (${(existingCents + newCents)/100} €) supera el total del pago (${paymentTotalCents/100} €) en ${excessEur} €.`
+    );
+  }
+
+  // 5. Inserción atómica transaccional
+  const allocId = allocationData.id || `ALLOC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const now = new Date().toISOString();
+  const allocatedAt = allocationData.allocatedAt || allocationData.allocated_at || now;
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    db.prepare(`
+      INSERT INTO payment_allocations (id, payment_id, invoice_id, company_id, amount, allocated_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(allocId, paymentId, invoiceId, companyId, amount, allocatedAt, now, now);
+
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
+  }
+
+  return {
+    id: allocId,
+    paymentId,
+    invoiceId,
+    companyId,
+    amount,
+    allocatedAt,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+export function getPaymentAllocation(companyContextOrIdOrPhone, id) {
+  if (id !== undefined && id !== null) {
+    if (!companyContextOrIdOrPhone || !id) return null;
+    const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+    const companyId = tenant?.companyId;
+    if (!companyId) return null;
+
+    const row = db.prepare('SELECT * FROM payment_allocations WHERE id = ? AND company_id = ?').get(id, companyId);
+    if (!row) return null;
+    return {
+      id: row.id,
+      paymentId: row.payment_id,
+      invoiceId: row.invoice_id,
+      companyId: row.company_id,
+      amount: row.amount,
+      allocatedAt: row.allocated_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  console.warn("🛑 [Seguridad Tenant] getPaymentAllocation invocado sin tenant context obligatorio. Retornando null.");
+  return null;
+}
+
+export function listPaymentAllocations(companyContextOrIdOrPhone, filter = {}) {
+  if (!companyContextOrIdOrPhone) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  if (!companyId) return [];
+
+  let query = 'SELECT * FROM payment_allocations WHERE company_id = ?';
+  const params = [companyId];
+
+  if (filter.paymentId || filter.payment_id) {
+    query += ' AND payment_id = ?';
+    params.push(filter.paymentId || filter.payment_id);
+  }
+  if (filter.invoiceId || filter.invoice_id) {
+    query += ' AND invoice_id = ?';
+    params.push(filter.invoiceId || filter.invoice_id);
+  }
+
+  query += ' ORDER BY created_at DESC';
+
+  const rows = db.prepare(query).all(...params);
+  return rows.map(row => ({
+    id: row.id,
+    paymentId: row.payment_id,
+    invoiceId: row.invoice_id,
+    companyId: row.company_id,
+    amount: row.amount,
+    allocatedAt: row.allocated_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }));
+}
+
+export function deletePaymentAllocation(companyContextOrIdOrPhone, id) {
+  if (!companyContextOrIdOrPhone || !id) return { deleted: false };
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  if (!companyId) return { deleted: false };
+
+  const result = db.prepare('DELETE FROM payment_allocations WHERE id = ? AND company_id = ?').run(id, companyId);
+  return { deleted: result.changes > 0, id };
 }
 
 // ─── Métodos de Trimestres y Gestoría ──────────────────────────────────────────

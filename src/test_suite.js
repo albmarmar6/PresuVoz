@@ -1384,6 +1384,10 @@ const testFiscalPhone = '34655443322';
 const testFiscalPhoneB = '34699887766'; // Empresa B para prueba multi-tenancy
 
 // Limpieza inicial
+try {
+  cleanDb.prepare('DELETE FROM payment_allocations WHERE company_id IN (SELECT id FROM companies WHERE phone = ? OR phone = ?)').run(testFiscalPhone, testFiscalPhoneB);
+} catch (e) {}
+cleanDb.prepare('DELETE FROM payments WHERE company_phone = ? OR company_phone = ?').run(testFiscalPhone, testFiscalPhoneB);
 cleanDb.prepare('DELETE FROM invoices WHERE company_phone = ? OR company_phone = ?').run(testFiscalPhone, testFiscalPhoneB);
 cleanDb.prepare('DELETE FROM purchase_invoices WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
 cleanDb.prepare('DELETE FROM expense_payments WHERE business_id = ? OR business_id = ?').run(testFiscalPhone, testFiscalPhoneB);
@@ -3078,6 +3082,498 @@ cleanupTest30(phoneTenantC30);
 userSessions.delete(`${phoneTenantA30}@s.whatsapp.net`);
 userSessions.delete(`${phoneTenantB30}@s.whatsapp.net`);
 userSessions.delete(`${phoneTenantC30}@s.whatsapp.net`);
+
+console.log("\nTEST 31: Migración Controlada de Payments a Company_ID y Payment Allocations (Fase 2B-3 — Backfill, Desacople de Facturas, Tenant Invariants & Allocation Defense)");
+
+import {
+  savePayment as savePaymentTenant,
+  getPayment as getPaymentTenant,
+  listPayments as listPaymentsTenant,
+  updatePayment as updatePaymentTenant,
+  deletePayment as deletePaymentTenant,
+  getPayments as getPaymentsTenant,
+  createPaymentAllocation as createPaymentAllocationTenant,
+  getPaymentAllocation as getPaymentAllocationTenant,
+  listPaymentAllocations as listPaymentAllocationsTenant,
+  deletePaymentAllocation as deletePaymentAllocationTenant
+} from './db_service.js';
+import { migration as mig005 } from './migrations/005_payments_company_id.js';
+
+// ─── A. PRUEBA DE BACKFILL E IDEMPOTENCIA EN BASE DE DATOS AISLADA EN MEMORIA ───
+const memDb31 = new DatabaseSync(':memory:');
+memDb31.exec('PRAGMA foreign_keys = ON;');
+runMigrations(memDb31, { migrations: [MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], MIGRATIONS[3]] });
+
+// Insertar empresas de prueba en memoria
+const compAIdMem31 = crypto.randomUUID();
+const compBIdMem31 = crypto.randomUUID();
+memDb31.prepare("INSERT INTO companies (id, phone, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(
+  compAIdMem31, '34611000001', 'Empresa Mem A', '2026-01-01', '2026-01-01'
+);
+memDb31.prepare("INSERT INTO companies (id, phone, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(
+  compBIdMem31, '34611000002', 'Empresa Mem B', '2026-01-01', '2026-01-01'
+);
+
+// Insertar presupuestos y facturas en memoria
+memDb31.prepare("INSERT INTO budgets (id, company_id, company_phone, client_name, total_amount, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'BUD-MEM-31-A1', compAIdMem31, '34611000001', 'Cliente Mem A', 1000, JSON.stringify({ id: 'BUD-MEM-31-A1', companyId: compAIdMem31 }), '2026-01-01', '2026-01-01'
+);
+memDb31.prepare("INSERT INTO invoices (id, company_id, budget_id, company_phone, client_name, total_amount, status, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'INV-MEM-31-A1', compAIdMem31, 'BUD-MEM-31-A1', '34611000001', 'Cliente Mem A', 1000, 'PENDIENTE_PAGO', JSON.stringify({ id: 'INV-MEM-31-A1' }), '2026-01-01'
+);
+
+memDb31.prepare("INSERT INTO budgets (id, company_id, company_phone, client_name, total_amount, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'BUD-MEM-31-B1', compBIdMem31, '34611000002', 'Cliente Mem B', 2000, JSON.stringify({ id: 'BUD-MEM-31-B1', companyId: compBIdMem31 }), '2026-01-01', '2026-01-01'
+);
+memDb31.prepare("INSERT INTO invoices (id, company_id, budget_id, company_phone, client_name, total_amount, status, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'INV-MEM-31-B1', compBIdMem31, 'BUD-MEM-31-B1', '34611000002', 'Cliente Mem B', 2000, 'PENDIENTE_PAGO', JSON.stringify({ id: 'INV-MEM-31-B1' }), '2026-01-01'
+);
+
+// Insertar pagos legados sin company_id:
+// 1. Pago referenciando factura existente de A
+memDb31.prepare("INSERT INTO payments (id, budget_id, company_phone, amount, method, concept, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'PAY-MEM-1', 'INV-MEM-31-A1', '34611000001', 600, 'TRANSFERENCIA', 'Cobro factura A1', JSON.stringify({ id: 'PAY-MEM-1' }), '2026-01-01'
+);
+// 2. Pago referenciando presupuesto existente de A (sin factura)
+memDb31.prepare("INSERT INTO payments (id, budget_id, company_phone, amount, method, concept, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'PAY-MEM-2', 'BUD-MEM-31-A1', '34611000001', 400, 'BIZUM', 'Anticipo presupuesto A1', JSON.stringify({ id: 'PAY-MEM-2' }), '2026-01-01'
+);
+// 3. Pago directo sin budget_id pero con company_phone de B
+memDb31.prepare("INSERT INTO payments (id, budget_id, company_phone, amount, method, concept, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'PAY-MEM-3', '', '34611000002', 1500, 'EFECTIVO', 'Pago directo B', JSON.stringify({ id: 'PAY-MEM-3' }), '2026-01-01'
+);
+
+// Ejecutar migración 005 sobre memDb31
+mig005.up(memDb31);
+
+const memPaymentsAfter = memDb31.prepare("SELECT id, budget_id, company_id, company_phone, amount, data_json FROM payments").all();
+const pay1After = memPaymentsAfter.find(p => p.id === 'PAY-MEM-1');
+const pay2After = memPaymentsAfter.find(p => p.id === 'PAY-MEM-2');
+const pay3After = memPaymentsAfter.find(p => p.id === 'PAY-MEM-3');
+
+assert(memPaymentsAfter.length === 3, "1. Backfill: número total de pagos conservado exactamente (cero pérdidas, cero duplicados)");
+assert(Boolean(pay1After && pay1After.company_id === compAIdMem31), "2. Precedencia 1: pago que referencia factura adopta el company_id canónico de la factura");
+assert(Boolean(pay2After && pay2After.company_id === compAIdMem31), "3. Precedencia 2: pago que referencia presupuesto adopta el company_id del presupuesto");
+assert(Boolean(pay3After && pay3After.company_id === compBIdMem31), "4. Precedencia 3: pago sin referencia adopta company_id a través de company_phone");
+assert(pay1After.company_phone === '34611000001' && pay3After.company_phone === '34611000002', "5. Dual-Write preservado: la columna legacy company_phone permanece intacta");
+
+// Verificar reconstrucción determinista de allocations históricas
+const memAllocationsAfter = memDb31.prepare("SELECT id, payment_id, invoice_id, company_id, amount FROM payment_allocations").all();
+assert(memAllocationsAfter.length === 1, "6. Reconstrucción histórica: exactamente 1 allocation generada para el pago asociado a factura");
+
+const allocPay1 = memAllocationsAfter.find(a => a.payment_id === 'PAY-MEM-1');
+assert(Boolean(allocPay1 && allocPay1.invoice_id === 'INV-MEM-31-A1' && allocPay1.company_id === compAIdMem31 && allocPay1.amount === 600), "7. Invariante histórico: la allocation reconstruida coincide en importe, tenant, pago y factura");
+
+const allocPay2 = memAllocationsAfter.find(a => a.payment_id === 'PAY-MEM-2');
+const allocPay3 = memAllocationsAfter.find(a => a.payment_id === 'PAY-MEM-3');
+assert(!allocPay2 && !allocPay3, "8. Aislamiento histórico: pagos asociados únicamente a presupuestos o sin factura NO generan allocations espurias");
+
+// Idempotencia: re-ejecución de mig005.up no debe duplicar allocations ni fallar
+let idempotencyError31 = null;
+try {
+  mig005.up(memDb31);
+} catch (e) {
+  idempotencyError31 = e;
+}
+const memAllocationsRecheck = memDb31.prepare("SELECT count(*) as count FROM payment_allocations").get().count;
+assert(idempotencyError31 === null && memAllocationsRecheck === 1, "9. Idempotencia: re-ejecución de migración 005 produce 0 cambios y no duplica allocations");
+
+// ─── B. DETECCIÓN Y ABORTO ANTE INCONSISTENCIAS / CONTRADICCIONES / HUÉRFANOS ───
+// Caso 1: Contradicción entre company_phone del pago y el company_id de la factura referenciada
+const conflictMemDb31 = new DatabaseSync(':memory:');
+conflictMemDb31.exec('PRAGMA foreign_keys = ON;');
+runMigrations(conflictMemDb31, { migrations: [MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], MIGRATIONS[3]] });
+
+const compId1 = crypto.randomUUID();
+const compId2 = crypto.randomUUID();
+conflictMemDb31.prepare("INSERT INTO companies (id, phone, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(compId1, '34600000001', 'Emp 1', '2026-01-01', '2026-01-01');
+conflictMemDb31.prepare("INSERT INTO companies (id, phone, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(compId2, '34600000002', 'Emp 2', '2026-01-01', '2026-01-01');
+conflictMemDb31.prepare("INSERT INTO invoices (id, company_id, budget_id, company_phone, client_name, total_amount, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'INV-CONFLICT-1', compId1, '', '34600000001', 'Cli 1', 500, 'PENDIENTE', '2026-01-01'
+);
+// Pago con teléfono de Empresa 2 apuntando a factura de Empresa 1
+conflictMemDb31.prepare("INSERT INTO payments (id, budget_id, company_phone, amount, method, concept, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+  'PAY-CONFLICT-1', 'INV-CONFLICT-1', '34600000002', 500, 'TRANSFER', 'Conflicto', '2026-01-01'
+);
+
+let conflictCaught31 = false;
+try {
+  mig005.up(conflictMemDb31);
+} catch (e) {
+  conflictCaught31 = true;
+}
+assert(conflictCaught31 === true, "10. Invariante estricto: la migración aborta inmediatamente si detecta contradicción cross-tenant en un pago");
+
+// Caso 2: Pago huérfano sin empresa registrada ni targetId
+const orphanMemDb31 = new DatabaseSync(':memory:');
+orphanMemDb31.exec('PRAGMA foreign_keys = ON;');
+runMigrations(orphanMemDb31, { migrations: [MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], MIGRATIONS[3]] });
+orphanMemDb31.prepare("INSERT INTO payments (id, budget_id, company_phone, amount, method, concept, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+  'PAY-ORPHAN-1', '', '34699999999', 100, 'EFECTIVO', 'Huérfano', '2026-01-01'
+);
+
+let orphanCaught31 = false;
+try {
+  mig005.up(orphanMemDb31);
+} catch (e) {
+  orphanCaught31 = true;
+}
+assert(orphanCaught31 === true, "11. Detección de huérfanos: la migración aborta si un pago tiene teléfono no registrado en companies");
+
+// ─── C. ENTORNO DE TEST REAL: MULTI-TENANT ISOLATION EN currentDb ───
+const phoneTenantA31 = '34697000001';
+const phoneTenantB31 = '34697000002';
+const phoneTenantC31 = '34697000003';
+
+const cleanupTest31 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM payment_allocations WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM payments WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM invoices WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM budgets WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+cleanupTest31(phoneTenantA31);
+cleanupTest31(phoneTenantB31);
+cleanupTest31(phoneTenantC31);
+
+const compA31 = createCompanyWithIdentity({
+  name: 'Construcciones Madrid A S.L.',
+  phone: phoneTenantA31,
+  cif: 'B-31000001',
+  trade: 'Albañilería'
+});
+const compB31 = createCompanyWithIdentity({
+  name: 'Fontanería Norte B S.L.',
+  phone: phoneTenantB31,
+  cif: 'B-31000002',
+  trade: 'Fontanería'
+});
+const compC31 = createCompanyWithIdentity({
+  name: 'Empresa Sin Pagos C S.L.',
+  phone: phoneTenantC31,
+  cif: 'B-31000003',
+  trade: 'Pintura'
+});
+
+const contextA31 = resolveAuthenticatedContext('whatsapp', phoneTenantA31);
+const contextB31 = resolveAuthenticatedContext('whatsapp', phoneTenantB31);
+const contextC31 = resolveAuthenticatedContext('whatsapp', phoneTenantC31);
+
+// Crear presupuestos y facturas en currentDb para A y B
+const budgetObjA31 = {
+  id: 'BUD-T31-A1',
+  client: { name: 'Cliente A Reforma' },
+  financials: { totalAmount: 1200 }
+};
+saveBudgetTenant(contextA31, budgetObjA31);
+
+const invoiceObjA31 = {
+  id: 'INV-T31-A1',
+  budgetId: budgetObjA31.id,
+  client: { name: 'Cliente A Reforma' },
+  financials: { totalAmount: 1200 },
+  status: 'PENDIENTE_PAGO'
+};
+saveInvoiceTenant(contextA31, invoiceObjA31);
+
+const budgetObjB31 = {
+  id: 'BUD-T31-B1',
+  client: { name: 'Cliente B Fontanería' },
+  financials: { totalAmount: 2000 }
+};
+saveBudgetTenant(contextB31, budgetObjB31);
+
+const invoiceObjB31 = {
+  id: 'INV-T31-B1',
+  budgetId: budgetObjB31.id,
+  client: { name: 'Cliente B Fontanería' },
+  financials: { totalAmount: 2000 },
+  status: 'PENDIENTE_PAGO'
+};
+saveInvoiceTenant(contextB31, invoiceObjB31);
+
+// ─── D. CREACIÓN DE PAGOS TENANT-SCOPED & AUTO-ALLOCATION ───
+const paymentDataA1 = {
+  id: 'PAY-T31-A1',
+  amount: 500,
+  method: 'TRANSFERENCIA',
+  targetId: invoiceObjA31.id,
+  concept: 'Anticipo obra A'
+};
+const savedPayA1 = savePaymentTenant(contextA31, paymentDataA1);
+const rowPayA1 = currentDb.prepare("SELECT company_id, company_phone, amount FROM payments WHERE id = ?").get(paymentDataA1.id);
+
+assert(Boolean(savedPayA1 && rowPayA1 && rowPayA1.company_id === contextA31.companyId), "12. Creación legítima: savePayment asigna company_id canónico del tenant autenticado");
+assert(rowPayA1 && rowPayA1.company_phone === phoneTenantA31, "13. Dual-write en base de datos: company_phone persistido correctamente");
+
+// Verificar creación automática de payment_allocation vinculada a la factura
+const autoAllocA1 = currentDb.prepare("SELECT * FROM payment_allocations WHERE payment_id = ?").get(paymentDataA1.id);
+assert(Boolean(autoAllocA1 && autoAllocA1.invoice_id === invoiceObjA31.id && autoAllocA1.amount === 500), "14. Auto-allocation: savePayment con targetId de factura crea automáticamente la allocation");
+assert(autoAllocA1 && autoAllocA1.company_id === contextA31.companyId && autoAllocA1.company_id === rowPayA1.company_id, "15. Invariante canónico: allocation.company_id == payment.company_id == invoice.company_id");
+
+// ─── E. PAGOS DIRECTOS Y CREACIÓN MANUAL DE ALLOCATIONS ───
+const paymentDataA2 = {
+  id: 'PAY-T31-A2',
+  amount: 400,
+  method: 'EFECTIVO',
+  concept: 'Cobro general sin factura inicial'
+};
+const savedPayA2 = savePaymentTenant(contextA31, paymentDataA2);
+const allocsA2Initial = listPaymentAllocationsTenant(contextA31, { paymentId: paymentDataA2.id });
+
+assert(Boolean(savedPayA2 && allocsA2Initial.length === 0), "16. Pago directo: guardado con company_id del tenant y 0 allocations iniciales");
+
+// Creación manual de allocation asociada a la factura de A
+const createdAllocA2 = createPaymentAllocationTenant(contextA31, {
+  paymentId: paymentDataA2.id,
+  invoiceId: invoiceObjA31.id,
+  amount: 250
+});
+const rowAllocA2 = currentDb.prepare("SELECT * FROM payment_allocations WHERE id = ?").get(createdAllocA2.id);
+assert(Boolean(rowAllocA2 && rowAllocA2.amount === 250 && rowAllocA2.company_id === contextA31.companyId), "17. createPaymentAllocation: crea allocation legítima asociada a factura del mismo tenant");
+
+// ─── F. VALIDACIONES DE ALLOCATION: CENT PRECISION, OVER-ALLOCATION & NON-POSITIVE ───
+let zeroAmountRejected = false;
+try {
+  createPaymentAllocationTenant(contextA31, {
+    paymentId: paymentDataA2.id,
+    invoiceId: invoiceObjA31.id,
+    amount: 0
+  });
+} catch (e) {
+  zeroAmountRejected = true;
+}
+assert(zeroAmountRejected === true, "18. Validación de importe: rechaza allocation con importe 0");
+
+let negativeAmountRejected = false;
+try {
+  createPaymentAllocationTenant(contextA31, {
+    paymentId: paymentDataA2.id,
+    invoiceId: invoiceObjA31.id,
+    amount: -50
+  });
+} catch (e) {
+  negativeAmountRejected = true;
+}
+assert(negativeAmountRejected === true, "19. Validación de importe: rechaza allocation con importe negativo");
+
+// Sobre-asignación: El pago PAY-T31-A2 tiene 400 total, 250 asignados, quedan 150.
+// Intentar asignar 150.01 o 200 debe ser rechazado
+let overAllocationRejected = false;
+try {
+  createPaymentAllocationTenant(contextA31, {
+    paymentId: paymentDataA2.id,
+    invoiceId: invoiceObjA31.id,
+    amount: 200
+  });
+} catch (e) {
+  overAllocationRejected = true;
+}
+assert(overAllocationRejected === true, "20. Prevención de sobre-asignación: rechaza allocation que supere el importe total del pago");
+
+// Asignar exactamente el remanente (150 €) -> debe permitirse
+const exactRemainingAlloc = createPaymentAllocationTenant(contextA31, {
+  paymentId: paymentDataA2.id,
+  invoiceId: invoiceObjA31.id,
+  amount: 150
+});
+assert(Boolean(exactRemainingAlloc && exactRemainingAlloc.amount === 150), "21. Precisión monetaria: asignación exacta hasta agotar el saldo restante (100% cubierto)");
+
+// Intentar asignar 1 céntimo más (0.01 €) -> debe ser rechazado
+let centOverAllocRejected = false;
+try {
+  createPaymentAllocationTenant(contextA31, {
+    paymentId: paymentDataA2.id,
+    invoiceId: invoiceObjA31.id,
+    amount: 0.01
+  });
+} catch (e) {
+  centOverAllocRejected = true;
+}
+assert(centOverAllocRejected === true, "22. Precisión centesimal: rechaza exceder el pago incluso por 0.01 €");
+
+// ─── G. NEUTRALIZACIÓN ACTIVA DE INYECCIÓN DE MODELO / IA Y ATAQUES CROSS-TENANT ───
+const maliciousPayment = {
+  id: 'PAY-T31-AI-INJECT',
+  company_id: contextB31.companyId, // IA genera company_id de Empresa B
+  companyId: contextB31.companyId,
+  company_phone: phoneTenantB31,     // IA genera teléfono de Empresa B
+  amount: 350,
+  method: 'BIZUM',
+  concept: 'Intento de inyección IA'
+};
+const defendedPay = savePaymentTenant(contextA31, maliciousPayment);
+const rowDefendedPay = currentDb.prepare("SELECT company_id, company_phone FROM payments WHERE id = ?").get(maliciousPayment.id);
+
+assert(rowDefendedPay && rowDefendedPay.company_id === contextA31.companyId, "23. Inyección IA bloqueada: el backend impone el company_id de la sesión e ignora el del modelo");
+assert(rowDefendedPay && rowDefendedPay.company_phone === phoneTenantA31, "24. Inyección IA bloqueada: el backend impone el teléfono de la sesión e ignora el del modelo");
+assert(rowDefendedPay.company_id !== contextB31.companyId, "25. Aislamiento IA: el pago jamás se asigna a Empresa B");
+
+// Ataque Cross-Tenant: Empresa A intenta asociar pago a factura de Empresa B
+let crossTenantPaymentTargetBlocked = false;
+try {
+  savePaymentTenant(contextA31, {
+    id: 'PAY-T31-CROSS-TARGET',
+    amount: 100,
+    method: 'TRANSFERENCIA',
+    targetId: invoiceObjB31.id // Factura de B
+  });
+} catch (e) {
+  crossTenantPaymentTargetBlocked = true;
+}
+assert(crossTenantPaymentTargetBlocked === true, "26. Cross-Tenant Target Defense: savePayment rechaza targetId correspondiente a factura ajena");
+
+// Ataque Cross-Tenant: Empresa A intenta crear allocation apuntando a factura de Empresa B
+let crossTenantAllocBlocked = false;
+try {
+  createPaymentAllocationTenant(contextA31, {
+    paymentId: paymentDataA1.id,
+    invoiceId: invoiceObjB31.id,
+    amount: 50
+  });
+} catch (e) {
+  crossTenantAllocBlocked = true;
+}
+assert(crossTenantAllocBlocked === true, "27. Cross-Tenant Allocation Defense: createPaymentAllocation rechaza asociar a factura ajena");
+
+// Ataque Cross-Tenant: Empresa B intenta crear allocation sobre pago de Empresa A
+let crossTenantPayAllocBlocked = false;
+try {
+  createPaymentAllocationTenant(contextB31, {
+    paymentId: paymentDataA1.id,
+    invoiceId: invoiceObjB31.id,
+    amount: 50
+  });
+} catch (e) {
+  crossTenantPayAllocBlocked = true;
+}
+assert(crossTenantPayAllocBlocked === true, "28. Cross-Tenant Payment Defense: Empresa B no puede crear allocations sobre pagos de Empresa A");
+
+// ─── H. LECTURA TENANT-SCOPED Y ZERO-DISCLOSURE ───
+const legitimatePayReadA = getPaymentTenant(contextA31.companyId, paymentDataA1.id);
+const crossTenantPayReadB = getPaymentTenant(contextB31.companyId, paymentDataA1.id);
+
+assert(Boolean(legitimatePayReadA && legitimatePayReadA.id === paymentDataA1.id), "29. Lectura legítima: getPayment(companyId, id) retorna el pago propio");
+assert(crossTenantPayReadB === null, "30. Cross-tenant read: Empresa B no puede leer pagos de Empresa A (retorna null)");
+assert(crossTenantPayReadB === null, "31. Zero-Disclosure: no se revelan importes, métodos ni conceptos ajenos");
+
+const legitimateAllocReadA = getPaymentAllocationTenant(contextA31.companyId, autoAllocA1.id);
+const crossTenantAllocReadB = getPaymentAllocationTenant(contextB31.companyId, autoAllocA1.id);
+assert(Boolean(legitimateAllocReadA && legitimateAllocReadA.id === autoAllocA1.id), "32. Lectura legítima de allocation: getPaymentAllocation(companyId, id) retorna la allocation propia");
+assert(crossTenantAllocReadB === null, "33. Zero-Disclosure en allocations: Empresa B no puede leer allocation de Empresa A");
+
+// Listados aislados
+const listPayA = listPaymentsTenant(contextA31.companyId);
+const listPayB = listPaymentsTenant(contextB31.companyId);
+const listPayC = listPaymentsTenant(compC31.companyId);
+
+assert(listPayA.length >= 2 && listPayA.every(p => p.companyId === contextA31.companyId), "34. Listado aislado de pagos: Empresa A solo visualiza sus pagos propios");
+assert(listPayB.length === 0 && listPayC.length === 0, "35. Listados de B y C: empresas sin pagos retornan listas vacías ([])");
+
+const listAllocA = listPaymentAllocationsTenant(contextA31.companyId);
+const listAllocB = listPaymentAllocationsTenant(contextB31.companyId);
+assert(listAllocA.length >= 2 && listAllocB.length === 0, "36. Listado aislado de allocations: Empresa A visualiza sus allocations, Empresa B obtiene lista vacía");
+
+// Prohibición estricta de consultas sin contexto tenant
+const unauthPayLookup = getPaymentTenant(paymentDataA1.id);
+const unauthAllocLookup = getPaymentAllocationTenant(autoAllocA1.id);
+assert(unauthPayLookup === null, "37. Prohibición estricta: getPayment(id) sin tenant context retorna null");
+assert(unauthAllocLookup === null, "38. Prohibición estricta: getPaymentAllocation(id) sin tenant context retorna null");
+
+// ─── I. MODIFICACIÓN Y BORRADO TENANT-SCOPED ───
+// Intento de modificación ajena por Empresa B
+const maliciousPayUpdate = {
+  id: paymentDataA1.id,
+  amount: 999999,
+  concept: 'Pago hackeado'
+};
+const updateResultB31 = updatePaymentTenant(contextB31.companyId, maliciousPayUpdate);
+const checkUnchangedPayA = currentDb.prepare("SELECT amount, concept FROM payments WHERE id = ?").get(paymentDataA1.id);
+
+assert(updateResultB31 === null, "39. Cross-tenant update: updatePayment rechaza modificación de pago ajeno");
+assert(checkUnchangedPayA.amount === 500 && checkUnchangedPayA.concept === 'Anticipo obra A', "40. Integridad de datos: los importes y conceptos de Empresa A permanecen intactos");
+
+// Actualización legítima por Empresa A
+const legitPayUpdate = updatePaymentTenant(contextA31.companyId, {
+  ...savedPayA1,
+  concept: 'Anticipo confirmado y comprobado'
+});
+const checkUpdatedPayA = currentDb.prepare("SELECT concept FROM payments WHERE id = ?").get(paymentDataA1.id);
+assert(Boolean(legitPayUpdate && checkUpdatedPayA.concept === 'Anticipo confirmado y comprobado'), "41. Actualización legítima: Empresa A puede modificar el concepto de su pago");
+
+// Borrado de allocation: intento ajeno por Empresa B
+const delAllocResultB = deletePaymentAllocationTenant(contextB31.companyId, rowAllocA2.id);
+const checkStillExistsAllocA2 = currentDb.prepare("SELECT id FROM payment_allocations WHERE id = ?").get(rowAllocA2.id);
+assert(delAllocResultB.deleted === false, "42. Cross-tenant delete allocation: Empresa B no puede eliminar allocation de Empresa A");
+assert(Boolean(checkStillExistsAllocA2 && checkStillExistsAllocA2.id === rowAllocA2.id), "43. Allocation protegida: permanece íntegra tras intento de borrado ajeno");
+
+// Borrado legítimo de allocation por Empresa A
+const delAllocResultA = deletePaymentAllocationTenant(contextA31.companyId, rowAllocA2.id);
+const checkDeletedAllocA2 = currentDb.prepare("SELECT id FROM payment_allocations WHERE id = ?").get(rowAllocA2.id);
+assert(delAllocResultA.deleted === true && !checkDeletedAllocA2, "44. Borrado legítimo de allocation: Empresa A puede eliminar su propia allocation");
+
+// Borrado de pago: intento ajeno por Empresa B
+const delPayResultB = deletePaymentTenant(contextB31.companyId, paymentDataA2.id);
+const checkStillExistsPayA2 = currentDb.prepare("SELECT id FROM payments WHERE id = ?").get(paymentDataA2.id);
+assert(delPayResultB.deleted === false, "45. Cross-tenant delete payment: Empresa B no puede eliminar pago de Empresa A");
+assert(Boolean(checkStillExistsPayA2 && checkStillExistsPayA2.id === paymentDataA2.id), "46. Pago protegido: permanece en la base de datos tras intento de borrado ajeno");
+
+// Borrado legítimo de pago por Empresa A (debe eliminar también las allocations asociadas por CASCADE)
+const delPayResultA = deletePaymentTenant(contextA31.companyId, paymentDataA2.id);
+const checkDeletedPayA2 = currentDb.prepare("SELECT id FROM payments WHERE id = ?").get(paymentDataA2.id);
+const checkCascadeAlloc = currentDb.prepare("SELECT count(*) as count FROM payment_allocations WHERE payment_id = ?").get(paymentDataA2.id).count;
+assert(delPayResultA.deleted === true && !checkDeletedPayA2 && checkCascadeAlloc === 0, "47. Borrado legítimo de pago: Empresa A elimina su pago y limpia allocations asociadas");
+
+// ─── J. COMPATIBILIDAD LEGACY DUAL-READ ───
+const legacyReadPayA = getPaymentTenant(phoneTenantA31, paymentDataA1.id);
+const legacyListPayA = listPaymentsTenant(phoneTenantA31);
+const legacyGetPaymentsA = getPaymentsTenant(phoneTenantA31, invoiceObjA31.id);
+
+assert(Boolean(legacyReadPayA && legacyReadPayA.id === paymentDataA1.id), "48. Compatibilidad legacy: getPayment(phone, id) resuelve y retorna el pago");
+assert(Array.isArray(legacyListPayA) && legacyListPayA.length >= 1, "49. Compatibilidad legacy: listPayments(phone) resuelve y lista los pagos");
+assert(Array.isArray(legacyGetPaymentsA) && legacyGetPaymentsA.length >= 1, "50. Compatibilidad legacy: getPayments(phone, targetId) responde correctamente");
+
+// ─── K. RESTRICCIONES FOREIGN KEY & PRAGMA INTEGRITY CHECK ───
+let fkConstraintBlockedPay = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO payments (id, company_id, budget_id, company_phone, amount, method, concept, created_at)
+    VALUES ('PAY-INVALID-FK', '00000000-0000-0000-0000-000000000000', '', '34699999999', 50, 'EFECTIVO', 'Fake', '2026-01-01')
+  `).run();
+} catch (e) {
+  fkConstraintBlockedPay = true;
+}
+assert(fkConstraintBlockedPay === true, "51. Foreign Key estricta: SQLite rechaza payments con company_id inexistente en companies");
+
+let fkConstraintBlockedAlloc = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO payment_allocations (id, payment_id, invoice_id, company_id, amount, allocated_at, created_at, updated_at)
+    VALUES ('ALLOC-INVALID-FK', '${paymentDataA1.id}', '${invoiceObjA31.id}', '00000000-0000-0000-0000-000000000000', 50, '2026-01-01', '2026-01-01', '2026-01-01')
+  `).run();
+} catch (e) {
+  fkConstraintBlockedAlloc = true;
+}
+assert(fkConstraintBlockedAlloc === true, "52. Foreign Key estricta: SQLite rechaza payment_allocations con company_id inexistente");
+
+// PRAGMA foreign_key_check e integrity_check sobre la base de datos de test
+const fkViolations31 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult31 = currentDb.prepare("PRAGMA integrity_check;").get();
+
+assert(fkViolations31.length === 0, "53. PRAGMA foreign_key_check: cero violaciones de claves foráneas");
+assert(integrityResult31.integrity_check === 'ok', "54. PRAGMA integrity_check: la base de datos de test está 100% íntegra (ok)");
+
+// Limpieza final de TEST 31
+cleanupTest31(phoneTenantA31);
+cleanupTest31(phoneTenantB31);
+cleanupTest31(phoneTenantC31);
+userSessions.delete(`${phoneTenantA31}@s.whatsapp.net`);
+userSessions.delete(`${phoneTenantB31}@s.whatsapp.net`);
+userSessions.delete(`${phoneTenantC31}@s.whatsapp.net`);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

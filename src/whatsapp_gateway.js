@@ -1334,8 +1334,8 @@ async function startWhatsAppGateway() {
 
       // Persistir cobro y asegurar que el presupuesto pasa a estado FINALIZADO (si saldo es 0) o ACEPTADO
       targetBudget.status = receipt.remainingBalance <= 0 ? 'FINALIZADO' : 'ACEPTADO';
-      savePayment(cleanPhone, receipt);
-      saveBudget(cleanPhone, targetBudget);
+      savePayment(session.companyId || cleanPhone, receipt);
+      saveBudget(session.companyId || cleanPhone, targetBudget);
 
       // Si la obra queda liquidada o se cubre el saldo, actualizar las facturas pendientes a 'PAGADA'
       if (receipt.remainingBalance <= 0) {
@@ -1466,7 +1466,7 @@ async function startWhatsAppGateway() {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
       targetBudget.status = 'ACEPTADO';
-      saveBudget(cleanPhone, targetBudget);
+      saveBudget(session.companyId || cleanPhone, targetBudget);
 
       const total = targetBudget.financials?.totalAmount ? `${targetBudget.financials.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '';
       const advance = targetBudget.financials?.advanceAmount ? `${targetBudget.financials.advanceAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '';
