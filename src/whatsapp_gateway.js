@@ -1710,11 +1710,12 @@ async function startWhatsAppGateway() {
   async function handleScheduleAppointment(sock, remoteJid, session, appointmentInfo = {}) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const tenantContext = session.companyId || cleanPhone;
       
       // Chequeo de colisión de horario (Aviso sin bloquear)
-      const conflicts = findConflictingAppointments(cleanPhone, appointmentInfo.date, appointmentInfo.time);
+      const conflicts = findConflictingAppointments(tenantContext, appointmentInfo.date, appointmentInfo.time);
       
-      const saved = saveAppointment(cleanPhone, appointmentInfo);
+      const saved = saveAppointment(tenantContext, appointmentInfo);
       console.log(`📅 Cita técnica agendada para ${cleanPhone}: ${saved.id} - ${saved.clientName} (${saved.date} ${saved.time})`);
       
       let conflictWarning = '';
@@ -1737,7 +1738,8 @@ async function startWhatsAppGateway() {
   async function handleListAppointments(sock, remoteJid, session, filter = 'all') {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const appointments = listAppointments(cleanPhone, filter);
+      const tenantContext = session.companyId || cleanPhone;
+      const appointments = listAppointments(tenantContext, filter);
 
       let title = '📅 *TUS VISITAS TÉCNICAS AGENDADAS:*';
       if (filter === 'today') title = '📅 *TUS VISITAS TÉCNICAS DE HOY:*';
@@ -1760,7 +1762,8 @@ async function startWhatsAppGateway() {
   async function handleCancelAppointment(sock, remoteJid, session, query) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const cancelled = cancelAppointment(cleanPhone, query);
+      const tenantContext = session.companyId || cleanPhone;
+      const cancelled = cancelAppointment(tenantContext, query);
       if (!cancelled) {
         const sentNotFound = await sock.sendMessage(remoteJid, {
           text: `⚠️ *No se encontró ninguna visita activa* que coincida con "${query}".\n\nEscribe *"agenda"* para ver tus citas programadas.`
@@ -1803,11 +1806,12 @@ async function startWhatsAppGateway() {
   async function handleUpdateAppointment(sock, remoteJid, session, updateInfo = {}) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const tenantContext = session.companyId || cleanPhone;
       const query = updateInfo.appointmentQuery || updateInfo.clientName || '';
       
       // Si el usuario pide cambiar fecha u hora, usamos rescheduleAppointment para trazabilidad total
       if (updateInfo.date || updateInfo.time) {
-        const res = rescheduleAppointment(cleanPhone, query, updateInfo.date, updateInfo.time, 'Reagendamiento por WhatsApp');
+        const res = rescheduleAppointment(tenantContext, query, updateInfo.date, updateInfo.time, 'Reagendamiento por WhatsApp');
         if (!res.success) {
           if (res.error === 'AMBIGUOUS') {
             const lines = [
@@ -1848,7 +1852,7 @@ async function startWhatsAppGateway() {
       };
       Object.keys(changes).forEach(k => { if (!changes[k]) delete changes[k]; });
 
-      const updated = updateAppointment(cleanPhone, query, changes);
+      const updated = updateAppointment(tenantContext, query, changes);
       if (!updated) {
         const sentNotFound = await sock.sendMessage(remoteJid, {
           text: `⚠️ No encontré ninguna visita activa que coincida con *"${query}"*.\n\nEscribe *"agenda"* para ver tus citas.`
@@ -1899,23 +1903,24 @@ async function startWhatsAppGateway() {
   async function handleCompleteAppointments(sock, remoteJid, session, completionInfo = {}, rescheduleInfo = null) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const tenantContext = session.companyId || cleanPhone;
       const messagesToSend = [];
 
       // 1. Si el usuario dijo "todas hechas" o similar
       if (completionInfo.allCompleted) {
-        const pendingToday = listAppointments(cleanPhone, 'today');
+        const pendingToday = listAppointments(tenantContext, 'today');
         const ids = pendingToday.map(a => a.id);
-        const res = completeAppointments(cleanPhone, ids, 'SUCCESSFUL', 'Confirmado por profesional al fin de día');
+        const res = completeAppointments(tenantContext, ids, 'SUCCESSFUL', 'Confirmado por profesional al fin de día');
         messagesToSend.push(`✅ *¡Estupendo!* He marcado tus *${res.completed.length} visitas* de hoy como finalizadas.`);
       } else if (completionInfo.completedQueries && completionInfo.completedQueries.length > 0) {
-        const res = completeAppointments(cleanPhone, completionInfo.completedQueries, 'SUCCESSFUL');
+        const res = completeAppointments(tenantContext, completionInfo.completedQueries, 'SUCCESSFUL');
         const names = res.completed.map(c => `*${c.clientName}*`).join(', ');
         messagesToSend.push(`✅ He marcado como realizada${res.completed.length === 1 ? '' : 's'} la visita con ${names}.`);
       }
 
       // 2. Si además pidió reagendar otra visita no realizada
       if (rescheduleInfo && rescheduleInfo.query && (rescheduleInfo.date || rescheduleInfo.time)) {
-        const resch = rescheduleAppointment(cleanPhone, rescheduleInfo.query, rescheduleInfo.date, rescheduleInfo.time, 'Reagendada tras fin de jornada');
+        const resch = rescheduleAppointment(tenantContext, rescheduleInfo.query, rescheduleInfo.date, rescheduleInfo.time, 'Reagendada tras fin de jornada');
         if (resch.success) {
           const a = resch.appointment;
           const dp = (a.date || '').split('-');
@@ -2085,6 +2090,7 @@ async function startWhatsAppGateway() {
   async function handleAddShoppingItems(sock, remoteJid, session, items, clientName = null, explicitBudgetId = null) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const tenantContext = session.companyId || cleanPhone;
       const activeBudget = session.activeBudgetId ? session.budgets.get(session.activeBudgetId) : null;
       const effectiveClient = clientName || (activeBudget?.client?.name !== 'Cliente Particular' ? activeBudget?.client?.name : null);
       const budgetId = explicitBudgetId || activeBudget?.id || null;
@@ -2094,7 +2100,7 @@ async function startWhatsAppGateway() {
         if (isDis) return;
       }
 
-      const added = addShoppingItems(cleanPhone, items, { clientName: effectiveClient, budgetId });
+      const added = addShoppingItems(tenantContext, items, { clientName: effectiveClient, budgetId });
       if (added.length === 0) {
         const sentErr = await sock.sendMessage(remoteJid, {
           text: '⚠️ No he podido identificar los materiales a comprar. Prueba diciendo: _"para la obra de Carlos comprar 14 m² azulejo gris y 2 sacos cemento cola"_.'
@@ -2130,13 +2136,14 @@ async function startWhatsAppGateway() {
   async function handleListShoppingItems(sock, remoteJid, session, clientQuery = null, explicitBudgetId = null) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const tenantContext = session.companyId || cleanPhone;
 
       if (clientQuery && !explicitBudgetId) {
         const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'list_shopping_items', {});
         if (isDis) return;
       }
 
-      const items = listShoppingItems(cleanPhone, 'all', clientQuery);
+      const items = listShoppingItems(tenantContext, 'all', clientQuery);
       const text = formatShoppingListForWhatsApp(items, clientQuery);
       const sent = await sock.sendMessage(remoteJid, { text });
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
@@ -2152,13 +2159,14 @@ async function startWhatsAppGateway() {
   async function handleMarkShoppingItemBought(sock, remoteJid, session, query, clientQuery = null, explicitBudgetId = null) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const tenantContext = session.companyId || cleanPhone;
 
       if (clientQuery && !explicitBudgetId) {
         const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'mark_shopping_items', { query });
         if (isDis) return;
       }
 
-      const updated = markShoppingItemBought(cleanPhone, query, clientQuery);
+      const updated = markShoppingItemBought(tenantContext, query, clientQuery);
       if (updated.length === 0) {
         const sentNotFound = await sock.sendMessage(remoteJid, {
           text: `ℹ️ No he encontrado ningún material pendiente que coincida con *"${query}"*${clientQuery ? ` para la obra de ${clientQuery}` : ''}.\n\nEscribe *"lista de la compra"* para ver todos tus materiales pendientes.`
@@ -3325,8 +3333,8 @@ async function startWhatsAppGateway() {
           }
 
           if (act.type === 'clear_shopping_list') {
-            const phone = session.phone || String(remoteJid).replace(/\D/g, '');
-            const res = clearShoppingList(phone);
+            const tenantContext = session.companyId || session.phone || String(remoteJid).replace(/\D/g, '');
+            const res = clearShoppingList(tenantContext);
             const sentClr = await sock.sendMessage(remoteJid, {
               text: `🗑️ *Lista de compras vaciada con éxito.* Se han eliminado ${res.deletedCount} materiales de tu lista.`
             });

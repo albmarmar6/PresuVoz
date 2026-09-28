@@ -1816,7 +1816,7 @@ const apt2 = testSaveAppointment(testVisitPhone, {
 const cancelledApt = testCancelAppointment(testVisitPhone, 'Pedro', 'Cliente decide no realizar la obra');
 assert(cancelledApt.status === 'CANCELLED', "CASO 15: Cancelación establece status = CANCELLED sin borrar el registro");
 
-const aptInDb = testGetAppointment(apt2.id);
+const aptInDb = testGetAppointment(testVisitPhone, apt2.id);
 assert(aptInDb !== null, "CASO 15: La visita cancelada NO se borra de la BD (permanece para métricas e historial)");
 assert(aptInDb.status === 'CANCELLED', "CASO 15: Permanece en la BD como CANCELLED");
 
@@ -3782,6 +3782,340 @@ cleanupTest31(phoneTenantC31);
 userSessions.delete(`${phoneTenantA31}@s.whatsapp.net`);
 userSessions.delete(`${phoneTenantB31}@s.whatsapp.net`);
 userSessions.delete(`${phoneTenantC31}@s.whatsapp.net`);
+
+// -----------------------------------------------------------------------------
+// TEST 32: Migración Controlada de Appointments y Shopping Items a Company_ID (Fase 2C)
+// -----------------------------------------------------------------------------
+console.log("\nTEST 32: Migración Controlada de Appointments y Shopping Items a Company_ID (Fase 2C — Backfill, Tenant Scoping, Cross-Tenant Isolation & Active Defense)");
+
+import {
+  saveAppointment as saveAppointmentTenant32,
+  saveCompany as saveCompanyTenant32,
+  getAppointment as getAppointmentTenant32,
+  findAppointments as findAppointmentsTenant32,
+  updateAppointment as updateAppointmentTenant32,
+  cancelAppointment as cancelAppointmentTenant32,
+  listAppointments as listAppointmentsTenant32,
+  updateAppointmentStatus as updateAppointmentStatusTenant32,
+  listAppointmentsWeek as listAppointmentsWeekTenant32,
+  getAppointmentHistory as getAppointmentHistoryTenant32,
+  addShoppingItems as addShoppingItemsTenant32,
+  listShoppingItems as listShoppingItemsTenant32,
+  markShoppingItemBought as markShoppingItemBoughtTenant32,
+  clearShoppingList as clearShoppingListTenant32
+} from './db_service.js';
+import { migration as mig006 } from './migrations/006_appointments_shopping_company_id.js';
+
+// ─── PARTE 1: PRUEBAS DE BACKFILL E INTEGRIDAD EN BASE DE DATOS AISLADA EN MEMORIA ───
+const memDb32 = new DatabaseSync(':memory:');
+memDb32.exec('PRAGMA foreign_keys = ON;');
+// Aplicar migraciones 1 a 5
+runMigrations(memDb32, { migrations: [MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], MIGRATIONS[3], MIGRATIONS[4]] });
+
+// Crear empresas en memoria
+const compAIdMem32 = crypto.randomUUID();
+const compBIdMem32 = crypto.randomUUID();
+const phoneMemA32 = '34698000001';
+const phoneMemB32 = '34698000002';
+
+memDb32.prepare("INSERT INTO companies (id, phone, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(
+  compAIdMem32, phoneMemA32, 'Empresa Mem A 32', '2026-01-01', '2026-01-01'
+);
+memDb32.prepare("INSERT INTO companies (id, phone, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(
+  compBIdMem32, phoneMemB32, 'Empresa Mem B 32', '2026-01-01', '2026-01-01'
+);
+
+// Insertar presupuesto canónico para Empresa A en memoria
+const budgetIdMem32 = 'BUD-MEM-32-A1';
+memDb32.prepare("INSERT INTO budgets (id, company_id, company_phone, client_name, total_amount, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  budgetIdMem32, compAIdMem32, phoneMemA32, 'Cliente A', 1500, JSON.stringify({ id: budgetIdMem32, companyId: compAIdMem32 }), '2026-01-01', '2026-01-01'
+);
+
+// 1. Insertar citas legadas sin company_id
+memDb32.prepare(`
+  INSERT INTO appointments (id, company_phone, client_name, date, time, title, status, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`).run('CIT-MEM-1', phoneMemA32, 'Cliente Cita A', '2026-10-10', '10:00', 'Visita A', 'CONFIRMED', '2026-01-01', '2026-01-01');
+
+memDb32.prepare(`
+  INSERT INTO appointments (id, company_phone, client_name, date, time, title, status, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`).run('CIT-MEM-2', phoneMemB32, 'Cliente Cita B', '2026-10-11', '11:00', 'Visita B', 'CONFIRMED', '2026-01-01', '2026-01-01');
+
+// 2. Insertar artículos de compra legados sin company_id
+// Item 1: vinculado a presupuesto de Empresa A (Prioridad 1)
+memDb32.prepare(`
+  INSERT INTO shopping_items (id, company_phone, client_name, budget_id, description, qty, unit, status, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`).run('MAT-MEM-1', phoneMemA32, 'Cliente A', budgetIdMem32, '20 sacos de cemento cola', 20, 'sacos', 'PENDING', '2026-01-01');
+
+// Item 2: sin presupuesto, solo con company_phone de Empresa B (Prioridad 2)
+memDb32.prepare(`
+  INSERT INTO shopping_items (id, company_phone, client_name, budget_id, description, qty, unit, status, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`).run('MAT-MEM-2', phoneMemB32, 'Cliente Particular B', null, '1 rollo de cinta carrocero', 1, 'ud', 'PENDING', '2026-01-01');
+
+// Ejecutar Migración 006
+mig006.up(memDb32);
+
+// Requisitos A, B, C: Verificación del Backfill
+const apt1MemRow = memDb32.prepare("SELECT id, company_id, company_phone FROM appointments WHERE id = 'CIT-MEM-1'").get();
+const apt2MemRow = memDb32.prepare("SELECT id, company_id, company_phone FROM appointments WHERE id = 'CIT-MEM-2'").get();
+assert(apt1MemRow && apt1MemRow.company_id === compAIdMem32, "1. Requisito A: Backfill de citas asocia determinísticamente company_phone -> companies.id para Empresa A");
+assert(apt2MemRow && apt2MemRow.company_id === compBIdMem32, "2. Requisito A: Backfill de citas asocia determinísticamente company_phone -> companies.id para Empresa B");
+
+const mat1MemRow = memDb32.prepare("SELECT id, company_id, budget_id, company_phone FROM shopping_items WHERE id = 'MAT-MEM-1'").get();
+const mat2MemRow = memDb32.prepare("SELECT id, company_id, budget_id, company_phone FROM shopping_items WHERE id = 'MAT-MEM-2'").get();
+assert(mat1MemRow && mat1MemRow.company_id === compAIdMem32, "3. Requisito B: Backfill de shopping_items con budget_id hereda company_id canónico del presupuesto");
+assert(mat2MemRow && mat2MemRow.company_id === compBIdMem32, "4. Requisito C: Backfill de shopping_items sin budget_id asocia company_phone -> companies.id");
+
+// Requisito D: Abortar si existe cita huérfana
+const memDb32OrphanApt = new DatabaseSync(':memory:');
+memDb32OrphanApt.exec('PRAGMA foreign_keys = ON;');
+runMigrations(memDb32OrphanApt, { migrations: [MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], MIGRATIONS[3], MIGRATIONS[4]] });
+memDb32OrphanApt.prepare("INSERT INTO appointments (id, company_phone, client_name, date, time, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'CIT-ORPHAN', '34699999999', 'Huérfano', '2026-10-10', '10:00', 'CONFIRMED', '2026-01-01', '2026-01-01'
+);
+let orphanAptError = null;
+try {
+  mig006.up(memDb32OrphanApt);
+} catch (e) {
+  orphanAptError = e;
+}
+assert(orphanAptError && orphanAptError.message.includes('huérfana'), "5. Requisito D: La migración aborta inmediatamente si detecta una cita huérfana sin empresa");
+
+// Requisito E: Abortar si existe shopping_item con budget_id inexistente
+const memDb32OrphanMat = new DatabaseSync(':memory:');
+memDb32OrphanMat.exec('PRAGMA foreign_keys = ON;');
+runMigrations(memDb32OrphanMat, { migrations: [MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], MIGRATIONS[3], MIGRATIONS[4]] });
+memDb32OrphanMat.prepare("INSERT INTO shopping_items (id, company_phone, budget_id, description, status, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+  'MAT-ORPHAN-BUDGET', '34698000001', 'BUD-INEXISTENTE', 'Tornillos', 'PENDING', '2026-01-01'
+);
+let orphanMatError = null;
+try {
+  mig006.up(memDb32OrphanMat);
+} catch (e) {
+  orphanMatError = e;
+}
+assert(orphanMatError && orphanMatError.message.includes('inexistente'), "6. Requisito E: La migración aborta si un shopping_item referencia un presupuesto inexistente");
+
+// Requisito F: Abortar si existe conflicto/mismatch de tenant en shopping_item
+const memDb32Mismatch = new DatabaseSync(':memory:');
+memDb32Mismatch.exec('PRAGMA foreign_keys = ON;');
+runMigrations(memDb32Mismatch, { migrations: [MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], MIGRATIONS[3], MIGRATIONS[4]] });
+const compAIdMismatch = crypto.randomUUID();
+const compBIdMismatch = crypto.randomUUID();
+memDb32Mismatch.prepare("INSERT INTO companies (id, phone, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(compAIdMismatch, '34611111111', 'Emp A', '2026-01-01', '2026-01-01');
+memDb32Mismatch.prepare("INSERT INTO companies (id, phone, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(compBIdMismatch, '34622222222', 'Emp B', '2026-01-01', '2026-01-01');
+memDb32Mismatch.prepare("INSERT INTO budgets (id, company_id, company_phone, client_name, total_amount, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+  'BUD-MISMATCH-A', compAIdMismatch, '34611111111', 'Cliente A', 1000, JSON.stringify({ id: 'BUD-MISMATCH-A', companyId: compAIdMismatch }), '2026-01-01', '2026-01-01'
+);
+// Item referencia presupuesto de A pero tiene company_phone de B
+memDb32Mismatch.prepare("INSERT INTO shopping_items (id, company_phone, budget_id, description, status, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+  'MAT-MISMATCH', '34622222222', 'BUD-MISMATCH-A', 'Material discordante', 'PENDING', '2026-01-01'
+);
+let mismatchError = null;
+try {
+  mig006.up(memDb32Mismatch);
+} catch (e) {
+  mismatchError = e;
+}
+assert(mismatchError && mismatchError.message.includes('Mismatch de tenant'), "7. Requisito F: La migración aborta inmediatamente ante contradicción de tenant en shopping_item");
+
+// ─── PARTE 2: PRUEBAS EN TEST DB (AISLAMIENTO, CROSS-TENANT, MODEL INJECTION & ZERO-DISCLOSURE) ───
+const phoneTenantA32 = '34698111001';
+const phoneTenantB32 = '34698111002';
+
+const cleanupTest32 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp && comp.id) {
+    currentDb.prepare("DELETE FROM appointments WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM shopping_items WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM budgets WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM audit_logs WHERE business_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+
+cleanupTest32(phoneTenantA32);
+cleanupTest32(phoneTenantB32);
+
+// Crear Empresa A y B
+const compObjA32 = saveCompanyTenant32(phoneTenantA32, { name: 'Reformas Alfa 32', cif: 'B98111001' });
+const compObjB32 = saveCompanyTenant32(phoneTenantB32, { name: 'Pinturas Beta 32', cif: 'B98111002' });
+
+const authContextA32 = { companyId: compObjA32.id, company: compObjA32, phone: phoneTenantA32 };
+const authContextB32 = { companyId: compObjB32.id, company: compObjB32, phone: phoneTenantB32 };
+
+// Requisito Q: Dual-write y creación legítima de cita y material en Empresa A
+const aptA32 = saveAppointmentTenant32(authContextA32, {
+  clientName: 'Juan Alfa',
+  clientPhone: '654000111',
+  clientAddress: 'Av. Constitución 4, Sevilla',
+  date: '2026-10-15',
+  time: '10:00',
+  notes: 'Medición de cocina'
+});
+
+assert(Boolean(aptA32 && aptA32.id), "8. Creación de cita: saveAppointment retorna cita válida");
+assert(aptA32.companyId === compObjA32.id, "9. Identidad canónica: apt.companyId coincide con compObjA32.id");
+assert(aptA32.status === 'CONFIRMED', "10. Regla de Oro: la cita nace en CONFIRMED");
+
+const aptDbRawA = currentDb.prepare("SELECT company_id, company_phone FROM appointments WHERE id = ?").get(aptA32.id);
+assert(aptDbRawA && aptDbRawA.company_id === compObjA32.id && aptDbRawA.company_phone === phoneTenantA32, "11. Requisito Q: Dual-write verificado en SQLite para appointments (company_id + company_phone)");
+
+// Crear cita para Empresa B
+const aptB32 = saveAppointmentTenant32(authContextB32, {
+  clientName: 'Pedro Beta',
+  clientPhone: '654000222',
+  clientAddress: 'Calle Sierpes 12, Sevilla',
+  date: '2026-10-16',
+  time: '12:00',
+  notes: 'Pintura de fachada'
+});
+
+// Requisito G: Aislamiento en listado y búsqueda de citas
+const listAptsA = listAppointmentsTenant32(authContextA32);
+const listAptsB = listAppointmentsTenant32(authContextB32);
+assert(listAptsA.some(a => a.id === aptA32.id) && !listAptsA.some(a => a.id === aptB32.id), "12. Requisito G: listAppointments(tenantA) solo incluye citas de Tenant A y aísla Tenant B");
+assert(listAptsB.some(a => a.id === aptB32.id) && !listAptsB.some(a => a.id === aptA32.id), "13. Requisito G: listAppointments(tenantB) solo incluye citas de Tenant B y aísla Tenant A");
+
+const findAptsA = findAppointmentsTenant32(authContextA32, 'Pedro');
+assert(findAptsA.length === 0, "14. Requisito G: findAppointments(tenantA, 'Pedro') no revela citas de Tenant B");
+
+// Requisito I: Cross-tenant getAppointment (Zero-Disclosure)
+const crossGetApt = getAppointmentTenant32(authContextB32, aptA32.id);
+assert(crossGetApt === null, "15. Requisito I: getAppointment(tenantB, idA) retorna null (Zero-Disclosure cross-tenant)");
+
+const ownGetApt = getAppointmentTenant32(authContextA32, aptA32.id);
+assert(ownGetApt && ownGetApt.id === aptA32.id, "16. Lectura legítima: getAppointment(tenantA, idA) recupera los datos de la cita");
+
+// Prohibición estricta de consulta sin tenant context
+const unauthAptGet = getAppointmentTenant32(aptA32.id);
+assert(unauthAptGet === null, "17. Requisito R / Seguridad: getAppointment(id) sin tenant context retorna null");
+
+// Requisito J: Cross-tenant updateAppointment bloqueado
+const crossUpdateApt = updateAppointmentTenant32(authContextB32, aptA32.id, { clientName: 'Nombre Hackeado' });
+assert(crossUpdateApt === null, "18. Requisito J: updateAppointment(tenantB, idA) rechaza la modificación y retorna null");
+const aptAfterCrossUpdate = getAppointmentTenant32(authContextA32, aptA32.id);
+assert(aptAfterCrossUpdate.clientName === 'Juan Alfa', "19. Requisito J: Los datos de la cita de Tenant A permanecen intactos tras intento cross-tenant");
+
+// Requisito K: Cross-tenant cancelAppointment bloqueado
+const crossCancelApt = cancelAppointmentTenant32(authContextB32, aptA32.id);
+assert(crossCancelApt === null, "20. Requisito K: cancelAppointment(tenantB, idA) rechaza la anulación y retorna null");
+const aptAfterCrossCancel = getAppointmentTenant32(authContextA32, aptA32.id);
+assert(aptAfterCrossCancel.status === 'CONFIRMED', "21. Requisito K: El estado de la cita de Tenant A permanece CONFIRMED");
+
+// Requisito L: Cross-tenant updateAppointmentStatus bloqueado
+updateAppointmentStatusTenant32(authContextB32, aptA32.id, 'CANCELLED');
+const aptAfterCrossStatus = getAppointmentTenant32(authContextA32, aptA32.id);
+assert(aptAfterCrossStatus.status === 'CONFIRMED', "22. Requisito L: updateAppointmentStatus(tenantB, idA, 'CANCELLED') no altera la cita ajena");
+
+// Llamada no autorizada sin tenant context (2 args)
+updateAppointmentStatusTenant32(aptA32.id, 'CANCELLED');
+const aptAfterNoAuthStatus = getAppointmentTenant32(authContextA32, aptA32.id);
+assert(aptAfterNoAuthStatus.status === 'CONFIRMED', "23. Requisito L: updateAppointmentStatus sin tenant context es ignorado y no afecta la BD");
+
+// Requisito O: Defensa activa contra inyección del modelo en citas
+const injectedApt = saveAppointmentTenant32(authContextA32, {
+  clientName: 'Cliente Con Inyección',
+  companyId: compObjB32.id,
+  company_id: compObjB32.id,
+  companyPhone: phoneTenantB32,
+  company_phone: phoneTenantB32,
+  date: '2026-10-20',
+  time: '16:00'
+});
+const injectedDbRaw = currentDb.prepare("SELECT company_id, company_phone FROM appointments WHERE id = ?").get(injectedApt.id);
+assert(injectedDbRaw && injectedDbRaw.company_id === compObjA32.id && injectedDbRaw.company_phone === phoneTenantA32, "24. Requisito O: saveAppointment neutraliza la inyección del modelo forzando company_id y company_phone del tenant autenticado");
+
+// ─── PARTE 3: COMPRAS Y MATERIALES (SHOPPING ITEMS) ───
+// Requisito Q & H: Creación legítima y dual-write en shopping items
+const itemsA32 = addShoppingItemsTenant32(authContextA32, [
+  { description: '10 sacos yeso blanco', qty: 10, unit: 'sacos' },
+  { description: '2 botes pintura plástica', qty: 2, unit: 'botes' }
+], { clientName: 'Obra Alfa' });
+
+assert(itemsA32.length === 2, "25. Creación de compras: addShoppingItems inserta correctamente los materiales");
+assert(itemsA32[0].companyId === compObjA32.id, "26. Identidad canónica: shoppingItem.companyId coincide con Tenant A");
+
+const shopDbRawA = currentDb.prepare("SELECT company_id, company_phone FROM shopping_items WHERE id = ?").get(itemsA32[0].id);
+assert(shopDbRawA && shopDbRawA.company_id === compObjA32.id && shopDbRawA.company_phone === phoneTenantA32, "27. Requisito Q: Dual-write verificado en SQLite para shopping_items (company_id + company_phone)");
+
+// Crear shopping items para Empresa B
+const itemsB32 = addShoppingItemsTenant32(authContextB32, [
+  { description: 'Rodillo profesional 22cm', qty: 1, unit: 'ud' }
+], { clientName: 'Obra Beta' });
+
+// Requisito H: Aislamiento en listado de compras
+const listShopA = listShoppingItemsTenant32(authContextA32);
+const listShopB = listShoppingItemsTenant32(authContextB32);
+assert(listShopA.some(i => i.id === itemsA32[0].id) && !listShopA.some(i => i.id === itemsB32[0].id), "28. Requisito H: listShoppingItems(tenantA) contiene sus materiales y aísla Tenant B");
+assert(listShopB.some(i => i.id === itemsB32[0].id) && !listShopB.some(i => i.id === itemsA32[0].id), "29. Requisito H: listShoppingItems(tenantB) contiene sus materiales y aísla Tenant A");
+
+// Requisito M: Cross-tenant markShoppingItemBought bloqueado
+const crossMarkBought = markShoppingItemBoughtTenant32(authContextB32, itemsA32[0].id);
+assert(Array.isArray(crossMarkBought) && crossMarkBought.length === 0, "30. Requisito M: markShoppingItemBought(tenantB, itemA) retorna array vacío");
+const itemAAfterCrossMark = currentDb.prepare("SELECT status FROM shopping_items WHERE id = ?").get(itemsA32[0].id);
+assert(itemAAfterCrossMark.status === 'PENDING', "31. Requisito M: El material de Tenant A permanece PENDING tras intento de compra ajeno");
+
+// Marcado legítimo por Tenant A
+const ownMarkBought = markShoppingItemBoughtTenant32(authContextA32, itemsA32[0].id);
+assert(ownMarkBought.length === 1 && ownMarkBought[0].status === 'BOUGHT', "32. Actualización legítima: Tenant A marca exitosamente su material como BOUGHT");
+
+// Requisito N: Cross-tenant clearShoppingList bloqueado
+const clearResB = clearShoppingListTenant32(authContextB32);
+assert(clearResB.deletedCount === 1, "33. clearShoppingList de Tenant B borra exclusivamente su propio artículo");
+const pendingItemsAfterClearB = listShoppingItemsTenant32(authContextA32, 'all');
+assert(pendingItemsAfterClearB.length === 2, "34. Requisito N: clearShoppingList(tenantB) no elimina ningún artículo de Tenant A (permanecen los 2)");
+
+// Requisito P: Model injection defense en shopping_items
+const injectedItems = addShoppingItemsTenant32(authContextA32, [
+  { description: 'Brocha recortar', companyId: compObjB32.id, company_id: compObjB32.id, companyPhone: phoneTenantB32, company_phone: phoneTenantB32 }
+]);
+const injectedShopRaw = currentDb.prepare("SELECT company_id, company_phone FROM shopping_items WHERE id = ?").get(injectedItems[0].id);
+assert(injectedShopRaw && injectedShopRaw.company_id === compObjA32.id && injectedShopRaw.company_phone === phoneTenantA32, "35. Requisito P: addShoppingItems neutraliza la inyección del modelo imponiendo company_id y company_phone del contexto autenticado");
+
+// Requisito R: Foreign Key constraint integrity en SQLite
+let fkAptError = null;
+try {
+  currentDb.prepare("INSERT INTO appointments (id, company_id, company_phone, client_name, date, time, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+    'CIT-INVALID-FK', '00000000-0000-0000-0000-000000000000', '34600000000', 'Cliente Invalido', '2026-10-10', '10:00', 'CONFIRMED', '2026-01-01', '2026-01-01'
+  );
+} catch (e) {
+  fkAptError = e;
+}
+assert(fkAptError !== null && String(fkAptError.message).includes('FOREIGN KEY constraint failed'), "36. Requisito R: SQLite rechaza appointments con company_id inexistente en companies");
+
+let fkShopError = null;
+try {
+  currentDb.prepare("INSERT INTO shopping_items (id, company_id, company_phone, description, status, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+    'MAT-INVALID-FK', '00000000-0000-0000-0000-000000000000', '34600000000', 'Articulo Invalido', 'PENDING', '2026-01-01'
+  );
+} catch (e) {
+  fkShopError = e;
+}
+assert(fkShopError !== null && String(fkShopError.message).includes('FOREIGN KEY constraint failed'), "37. Requisito R: SQLite rechaza shopping_items con company_id inexistente en companies");
+
+const fkCheck = currentDb.prepare('PRAGMA foreign_key_check').all();
+assert(fkCheck.length === 0, "38. Requisito R: PRAGMA foreign_key_check verifica cero violaciones de claves foráneas en la base de datos");
+
+const integrityCheck = currentDb.prepare('PRAGMA integrity_check').get();
+assert(integrityCheck.integrity_check === 'ok', "39. Requisito R: PRAGMA integrity_check confirma que la base de datos está 100% íntegra (ok)");
+
+// Compatibilidad legacy: llamadas con teléfono plano
+const legacyListApts = listAppointmentsTenant32(phoneTenantA32);
+assert(legacyListApts.length >= 1, "40. Compatibilidad legacy: listAppointments(phone) resuelve y devuelve las citas");
+const legacyListShop = listShoppingItemsTenant32(phoneTenantA32);
+assert(legacyListShop.length >= 1, "41. Compatibilidad legacy: listShoppingItems(phone) resuelve y devuelve los materiales");
+
+// Limpieza final de TEST 32
+cleanupTest32(phoneTenantA32);
+cleanupTest32(phoneTenantB32);
+userSessions.delete(`${phoneTenantA32}@s.whatsapp.net`);
+userSessions.delete(`${phoneTenantB32}@s.whatsapp.net`);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

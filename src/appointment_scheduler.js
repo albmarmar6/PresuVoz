@@ -25,17 +25,23 @@ function getNowInTimezone(tz = 'Europe/Madrid') {
   return { dateStr, timeStr, hour, minute, tomorrowStr, nowIso: now.toISOString() };
 }
 
-function resolveSchedulerTargetJid(phone, userSessions) {
+function resolveSchedulerTargetJid(companyIdOrPhone, userSessions) {
   if (userSessions && typeof userSessions.entries === 'function') {
+    const rawVal = String(companyIdOrPhone || '').trim();
+    const cleanPhone = rawVal.replace(/\D/g, '');
     for (const [activeJid, sess] of userSessions.entries()) {
       if (activeJid.includes('@g.us') || activeJid.includes('@broadcast') || activeJid.includes('@newsletter')) continue;
+      if (sess?.companyId && sess.companyId === rawVal) {
+        return activeJid;
+      }
       const sessPhone = String(sess?.phone || '').replace(/\D/g, '');
-      if (sessPhone && sessPhone === String(phone).replace(/\D/g, '')) {
+      if (sessPhone && (sessPhone === cleanPhone || sessPhone === rawVal)) {
         return activeJid;
       }
     }
   }
-  return `${phone}@s.whatsapp.net`;
+  const clean = String(companyIdOrPhone || '').replace(/\D/g, '');
+  return `${clean}@s.whatsapp.net`;
 }
 
 /**
@@ -54,7 +60,7 @@ export async function runEveningBeforeReminderJob(sock, userSessions = new Map()
     WHERE date = ?
       AND status = 'CONFIRMED'
       AND reminder_day_sent_at IS NULL
-    ORDER BY company_phone ASC, time ASC
+    ORDER BY COALESCE(company_id, company_phone) ASC, time ASC
   `);
 
   const rows = stmt.all(tomorrowStr);
@@ -63,13 +69,14 @@ export async function runEveningBeforeReminderJob(sock, userSessions = new Map()
   // Agrupar por profesional/empresa
   const byCompany = new Map();
   for (const r of rows) {
-    if (!byCompany.has(r.company_phone)) byCompany.set(r.company_phone, []);
-    byCompany.get(r.company_phone).push(r);
+    const key = r.company_id || r.company_phone;
+    if (!byCompany.has(key)) byCompany.set(key, { companyId: r.company_id, phone: r.company_phone, appointments: [] });
+    byCompany.get(key).appointments.push(r);
   }
 
-  for (const [phone, appointments] of byCompany.entries()) {
+  for (const [key, { companyId, phone, appointments }] of byCompany.entries()) {
     try {
-      const targetJid = resolveSchedulerTargetJid(phone, userSessions);
+      const targetJid = resolveSchedulerTargetJid(companyId || phone, userSessions);
       const dateParts = tomorrowStr.split('-');
       const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}` : tomorrowStr;
 
@@ -90,7 +97,7 @@ export async function runEveningBeforeReminderJob(sock, userSessions = new Map()
 
       const sent = await sock.sendMessage(targetJid, { text: lines.join('\n').trim() });
       if (sent?.status === 'BLOCKED') {
-        console.warn(`🛡️ [Scheduler] Envío bloqueado por cortafuegos para ${phone}. No se actualizará SQLite.`);
+        console.warn(`🛡️ [Scheduler] Envío bloqueado por cortafuegos para ${phone || companyId}. No se actualizará SQLite.`);
         continue;
       }
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
@@ -104,9 +111,9 @@ export async function runEveningBeforeReminderJob(sock, userSessions = new Map()
         WHERE id IN (${placeholders})
       `).run(nowIso, nowIso, ...aptIds);
 
-      console.log(`📨 [Scheduler] Recordatorio de víspera enviado a ${phone} para ${appointments.length} visitas.`);
+      console.log(`📨 [Scheduler] Recordatorio de víspera enviado a ${phone || companyId} para ${appointments.length} visitas.`);
     } catch (err) {
-      console.error(`❌ [Scheduler] Error enviando recordatorio víspera a ${phone}:`, err.message);
+      console.error(`❌ [Scheduler] Error enviando recordatorio víspera a ${phone || companyId}:`, err.message);
     }
   }
 }
@@ -126,7 +133,7 @@ export async function runMorningReminderJob(sock, userSessions = new Map(), botS
     WHERE date = ?
       AND status = 'CONFIRMED'
       AND reminder_morning_sent_at IS NULL
-    ORDER BY company_phone ASC, time ASC
+    ORDER BY COALESCE(company_id, company_phone) ASC, time ASC
   `);
 
   const rows = stmt.all(dateStr);
@@ -134,14 +141,15 @@ export async function runMorningReminderJob(sock, userSessions = new Map(), botS
 
   const byCompany = new Map();
   for (const r of rows) {
-    if (!byCompany.has(r.company_phone)) byCompany.set(r.company_phone, []);
-    byCompany.get(r.company_phone).push(r);
+    const key = r.company_id || r.company_phone;
+    if (!byCompany.has(key)) byCompany.set(key, { companyId: r.company_id, phone: r.company_phone, appointments: [] });
+    byCompany.get(key).appointments.push(r);
   }
 
-  for (const [phone, appointments] of byCompany.entries()) {
+  for (const [key, { companyId, phone, appointments }] of byCompany.entries()) {
     try {
-      const targetJid = resolveSchedulerTargetJid(phone, userSessions);
-      const company = getCompany(phone);
+      const targetJid = resolveSchedulerTargetJid(companyId || phone, userSessions);
+      const company = getCompany(companyId || phone);
       const greetingName = company.ownerName || company.name ? ` ${company.ownerName || company.name}` : '';
 
       const lines = [
@@ -161,7 +169,7 @@ export async function runMorningReminderJob(sock, userSessions = new Map(), botS
 
       const sent = await sock.sendMessage(targetJid, { text: lines.join('\n').trim() });
       if (sent?.status === 'BLOCKED') {
-        console.warn(`🛡️ [Scheduler] Envío matinal bloqueado por cortafuegos para ${phone}.`);
+        console.warn(`🛡️ [Scheduler] Envío matinal bloqueado por cortafuegos para ${phone || companyId}.`);
         continue;
       }
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
@@ -174,9 +182,9 @@ export async function runMorningReminderJob(sock, userSessions = new Map(), botS
         WHERE id IN (${placeholders})
       `).run(nowIso, nowIso, ...aptIds);
 
-      console.log(`☀️ [Scheduler] Recordatorio matinal enviado a ${phone} para ${appointments.length} visitas.`);
+      console.log(`☀️ [Scheduler] Recordatorio matinal enviado a ${phone || companyId} para ${appointments.length} visitas.`);
     } catch (err) {
-      console.error(`❌ [Scheduler] Error enviando recordatorio matinal a ${phone}:`, err.message);
+      console.error(`❌ [Scheduler] Error enviando recordatorio matinal a ${phone || companyId}:`, err.message);
     }
   }
 }
@@ -200,7 +208,7 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
     WHERE date = ?
       AND status = 'CONFIRMED'
       AND end_of_day_review_sent_at IS NULL
-    ORDER BY company_phone ASC, time ASC
+    ORDER BY COALESCE(company_id, company_phone) ASC, time ASC
   `);
 
   const rows = stmt.all(dateStr);
@@ -208,13 +216,14 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
 
   const byCompany = new Map();
   for (const r of rows) {
-    if (!byCompany.has(r.company_phone)) byCompany.set(r.company_phone, []);
-    byCompany.get(r.company_phone).push(r);
+    const key = r.company_id || r.company_phone;
+    if (!byCompany.has(key)) byCompany.set(key, { companyId: r.company_id, phone: r.company_phone, appointments: [] });
+    byCompany.get(key).appointments.push(r);
   }
 
-  for (const [phone, appointments] of byCompany.entries()) {
+  for (const [key, { companyId, phone, appointments }] of byCompany.entries()) {
     try {
-      const targetJid = resolveSchedulerTargetJid(phone, userSessions);
+      const targetJid = resolveSchedulerTargetJid(companyId || phone, userSessions);
       
       const lines = [
         '👋 *Antes de terminar la jornada:*',
@@ -240,7 +249,7 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
 
       const sent = await sock.sendMessage(targetJid, { text: lines.join('\n').trim() });
       if (sent?.status === 'BLOCKED') {
-        console.warn(`🛡️ [Scheduler] Revisión de fin de jornada bloqueada por cortafuegos para ${phone}.`);
+        console.warn(`🛡️ [Scheduler] Revisión de fin de jornada bloqueada por cortafuegos para ${phone || companyId}.`);
         continue;
       }
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
@@ -265,9 +274,9 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
         };
       }
 
-      console.log(`📋 [Scheduler] Revisión de fin de jornada enviada a ${phone} para ${appointments.length} visitas.`);
+      console.log(`📋 [Scheduler] Revisión de fin de jornada enviada a ${phone || companyId} para ${appointments.length} visitas.`);
     } catch (err) {
-      console.error(`❌ [Scheduler] Error en revisión de fin de jornada para ${phone}:`, err.message);
+      console.error(`❌ [Scheduler] Error en revisión de fin de jornada para ${phone || companyId}:`, err.message);
     }
   }
 }

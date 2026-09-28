@@ -13,13 +13,15 @@ import { migration as identityMigration } from './migrations/002_identity_founda
 import { migration as budgetsMigration } from './migrations/003_budgets_company_id.js';
 import { migration as invoicesMigration } from './migrations/004_invoices_company_id.js';
 import { migration as paymentsMigration } from './migrations/005_payments_company_id.js';
+import { migration as appointmentsShoppingMigration } from './migrations/006_appointments_shopping_company_id.js';
 
 export const MIGRATIONS = [
   baselineMigration,
   identityMigration,
   budgetsMigration,
   invoicesMigration,
-  paymentsMigration
+  paymentsMigration,
+  appointmentsShoppingMigration
 ];
 
 /**

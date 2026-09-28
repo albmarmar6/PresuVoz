@@ -1414,14 +1414,29 @@ export function calculateDefaultEndTime(dateStr, timeStr, durationMinutes = 60) 
   return `${dateStr}T${endH}:${endM}:00`;
 }
 
-export function saveAppointment(phone, appointment = {}) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
+export function saveAppointment(companyContextOrIdOrPhone, appointment = {}) {
+  if (!companyContextOrIdOrPhone) {
+    throw new Error("❌ [Tenant Boundary] saveAppointment requiere un companyId o contexto autenticado obligatorio.");
+  }
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId || null;
+  const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
   const now = new Date().toISOString();
   const currentYear = new Date().getFullYear();
 
   let id = appointment.id;
   let isNew = false;
-  const existing = id ? getAppointment(id) : null;
+  const existing = id ? getAppointment(companyContextOrIdOrPhone, id) : null;
+  
+  if (id && !existing) {
+    // Verificar si el ID ya existe en otro tenant (cross-tenant overwrite attempt)
+    const crossCheck = db.prepare('SELECT id, company_id, company_phone FROM appointments WHERE id = ?').get(id);
+    if (crossCheck) {
+      console.warn(`🛑 [Seguridad Tenant] Intento de sobreescritura cross-tenant en cita '${id}'. Rechazado.`);
+      return null;
+    }
+  }
+
   if (!id) {
     const countRow = db.prepare("SELECT COUNT(*) as c FROM appointments WHERE id LIKE ?").get(`CIT-${currentYear}-%`);
     const nextSeq = String((countRow?.c || 0) + 1).padStart(4, '0');
@@ -1454,14 +1469,16 @@ export function saveAppointment(phone, appointment = {}) {
 
   const stmt = db.prepare(`
     INSERT INTO appointments (
-      id, company_phone, client_name, client_phone, client_address,
+      id, company_id, company_phone, client_name, client_phone, client_address,
       date, time, title, notes, timezone,
       status, outcome, needs_outcome_confirmation,
       scheduled_start, scheduled_end, original_scheduled_start, reschedule_count,
       created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
+      company_id = COALESCE(excluded.company_id, appointments.company_id),
+      company_phone = COALESCE(excluded.company_phone, appointments.company_phone),
       client_name = excluded.client_name,
       client_phone = excluded.client_phone,
       client_address = excluded.client_address,
@@ -1480,7 +1497,7 @@ export function saveAppointment(phone, appointment = {}) {
   `);
 
   stmt.run(
-    id, cleanPhone, clientName, clientPhone, clientAddress,
+    id, companyId, cleanPhone, clientName, clientPhone, clientAddress,
     date, time, title, notes, timezone,
     status, outcome, needsOutcomeConfirmation,
     scheduledStart, scheduledEnd, originalScheduledStart, rescheduleCount,
@@ -1489,7 +1506,7 @@ export function saveAppointment(phone, appointment = {}) {
 
   if (isNew) {
     recordAuditLog({
-      businessId: cleanPhone,
+      businessId: companyId || cleanPhone,
       entityType: 'APPOINTMENT',
       entityId: id,
       action: 'CREATE',
@@ -1501,62 +1518,106 @@ export function saveAppointment(phone, appointment = {}) {
     });
   }
 
-  return getAppointment(id);
+  return getAppointment(companyContextOrIdOrPhone, id);
 }
 
-export function getAppointment(id) {
-  if (!id) return null;
-  const stmt = db.prepare('SELECT * FROM appointments WHERE id = ?');
-  const row = stmt.get(id);
-  if (!row) return null;
-  return {
-    id: row.id,
-    companyPhone: row.company_phone,
-    clientName: row.client_name,
-    clientPhone: row.client_phone,
-    clientAddress: row.client_address,
-    title: row.title,
-    date: row.date,
-    time: row.time,
-    notes: row.notes,
-    timezone: row.timezone || 'Europe/Madrid',
-    status: row.status || 'CONFIRMED',
-    outcome: row.outcome || 'NONE',
-    needsOutcomeConfirmation: Boolean(row.needs_outcome_confirmation),
-    scheduledStart: row.scheduled_start,
-    scheduledEnd: row.scheduled_end,
-    originalScheduledStart: row.original_scheduled_start,
-    rescheduleCount: row.reschedule_count || 0,
-    reminderDaySentAt: row.reminder_day_sent_at,
-    reminderMorningSentAt: row.reminder_morning_sent_at,
-    endOfDayReviewSentAt: row.end_of_day_review_sent_at,
-    completedAt: row.completed_at,
-    cancelledAt: row.cancelled_at,
-    rescheduledAt: row.rescheduled_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at
-  };
+export function getAppointment(companyContextOrIdOrPhone, id) {
+  // Manejo de llamada canónica tenant-scoped: getAppointment(companyContext, id)
+  if (id !== undefined && id !== null) {
+    if (!companyContextOrIdOrPhone || !id) return null;
+    const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+    const companyId = tenant?.companyId;
+    const phone = tenant?.phone;
+
+    let row = null;
+    if (companyId) {
+      // Búsqueda canónica estricta por company_id
+      const stmt = db.prepare('SELECT * FROM appointments WHERE id = ? AND company_id = ?');
+      row = stmt.get(id, companyId);
+      // Fallback transitorio si el registro aún no ha sido migrado a company_id
+      if (!row && phone) {
+        const stmtLegacy = db.prepare('SELECT * FROM appointments WHERE id = ? AND company_phone = ? AND company_id IS NULL');
+        row = stmtLegacy.get(id, phone);
+      }
+    } else if (phone) {
+      // Búsqueda legacy por company_phone cuando no existe company_id
+      const stmt = db.prepare('SELECT * FROM appointments WHERE id = ? AND company_phone = ?');
+      row = stmt.get(id, phone);
+    }
+
+    if (!row) return null;
+    return {
+      id: row.id,
+      companyId: row.company_id,
+      companyPhone: row.company_phone,
+      clientName: row.client_name,
+      clientPhone: row.client_phone,
+      clientAddress: row.client_address,
+      title: row.title,
+      date: row.date,
+      time: row.time,
+      notes: row.notes,
+      timezone: row.timezone || 'Europe/Madrid',
+      status: row.status || 'CONFIRMED',
+      outcome: row.outcome || 'NONE',
+      needsOutcomeConfirmation: Boolean(row.needs_outcome_confirmation),
+      scheduledStart: row.scheduled_start,
+      scheduledEnd: row.scheduled_end,
+      originalScheduledStart: row.original_scheduled_start,
+      rescheduleCount: row.reschedule_count || 0,
+      reminderDaySentAt: row.reminder_day_sent_at,
+      reminderMorningSentAt: row.reminder_morning_sent_at,
+      endOfDayReviewSentAt: row.end_of_day_review_sent_at,
+      completedAt: row.completed_at,
+      cancelledAt: row.cancelled_at,
+      rescheduledAt: row.rescheduled_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  // REGLA DE SEGURIDAD ESTRICTA:
+  // Nunca debe existir una consulta de cita que dependa únicamente de id sin tenant context
+  console.warn("🛑 [Seguridad Tenant] getAppointment invocado sin tenant context obligatorio. Retornando null.");
+  return null;
 }
 
 /**
- * Busca visitas que coincidan con un término de búsqueda.
- * Devuelve un array de coincidencias para que el backend detecte si hay ambigüedad.
+ * Busca visitas que coincidan con un término de búsqueda (tenant-scoped).
  */
-export function findAppointments(phone, query, options = {}) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
+export function findAppointments(companyContextOrIdOrPhone, query, options = {}) {
+  if (!companyContextOrIdOrPhone) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
+
   const q = `%${(query || '').trim().toLowerCase()}%`;
   const statusFilter = options.includeCancelled ? '' : "AND status != 'CANCELLED'";
 
-  const stmt = db.prepare(`
-    SELECT * FROM appointments
-    WHERE company_phone = ?
-      ${statusFilter}
-      AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ? OR LOWER(client_address) LIKE ?)
-    ORDER BY date ASC, time ASC
-  `);
+  let rows = [];
+  if (companyId) {
+    const stmt = db.prepare(`
+      SELECT * FROM appointments
+      WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))
+        ${statusFilter}
+        AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ? OR LOWER(client_address) LIKE ?)
+      ORDER BY date ASC, time ASC
+    `);
+    rows = stmt.all(companyId, cleanPhone || '', q, q, q, q);
+  } else if (cleanPhone) {
+    const stmt = db.prepare(`
+      SELECT * FROM appointments
+      WHERE company_phone = ?
+        ${statusFilter}
+        AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ? OR LOWER(client_address) LIKE ?)
+      ORDER BY date ASC, time ASC
+    `);
+    rows = stmt.all(cleanPhone, q, q, q, q);
+  }
 
-  return stmt.all(cleanPhone, q, q, q, q).map(r => ({
+  return rows.map(r => ({
     id: r.id,
+    companyId: r.company_id,
     companyPhone: r.company_phone,
     clientName: r.client_name,
     clientPhone: r.client_phone,
@@ -1572,21 +1633,39 @@ export function findAppointments(phone, query, options = {}) {
 /**
  * Detecta si una visita solapa en horario con otra visita existente del mismo profesional.
  */
-export function findConflictingAppointments(phone, dateStr, timeStr, excludeId = null) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
-  if (!dateStr || !timeStr) return [];
+export function findConflictingAppointments(companyContextOrIdOrPhone, dateStr, timeStr, excludeId = null) {
+  if (!companyContextOrIdOrPhone || !dateStr || !timeStr) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
 
-  const stmt = db.prepare(`
-    SELECT * FROM appointments
-    WHERE company_phone = ?
-      AND date = ?
-      AND time = ?
-      AND status = 'CONFIRMED'
-      AND (? IS NULL OR id != ?)
-  `);
+  let rows = [];
+  if (companyId) {
+    const stmt = db.prepare(`
+      SELECT * FROM appointments
+      WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))
+        AND date = ?
+        AND time = ?
+        AND status = 'CONFIRMED'
+        AND (? IS NULL OR id != ?)
+    `);
+    rows = stmt.all(companyId, cleanPhone || '', dateStr, timeStr, excludeId, excludeId);
+  } else if (cleanPhone) {
+    const stmt = db.prepare(`
+      SELECT * FROM appointments
+      WHERE company_phone = ?
+        AND date = ?
+        AND time = ?
+        AND status = 'CONFIRMED'
+        AND (? IS NULL OR id != ?)
+    `);
+    rows = stmt.all(cleanPhone, dateStr, timeStr, excludeId, excludeId);
+  }
 
-  return stmt.all(cleanPhone, dateStr, timeStr, excludeId, excludeId).map(r => ({
+  return rows.map(r => ({
     id: r.id,
+    companyId: r.company_id,
+    companyPhone: r.company_phone,
     clientName: r.client_name,
     date: r.date,
     time: r.time,
@@ -1598,16 +1677,22 @@ export function findConflictingAppointments(phone, dateStr, timeStr, excludeId =
  * Reagenda una visita existente manteniendo el mismo registro en SQLite.
  * Incrementa reschedule_count, audita en audit_logs y resetea flags de recordatorio.
  */
-export function rescheduleAppointment(phone, queryOrId, newDate, newTime, reason = 'Reagendamiento solicitado por usuario') {
-  if (!queryOrId || (!newDate && !newTime)) return { success: false, error: 'MISSING_DATA' };
-  const cleanPhone = String(phone).replace(/\D/g, '');
-  
-  const matches = findAppointments(cleanPhone, queryOrId);
+/**
+ * Reagenda una visita existente manteniendo el mismo registro en SQLite (tenant-scoped).
+ */
+export function rescheduleAppointment(companyContextOrIdOrPhone, queryOrId, newDate, newTime, reason = 'Reagendamiento solicitado por usuario') {
+  if (!companyContextOrIdOrPhone || !queryOrId || (!newDate && !newTime)) return { success: false, error: 'MISSING_DATA' };
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
+
+  const matches = findAppointments(companyContextOrIdOrPhone, queryOrId);
   if (matches.length === 0) return { success: false, error: 'NOT_FOUND' };
   if (matches.length > 1) return { success: false, error: 'AMBIGUOUS', matches };
 
   const target = matches[0];
-  const oldRow = getAppointment(target.id);
+  const oldRow = getAppointment(companyContextOrIdOrPhone, target.id);
+  if (!oldRow) return { success: false, error: 'NOT_FOUND' };
   const now = new Date().toISOString();
 
   const finalDate = (newDate || oldRow.date).trim();
@@ -1617,28 +1702,48 @@ export function rescheduleAppointment(phone, queryOrId, newDate, newTime, reason
   const oldDisplay = `${oldRow.date} ${oldRow.time} h`;
   const newDisplay = `${finalDate} ${finalTime} h`;
 
-  const stmt = db.prepare(`
-    UPDATE appointments
-    SET date = ?,
-        time = ?,
-        scheduled_start = ?,
-        scheduled_end = ?,
-        status = 'CONFIRMED',
-        outcome = 'NONE',
-        needs_outcome_confirmation = 0,
-        reschedule_count = reschedule_count + 1,
-        rescheduled_at = ?,
-        reminder_day_sent_at = NULL,
-        reminder_morning_sent_at = NULL,
-        end_of_day_review_sent_at = NULL,
-        updated_at = ?
-    WHERE id = ?
-  `);
-
-  stmt.run(finalDate, finalTime, finalStart, finalEnd, now, now, target.id);
+  if (companyId) {
+    const stmt = db.prepare(`
+      UPDATE appointments
+      SET date = ?,
+          time = ?,
+          scheduled_start = ?,
+          scheduled_end = ?,
+          status = 'CONFIRMED',
+          outcome = 'NONE',
+          needs_outcome_confirmation = 0,
+          reschedule_count = reschedule_count + 1,
+          rescheduled_at = ?,
+          reminder_day_sent_at = NULL,
+          reminder_morning_sent_at = NULL,
+          end_of_day_review_sent_at = NULL,
+          updated_at = ?
+      WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND company_phone = ?))
+    `);
+    stmt.run(finalDate, finalTime, finalStart, finalEnd, now, now, target.id, companyId, cleanPhone || '');
+  } else {
+    const stmt = db.prepare(`
+      UPDATE appointments
+      SET date = ?,
+          time = ?,
+          scheduled_start = ?,
+          scheduled_end = ?,
+          status = 'CONFIRMED',
+          outcome = 'NONE',
+          needs_outcome_confirmation = 0,
+          reschedule_count = reschedule_count + 1,
+          rescheduled_at = ?,
+          reminder_day_sent_at = NULL,
+          reminder_morning_sent_at = NULL,
+          end_of_day_review_sent_at = NULL,
+          updated_at = ?
+      WHERE id = ? AND company_phone = ?
+    `);
+    stmt.run(finalDate, finalTime, finalStart, finalEnd, now, now, target.id, cleanPhone);
+  }
 
   recordAuditLog({
-    businessId: cleanPhone,
+    businessId: companyId || cleanPhone,
     entityType: 'APPOINTMENT',
     entityId: target.id,
     action: 'RESCHEDULE',
@@ -1649,34 +1754,49 @@ export function rescheduleAppointment(phone, queryOrId, newDate, newTime, reason
     reason
   });
 
-  return { success: true, appointment: getAppointment(target.id) };
+  return { success: true, appointment: getAppointment(companyContextOrIdOrPhone, target.id) };
 }
 
 /**
- * Marca una o varias visitas como COMPLETED con su resultado.
+ * Marca una o varias visitas como COMPLETED con su resultado (tenant-scoped).
  */
-export function completeAppointments(phone, queriesOrIds = [], outcome = 'SUCCESSFUL', reason = 'Confirmación de visita realizada') {
-  const cleanPhone = String(phone).replace(/\D/g, '');
+export function completeAppointments(companyContextOrIdOrPhone, queriesOrIds = [], outcome = 'SUCCESSFUL', reason = 'Confirmación de visita realizada') {
+  if (!companyContextOrIdOrPhone) return { completed: [], notFound: queriesOrIds };
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
   const completed = [];
   const notFound = [];
   const now = new Date().toISOString();
 
   for (const q of queriesOrIds) {
-    const matches = findAppointments(cleanPhone, q);
+    const matches = findAppointments(companyContextOrIdOrPhone, q);
     if (matches.length === 1) {
       const apt = matches[0];
-      db.prepare(`
-        UPDATE appointments
-        SET status = 'COMPLETED',
-            outcome = ?,
-            completed_at = ?,
-            needs_outcome_confirmation = 0,
-            updated_at = ?
-        WHERE id = ?
-      `).run(outcome, now, now, apt.id);
+      if (companyId) {
+        db.prepare(`
+          UPDATE appointments
+          SET status = 'COMPLETED',
+              outcome = ?,
+              completed_at = ?,
+              needs_outcome_confirmation = 0,
+              updated_at = ?
+          WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND company_phone = ?))
+        `).run(outcome, now, now, apt.id, companyId, cleanPhone || '');
+      } else {
+        db.prepare(`
+          UPDATE appointments
+          SET status = 'COMPLETED',
+              outcome = ?,
+              completed_at = ?,
+              needs_outcome_confirmation = 0,
+              updated_at = ?
+          WHERE id = ? AND company_phone = ?
+        `).run(outcome, now, now, apt.id, cleanPhone);
+      }
 
       recordAuditLog({
-        businessId: cleanPhone,
+        businessId: companyId || cleanPhone,
         entityType: 'APPOINTMENT',
         entityId: apt.id,
         action: 'COMPLETE',
@@ -1687,7 +1807,7 @@ export function completeAppointments(phone, queriesOrIds = [], outcome = 'SUCCES
         reason
       });
 
-      completed.push(getAppointment(apt.id));
+      completed.push(getAppointment(companyContextOrIdOrPhone, apt.id));
     } else {
       notFound.push(q);
     }
@@ -1697,16 +1817,20 @@ export function completeAppointments(phone, queriesOrIds = [], outcome = 'SUCCES
 }
 
 /**
- * Modifica campos generales de una cita existente sin borrarla.
+ * Modifica campos generales de una cita existente sin borrarla (tenant-scoped).
  */
-export function updateAppointment(phone, query, changes = {}) {
-  if (!query && !changes) return null;
-  const cleanPhone = String(phone).replace(/\D/g, '');
-  const matches = findAppointments(cleanPhone, query);
+export function updateAppointment(companyContextOrIdOrPhone, query, changes = {}) {
+  if (!companyContextOrIdOrPhone || (!query && !changes)) return null;
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
+
+  const matches = findAppointments(companyContextOrIdOrPhone, query);
   if (matches.length === 0) return null;
   if (matches.length > 1) return { ambiguous: true, matches };
 
-  const row = getAppointment(matches[0].id);
+  const row = getAppointment(companyContextOrIdOrPhone, matches[0].id);
+  if (!row) return null;
   const now = new Date().toISOString();
 
   const newDate = changes.date || row.date;
@@ -1718,17 +1842,29 @@ export function updateAppointment(phone, query, changes = {}) {
   const newStart = toMadridIso(newDate, newTime);
   const newEnd = calculateDefaultEndTime(newDate, newTime, 60);
 
-  const updateStmt = db.prepare(`
-    UPDATE appointments
-    SET date = ?, time = ?, scheduled_start = ?, scheduled_end = ?,
-        client_address = ?, notes = ?, client_name = ?, client_phone = ?,
-        updated_at = ?
-    WHERE id = ?
-  `);
-  updateStmt.run(newDate, newTime, newStart, newEnd, newAddress, newNotes, newClientName, newClientPhone, now, row.id);
+  // Model injection defense: solo actualizar campos permitidos
+  if (companyId) {
+    const updateStmt = db.prepare(`
+      UPDATE appointments
+      SET date = ?, time = ?, scheduled_start = ?, scheduled_end = ?,
+          client_address = ?, notes = ?, client_name = ?, client_phone = ?,
+          updated_at = ?
+      WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND company_phone = ?))
+    `);
+    updateStmt.run(newDate, newTime, newStart, newEnd, newAddress, newNotes, newClientName, newClientPhone, now, row.id, companyId, cleanPhone || '');
+  } else {
+    const updateStmt = db.prepare(`
+      UPDATE appointments
+      SET date = ?, time = ?, scheduled_start = ?, scheduled_end = ?,
+          client_address = ?, notes = ?, client_name = ?, client_phone = ?,
+          updated_at = ?
+      WHERE id = ? AND company_phone = ?
+    `);
+    updateStmt.run(newDate, newTime, newStart, newEnd, newAddress, newNotes, newClientName, newClientPhone, now, row.id, cleanPhone);
+  }
 
   recordAuditLog({
-    businessId: cleanPhone,
+    businessId: companyId || cleanPhone,
     entityType: 'APPOINTMENT',
     entityId: row.id,
     action: 'UPDATE',
@@ -1739,33 +1875,47 @@ export function updateAppointment(phone, query, changes = {}) {
     reason: 'Modificación de detalles de visita'
   });
 
-  return getAppointment(row.id);
+  return getAppointment(companyContextOrIdOrPhone, row.id);
 }
 
 /**
- * Cancela una visita preservando el registro y la trazabilidad (Soft-cancel).
+ * Cancela una visita preservando el registro y la trazabilidad (Soft-cancel tenant-scoped).
  */
-export function cancelAppointment(phone, query, reason = 'Cancelación solicitada por usuario') {
-  if (!query) return null;
-  const cleanPhone = String(phone).replace(/\D/g, '');
-  const matches = findAppointments(cleanPhone, query);
+export function cancelAppointment(companyContextOrIdOrPhone, query, reason = 'Cancelación solicitada por usuario') {
+  if (!companyContextOrIdOrPhone || !query) return null;
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
+
+  const matches = findAppointments(companyContextOrIdOrPhone, query);
   if (matches.length === 0) return null;
   if (matches.length > 1) return { ambiguous: true, matches };
 
   const row = matches[0];
   const now = new Date().toISOString();
 
-  db.prepare(`
-    UPDATE appointments
-    SET status = 'CANCELLED',
-        cancelled_at = ?,
-        needs_outcome_confirmation = 0,
-        updated_at = ?
-    WHERE id = ?
-  `).run(now, now, row.id);
+  if (companyId) {
+    db.prepare(`
+      UPDATE appointments
+      SET status = 'CANCELLED',
+          cancelled_at = ?,
+          needs_outcome_confirmation = 0,
+          updated_at = ?
+      WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND company_phone = ?))
+    `).run(now, now, row.id, companyId, cleanPhone || '');
+  } else {
+    db.prepare(`
+      UPDATE appointments
+      SET status = 'CANCELLED',
+          cancelled_at = ?,
+          needs_outcome_confirmation = 0,
+          updated_at = ?
+      WHERE id = ? AND company_phone = ?
+    `).run(now, now, row.id, cleanPhone);
+  }
 
   recordAuditLog({
-    businessId: cleanPhone,
+    businessId: companyId || cleanPhone,
     entityType: 'APPOINTMENT',
     entityId: row.id,
     action: 'CANCEL',
@@ -1776,11 +1926,15 @@ export function cancelAppointment(phone, query, reason = 'Cancelación solicitad
     reason
   });
 
-  return getAppointment(row.id);
+  return getAppointment(companyContextOrIdOrPhone, row.id);
 }
 
-export function listAppointments(phone, filter = 'all') {
-  const cleanPhone = String(phone).replace(/\D/g, '');
+export function listAppointments(companyContextOrIdOrPhone, filter = 'all') {
+  if (!companyContextOrIdOrPhone) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
+
   const now = new Date();
   const todayStr = now.toISOString().split('T')[0];
 
@@ -1788,39 +1942,45 @@ export function listAppointments(phone, filter = 'all') {
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowStr = tomorrow.toISOString().split('T')[0];
 
+  const tenantFilter = companyId 
+    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
+    : "company_phone = ?";
+  const tenantParams = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
+
   let rows = [];
   if (filter === 'today') {
-    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date = ? AND status != 'CANCELLED' ORDER BY time ASC");
-    rows = stmt.all(cleanPhone, todayStr);
+    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND date = ? AND status != 'CANCELLED' ORDER BY time ASC`);
+    rows = stmt.all(...tenantParams, todayStr);
   } else if (filter === 'tomorrow') {
-    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date = ? AND status != 'CANCELLED' ORDER BY time ASC");
-    rows = stmt.all(cleanPhone, tomorrowStr);
+    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND date = ? AND status != 'CANCELLED' ORDER BY time ASC`);
+    rows = stmt.all(...tenantParams, tomorrowStr);
   } else if (filter === 'completed') {
-    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND status = 'COMPLETED' ORDER BY date DESC, time DESC");
-    rows = stmt.all(cleanPhone);
+    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND status = 'COMPLETED' ORDER BY date DESC, time DESC`);
+    rows = stmt.all(...tenantParams);
   } else if (filter === 'past') {
-    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND date < ? AND status != 'CANCELLED' ORDER BY date DESC, time DESC");
-    rows = stmt.all(cleanPhone, todayStr);
+    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND date < ? AND status != 'CANCELLED' ORDER BY date DESC, time DESC`);
+    rows = stmt.all(...tenantParams, todayStr);
   } else if (filter === 'pending_review') {
     const stmt = db.prepare(`
       SELECT * FROM appointments
-      WHERE company_phone = ?
+      WHERE ${tenantFilter}
         AND status = 'CONFIRMED'
         AND (needs_outcome_confirmation = 1 OR date <= ?)
       ORDER BY date ASC, time ASC
     `);
-    rows = stmt.all(cleanPhone, todayStr);
+    rows = stmt.all(...tenantParams, todayStr);
   } else if (filter === 'confirmed') {
-    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND status = 'CONFIRMED' ORDER BY date ASC, time ASC");
-    rows = stmt.all(cleanPhone);
+    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND status = 'CONFIRMED' ORDER BY date ASC, time ASC`);
+    rows = stmt.all(...tenantParams);
   } else {
     // 'all': Todas las visitas activas o no canceladas ordenadas cronológicamente
-    const stmt = db.prepare("SELECT * FROM appointments WHERE company_phone = ? AND status != 'CANCELLED' ORDER BY date ASC, time ASC");
-    rows = stmt.all(cleanPhone);
+    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND status != 'CANCELLED' ORDER BY date ASC, time ASC`);
+    rows = stmt.all(...tenantParams);
   }
 
   return rows.map(r => ({
     id: r.id,
+    companyId: r.company_id,
     companyPhone: r.company_phone,
     clientName: r.client_name,
     clientPhone: r.client_phone,
@@ -1841,22 +2001,43 @@ export function listAppointments(phone, filter = 'all') {
   }));
 }
 
-export function updateAppointmentStatus(id, status) {
-  if (!id) return;
+export function updateAppointmentStatus(companyContextOrIdOrPhone, id, status) {
+  // Verificación estricta de tenant context (3 argumentos requeridos)
+  if (status === undefined || !companyContextOrIdOrPhone || !id) {
+    console.warn("🛑 [Seguridad Tenant] updateAppointmentStatus invocado sin tenant context obligatorio.");
+    return;
+  }
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
   const now = new Date().toISOString();
-  const stmt = db.prepare('UPDATE appointments SET status = ?, updated_at = ? WHERE id = ?');
-  stmt.run(status, now, id);
+
+  if (companyId) {
+    const stmt = db.prepare(`
+      UPDATE appointments 
+      SET status = ?, updated_at = ? 
+      WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND company_phone = ?))
+    `);
+    stmt.run(status, now, id, companyId, cleanPhone || '');
+  } else if (cleanPhone) {
+    const stmt = db.prepare('UPDATE appointments SET status = ?, updated_at = ? WHERE id = ? AND company_phone = ?');
+    stmt.run(status, now, id, cleanPhone);
+  }
 }
 
-export function getAppointmentHistory(phone, appointmentId) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
+export function getAppointmentHistory(companyContextOrIdOrPhone, appointmentId) {
+  if (!companyContextOrIdOrPhone || !appointmentId) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
+
   return db.prepare(`
     SELECT * FROM audit_logs
-    WHERE business_id = ?
+    WHERE (business_id = ? OR business_id = ?)
       AND entity_type = 'APPOINTMENT'
       AND entity_id = ?
     ORDER BY timestamp ASC
-  `).all(cleanPhone, appointmentId).map(r => ({
+  `).all(companyId || cleanPhone, cleanPhone, appointmentId).map(r => ({
     id: r.id,
     businessId: r.business_id,
     entityType: r.entity_type,
@@ -2013,24 +2194,34 @@ export function getMonthlyRevenue(phoneOrCompany, year, month) {
  * @param {string} phone
  * @returns {Array<object>} - Lista de citas ordenadas cronologicamente
  */
-export function listAppointmentsWeek(phone) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
+export function listAppointmentsWeek(companyContextOrIdOrPhone) {
+  if (!companyContextOrIdOrPhone) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
   const now    = new Date();
   const todayStr  = now.toISOString().split('T')[0];
   const weekEnd   = new Date(now);
   weekEnd.setDate(weekEnd.getDate() + 7);
   const weekEndStr = weekEnd.toISOString().split('T')[0];
 
+  const tenantFilter = companyId 
+    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
+    : "company_phone = ?";
+  const tenantParams = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
+
   const rows = db.prepare(`
     SELECT * FROM appointments
-    WHERE company_phone = ?
+    WHERE ${tenantFilter}
       AND date >= ?
       AND date <= ?
     ORDER BY date ASC, time ASC
-  `).all(cleanPhone, todayStr, weekEndStr);
+  `).all(...tenantParams, todayStr, weekEndStr);
 
   return rows.map(r => ({
     id:            r.id,
+    companyId:     r.company_id,
+    companyPhone:  r.company_phone,
     clientName:    r.client_name,
     clientPhone:   r.client_phone,
     clientAddress: r.client_address,
@@ -2044,7 +2235,7 @@ export function listAppointmentsWeek(phone) {
  * Dashboard global rapido: combina deudas, citas de hoy, presupuestos pendientes
  * y resumen del mes en una sola consulta compuesta.
  * Usado por el Intent Router para "resumen" / "como estoy?" sin IA.
- * @param {string} phone
+ * @param {string|object} phoneOrCompany
  * @returns {{ totalDebt, debtCount, todayAppointments, pendingBudgets, monthlyStats }}
  */
 export function getDashboard(phoneOrCompany) {
@@ -2080,12 +2271,17 @@ export function getDashboard(phoneOrCompany) {
     totalDebt += remaining;
   }
 
-  // 2. Citas de hoy
+  // 2. Citas de hoy (tenant-scoped)
+  const aptTenantFilter = companyId 
+    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))" 
+    : "company_phone = ?";
+  const aptParams = companyId ? [companyId, cleanPhone || '', todayStr] : [cleanPhone, todayStr];
+
   const todayAppointments = db.prepare(`
     SELECT client_name, client_address, time FROM appointments
-    WHERE company_phone = ? AND date = ?
+    WHERE ${aptTenantFilter} AND date = ?
     ORDER BY time ASC
-  `).all(cleanPhone, todayStr).map(r => ({
+  `).all(...aptParams).map(r => ({
     clientName:    r.client_name,
     clientAddress: r.client_address,
     time:          r.time
@@ -2121,16 +2317,18 @@ export function getDashboard(phoneOrCompany) {
 
 // ─── Métodos de Lista de Compras y Materiales ────────────────────────────────
 
-export function addShoppingItems(phone, items, defaultClientContext = {}) {
-  const cleanPhone = String(phone || '').replace(/\D/g, '');
-  if (!items) return [];
+export function addShoppingItems(companyContextOrIdOrPhone, items, defaultClientContext = {}) {
+  if (!companyContextOrIdOrPhone || !items) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId || null;
+  const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
   const itemsList = Array.isArray(items) ? items : [items];
   const now = new Date().toISOString();
   const inserted = [];
 
   const stmt = db.prepare(`
-    INSERT INTO shopping_items (id, company_phone, client_name, budget_id, description, qty, unit, status, notes, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+    INSERT INTO shopping_items (id, company_id, company_phone, client_name, budget_id, description, qty, unit, status, notes, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
   `);
 
   for (const item of itemsList) {
@@ -2155,10 +2353,20 @@ export function addShoppingItems(phone, items, defaultClientContext = {}) {
 
     if (!description) continue;
 
+    // Si hay budgetId, validar que pertenezca al mismo tenant si es posible
+    if (budgetId && companyId) {
+      const bRow = db.prepare('SELECT company_id FROM budgets WHERE id = ?').get(budgetId);
+      if (bRow && bRow.company_id && bRow.company_id !== companyId) {
+        console.warn(`🛑 [Seguridad Tenant] Intento de asociar item de compra a presupuesto '${budgetId}' de otro tenant.`);
+        continue;
+      }
+    }
+
     const id = `MAT-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-    stmt.run(id, cleanPhone, clientName, budgetId, description, qty, unit, notes, now);
+    stmt.run(id, companyId, cleanPhone, clientName, budgetId, description, qty, unit, notes, now);
     inserted.push({
       id,
+      companyId,
       companyPhone: cleanPhone,
       clientName,
       budgetId,
@@ -2174,10 +2382,18 @@ export function addShoppingItems(phone, items, defaultClientContext = {}) {
   return inserted;
 }
 
-export function listShoppingItems(phone, filter = 'pending', clientQuery = null) {
-  const cleanPhone = String(phone || '').replace(/\D/g, '');
-  let query = 'SELECT * FROM shopping_items WHERE company_phone = ?';
-  const params = [cleanPhone];
+export function listShoppingItems(companyContextOrIdOrPhone, filter = 'pending', clientQuery = null) {
+  if (!companyContextOrIdOrPhone) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
+
+  const tenantFilter = companyId 
+    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
+    : "company_phone = ?";
+  const params = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
+
+  let query = `SELECT * FROM shopping_items WHERE ${tenantFilter}`;
 
   if (filter === 'pending') {
     query += " AND status = 'PENDING'";
@@ -2195,6 +2411,7 @@ export function listShoppingItems(phone, filter = 'pending', clientQuery = null)
   const rows = db.prepare(query).all(...params);
   return rows.map(r => ({
     id: r.id,
+    companyId: r.company_id,
     companyPhone: r.company_phone,
     clientName: r.client_name,
     budgetId: r.budget_id,
@@ -2208,18 +2425,25 @@ export function listShoppingItems(phone, filter = 'pending', clientQuery = null)
   }));
 }
 
-export function markShoppingItemBought(phone, queryOrId, clientQuery = null) {
-  const cleanPhone = String(phone || '').replace(/\D/g, '');
-  if (!queryOrId) return [];
+export function markShoppingItemBought(companyContextOrIdOrPhone, queryOrId, clientQuery = null) {
+  if (!companyContextOrIdOrPhone || !queryOrId) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
   const cleanQuery = String(queryOrId).trim().toLowerCase();
   const now = new Date().toISOString();
 
+  const tenantFilter = companyId 
+    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
+    : "company_phone = ?";
+  const params = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
+
   let sql = `
     SELECT * FROM shopping_items
-    WHERE company_phone = ? AND status = 'PENDING'
+    WHERE ${tenantFilter} AND status = 'PENDING'
       AND (id = ? OR LOWER(description) LIKE ?)
   `;
-  const params = [cleanPhone, queryOrId, `%${cleanQuery}%`];
+  params.push(queryOrId, `%${cleanQuery}%`);
 
   if (clientQuery && typeof clientQuery === 'string' && clientQuery.trim() !== '') {
     sql += " AND LOWER(client_name) LIKE ?";
@@ -2240,6 +2464,7 @@ export function markShoppingItemBought(phone, queryOrId, clientQuery = null) {
     updateStmt.run(now, r.id);
     updated.push({
       id: r.id,
+      companyId: r.company_id,
       companyPhone: r.company_phone,
       clientName: r.client_name,
       budgetId: r.budget_id,
@@ -2253,10 +2478,18 @@ export function markShoppingItemBought(phone, queryOrId, clientQuery = null) {
   return updated;
 }
 
-export function clearShoppingList(phone) {
-  const cleanPhone = String(phone || '').replace(/\D/g, '');
-  const stmt = db.prepare("DELETE FROM shopping_items WHERE company_phone = ?");
-  const result = stmt.run(cleanPhone);
+export function clearShoppingList(companyContextOrIdOrPhone) {
+  if (!companyContextOrIdOrPhone) return { deletedCount: 0 };
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone;
+
+  let result = { changes: 0 };
+  if (companyId) {
+    result = db.prepare("DELETE FROM shopping_items WHERE company_id = ? OR (company_id IS NULL AND company_phone = ?)").run(companyId, cleanPhone || '');
+  } else if (cleanPhone) {
+    result = db.prepare("DELETE FROM shopping_items WHERE company_phone = ?").run(cleanPhone);
+  }
   return { deletedCount: result.changes || 0 };
 }
 
@@ -2303,12 +2536,17 @@ export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
   const estimatedEndDate = workMemory.estimatedEndDate || null;
 
   // 4. Materiales asociados (por budgetId o por nombre de cliente)
+  const shopTenantFilter = companyId 
+    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
+    : "company_phone = ?";
+  const shopParams = companyId ? [companyId, cleanPhone || '', budgetId, clientName] : [cleanPhone, budgetId, clientName];
+
   const materialsRows = db.prepare(`
     SELECT id, description, qty, unit, status, created_at, bought_at
     FROM shopping_items
-    WHERE company_phone = ? AND (budget_id = ? OR LOWER(client_name) = LOWER(?))
+    WHERE ${shopTenantFilter} AND (budget_id = ? OR LOWER(client_name) = LOWER(?))
     ORDER BY created_at ASC
-  `).all(cleanPhone, budgetId, clientName);
+  `).all(...shopParams);
 
   const materialsBought = [];
   const materialsPending = [];
@@ -2578,11 +2816,18 @@ export function renameClientBudget(phone, budgetIdOrQuery, newNameWithBadge) {
   `).run(newName, parsed ? JSON.stringify(parsed) : budgetRow.data_json, now, budgetRow.id);
 
   // 2. Actualizar compras vinculadas (por budget_id o por nombre anterior de cliente)
+  const shopTenantFilter = budgetRow.company_id
+    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
+    : "company_phone = ?";
+  const shopParams = budgetRow.company_id
+    ? [newName, budgetRow.company_id, cleanPhone, budgetRow.id, oldName]
+    : [newName, cleanPhone, budgetRow.id, oldName];
+
   db.prepare(`
     UPDATE shopping_items
     SET client_name = ?
-    WHERE company_phone = ? AND (budget_id = ? OR client_name = ?)
-  `).run(newName, cleanPhone, budgetRow.id, oldName);
+    WHERE ${shopTenantFilter} AND (budget_id = ? OR client_name = ?)
+  `).run(...shopParams);
 
   // 3. Actualizar facturas vinculadas
   db.prepare(`
