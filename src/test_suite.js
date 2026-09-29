@@ -4333,6 +4333,248 @@ userSessions.delete(`${phoneHardA}@s.whatsapp.net`);
 userSessions.delete(`${phoneHardB}@s.whatsapp.net`);
 userSessions.delete(`${phoneAttacker}@s.whatsapp.net`);
 
+console.log("\nTEST 34: Fiscal Tenant Hardening & Adversarial Security (Fase 2D-H — Multi-Tenant Isolation & Model Injection Defense)");
+
+import {
+  resolveCompanyTenant,
+  resolveLegacyBusinessId,
+  getPurchaseInvoice,
+  deletePurchaseInvoice,
+  saveFiscalIncident,
+  resolveFiscalIncident
+} from './db_service.js';
+
+const phoneFiscalA = '34699554411';
+const phoneFiscalB = '34699554422';
+
+const cleanupTest34 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM purchase_invoices WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM expense_payments WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM investment_assets WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM business_tax_profiles WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM fiscal_periods WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM fiscal_incidents WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM audit_logs WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM invoices WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+
+cleanupTest34(phoneFiscalA);
+cleanupTest34(phoneFiscalB);
+
+const compFiscalA = createCompanyWithIdentity({
+  name: 'Instalaciones Alpha Fiscal S.L.',
+  phone: phoneFiscalA,
+  cif: null, // CIF null para verificar aislamiento físico de exportaciones ante colisión de SIN_CIF
+  trade: 'Electricidad'
+});
+const contextFiscalA = resolveAuthenticatedContext('whatsapp', phoneFiscalA);
+
+const compFiscalB = createCompanyWithIdentity({
+  name: 'Reformas Beta Fiscal S.L.',
+  phone: phoneFiscalB,
+  cif: null, // CIF null para verificar colisión
+  trade: 'Fontanería'
+});
+const contextFiscalB = resolveAuthenticatedContext('whatsapp', phoneFiscalB);
+
+// 1. Cross-tenant purchase invoice read: getPurchaseInvoice(tenantB, idA) devuelve null
+const invA34 = savePurchaseInvoice(contextFiscalA, {
+  id: 'REC-34-A01',
+  supplierName: 'Materiales Eléctricos A',
+  supplierTaxId: 'B-11111111',
+  taxBase: 500,
+  vatRate: 21,
+  totalAmount: 605,
+  issueDate: '2026-08-10'
+});
+
+const crossReadPinv = getPurchaseInvoice(contextFiscalB, 'REC-34-A01');
+assert(crossReadPinv === null, "1. Cross-Tenant Read: getPurchaseInvoice(tenantB, idA) devuelve null (Zero-Disclosure cross-tenant)");
+const legitReadPinv = getPurchaseInvoice(contextFiscalA, 'REC-34-A01');
+assert(legitReadPinv !== null && legitReadPinv.id === 'REC-34-A01', "1b. Lectura legítima: getPurchaseInvoice(tenantA, idA) recupera la factura de compra");
+
+// 2. Cross-tenant purchase invoice delete: deletePurchaseInvoice(tenantB, idA) devuelve false y permanece intacta
+const crossDeletePinv = deletePurchaseInvoice(contextFiscalB, 'REC-34-A01');
+assert(crossDeletePinv === false, "2. Cross-Tenant Delete: deletePurchaseInvoice(tenantB, idA) devuelve false y bloquea la eliminación");
+const verifyPinvIntact = currentDb.prepare("SELECT * FROM purchase_invoices WHERE id = ?").get('REC-34-A01');
+assert(verifyPinvIntact !== null && verifyPinvIntact.supplier_name === 'Materiales Eléctricos A', "2b. Integridad en SQLite: la factura de Tenant A permanece 100% intacta tras intento cross-tenant");
+
+// 3. Cross-tenant fiscal incident resolve: resolveFiscalIncident(tenantB, incA) devuelve false y permanece OPEN
+saveFiscalIncident(contextFiscalA, {
+  entityType: 'PURCHASE_INVOICE',
+  entityId: 'REC-34-A01',
+  errorCode: 'MISSING_DOC',
+  severity: 'WARNING',
+  message: 'Justificante pendiente'
+});
+const incidentsA = listFiscalIncidents(contextFiscalA);
+const incA = incidentsA.find(i => i.entity_id === 'REC-34-A01' || i.entityId === 'REC-34-A01');
+const incAId = incA ? (incA.id || incA.entity_id) : 'REC-34-A01';
+
+const crossResolveInc = resolveFiscalIncident(contextFiscalB, incAId);
+assert(crossResolveInc === false, "3. Cross-Tenant Incident: resolveFiscalIncident(tenantB, incA) devuelve false");
+const verifyIncOpen = currentDb.prepare("SELECT resolution_status FROM fiscal_incidents WHERE id = ?").get(incAId);
+assert(verifyIncOpen && verifyIncOpen.resolution_status === 'OPEN', "3b. Integridad Incidencia: la incidencia de Tenant A permanece OPEN tras intento cross-tenant");
+
+const legitResolveInc = resolveFiscalIncident(contextFiscalA, incAId);
+assert(legitResolveInc === true, "3c. Resolución legítima: resolveFiscalIncident(tenantA, incA) resuelve con éxito");
+const verifyIncResolved = currentDb.prepare("SELECT resolution_status FROM fiscal_incidents WHERE id = ?").get(incAId);
+assert(verifyIncResolved && verifyIncResolved.resolution_status === 'RESOLVED', "3d. Integridad Incidencia: estado pasa a RESOLVED para el tenant autorizado");
+
+// 4. Model Injection Defense: objeto malicioso emitido por IA con company_id / business_id de Beta
+const injectedAiPayload = {
+  company_id: compFiscalB.companyId,
+  companyId: compFiscalB.companyId,
+  businessId: phoneFiscalB,
+  business_id: phoneFiscalB,
+  id: 'REC-34-INJECT-01',
+  supplierName: 'Proveedor Inyección Maliciosa',
+  taxBase: 300,
+  vatRate: 21,
+  totalAmount: 363,
+  issueDate: '2026-08-12'
+};
+// Guardado ejecutado en sesión de Tenant A:
+savePurchaseInvoice(contextFiscalA, injectedAiPayload);
+const verifyInjectionNeutralized = currentDb.prepare("SELECT business_id FROM purchase_invoices WHERE id = ?").get('REC-34-INJECT-01');
+assert(verifyInjectionNeutralized.business_id === phoneFiscalA, "4. Model Injection: savePurchaseInvoice neutraliza businessId/companyId inyectados y fuerza el tenant autenticado de Alpha");
+
+// 5. Unauthenticated spoof defense: llamadas con contexto nulo/indefinido
+assert(getPurchaseInvoice(null, 'REC-34-A01') === null, "5a. Unauthenticated Spoof: getPurchaseInvoice(null) deniega acceso y retorna null");
+assert(deletePurchaseInvoice(null, 'REC-34-A01') === false, "5b. Unauthenticated Spoof: deletePurchaseInvoice(null) deniega eliminación y retorna false");
+assert(resolveFiscalIncident(null, incAId) === false, "5c. Unauthenticated Spoof: resolveFiscalIncident(null) deniega resolución y retorna false");
+
+// 6. resolveLegacyBusinessId verification
+const resByIdA = resolveLegacyBusinessId(compFiscalA.companyId);
+assert(resByIdA === phoneFiscalA, "6a. Resolver canónico: resolveLegacyBusinessId(UUID_A) retorna cleanPhone canónico");
+const resByContextA = resolveLegacyBusinessId({ companyId: compFiscalA.companyId });
+assert(resByContextA === phoneFiscalA, "6b. Resolver canónico: resolveLegacyBusinessId({ companyId: UUID_A }) retorna cleanPhone canónico");
+const resInvalidUuid = resolveLegacyBusinessId('00000000-0000-0000-0000-000000000000');
+assert(resInvalidUuid === null, "6c. Resolver canónico: UUID inexistente retorna null (Fail-Closed)");
+const resNull = resolveLegacyBusinessId(null);
+assert(resNull === null, "6d. Resolver canónico: contexto nulo retorna null");
+
+// 7. Modelo 303 isolation: getQuarterSummary solo computa facturas emitidas de su company_id
+currentDb.prepare(`
+  INSERT INTO invoices (id, company_id, company_phone, client_name, total_amount, status, data_json, fiscal_period, created_at)
+  VALUES (?, ?, ?, ?, ?, 'EMITIDA', ?, ?, ?)
+`).run(
+  'FAC-34-A01',
+  compFiscalA.companyId,
+  phoneFiscalA,
+  'Cliente Alpha 1',
+  1210,
+  JSON.stringify({
+    issueDate: '2026-08-15',
+    financials: { taxBase: 1000, taxRatePercentage: 21, taxAmount: 210, totalAmount: 1210 }
+  }),
+  '2026_Q3',
+  '2026-08-15T10:00:00.000Z'
+);
+
+currentDb.prepare(`
+  INSERT INTO invoices (id, company_id, company_phone, client_name, total_amount, status, data_json, fiscal_period, created_at)
+  VALUES (?, ?, ?, ?, ?, 'EMITIDA', ?, ?, ?)
+`).run(
+  'FAC-34-B01',
+  compFiscalB.companyId,
+  phoneFiscalB,
+  'Cliente Beta 1',
+  2420,
+  JSON.stringify({
+    issueDate: '2026-08-15',
+    financials: { taxBase: 2000, taxRatePercentage: 21, taxAmount: 420, totalAmount: 2420 }
+  }),
+  '2026_Q3',
+  '2026-08-15T10:00:00.000Z'
+);
+
+const summaryA34 = getQuarterSummary(contextFiscalA, 2026, 3);
+const summaryB34 = getQuarterSummary(contextFiscalB, 2026, 3);
+
+assert(summaryA34.summary.issuedCount === 1, "7a. Modelo 303 Isolation: Tenant A solo computa 1 factura emitida propia");
+assert(summaryA34.summary.issuedTaxBase === 1000, "7b. Modelo 303 Isolation: Base imponible de Tenant A es 1.000€ (sin contaminar con Beta)");
+assert(summaryA34.summary.issuedVatTotal === 210, "7c. Modelo 303 Isolation: IVA devengado de Tenant A es 210€");
+assert(summaryB34.summary.issuedCount === 1, "7d. Modelo 303 Isolation: Tenant B solo computa 1 factura emitida propia");
+assert(summaryB34.summary.issuedTaxBase === 2000, "7e. Modelo 303 Isolation: Base imponible de Tenant B es 2.000€");
+assert(summaryB34.summary.issuedVatTotal === 420, "7f. Modelo 303 Isolation: IVA devengado de Tenant B es 420€");
+
+// 8. Export collision defense: Dos empresas sin CIF generan Cierre_Fiscal_..._SINCIF.zip
+const pkgA = await buildGestoriaPackageZip(contextFiscalA, 2026, 3);
+const pkgB = await buildGestoriaPackageZip(contextFiscalB, 2026, 3);
+
+assert(path.basename(pkgA.zipPath) === pkgA.fileName && pkgA.fileName.startsWith('Cierre_Fiscal_2026_Q3_'), "8a. Export Collision: Nombre de archivo de exportación coincide con patrón oficial");
+assert(path.basename(pkgB.zipPath) === pkgB.fileName && pkgB.fileName.startsWith('Cierre_Fiscal_2026_Q3_'), "8b. Export Collision: Nombre de archivo de exportación de B coincide");
+assert(pkgA.zipPath !== pkgB.zipPath, "8c. Export Collision: Las rutas físicas de almacenamiento son distintas (aisladas por companyId)");
+assert(pkgA.zipPath.includes(compFiscalA.companyId), "8d. Export Collision: El archivo de Alpha reside dentro de su directorio data/fiscal_exports/<company_id>/");
+assert(pkgB.zipPath.includes(compFiscalB.companyId), "8e. Export Collision: El archivo de Beta reside dentro de su directorio data/fiscal_exports/<company_id>/");
+assert(fs.existsSync(pkgA.zipPath) && fs.existsSync(pkgB.zipPath), "8f. Export Collision: Ambos archivos coexisten simultáneamente en disco sin sobrescribirse");
+
+// Limpiar archivos físicos de exportación generados durante el test
+try {
+  if (fs.existsSync(pkgA.zipPath)) fs.unlinkSync(pkgA.zipPath);
+  if (fs.existsSync(pkgB.zipPath)) fs.unlinkSync(pkgB.zipPath);
+  const dirA = path.dirname(pkgA.zipPath);
+  const dirB = path.dirname(pkgB.zipPath);
+  if (fs.existsSync(dirA)) fs.rmdirSync(dirA);
+  if (fs.existsSync(dirB)) fs.rmdirSync(dirB);
+} catch (e) {}
+
+// 9. Tax profile isolation: saveTaxProfile y getTaxProfile
+saveTaxProfile(contextFiscalA, {
+  vatRegime: 'GENERAL',
+  defaultVatRate: 21,
+  irpfWithholdingApplicable: 1,
+  defaultIrpfRate: 15,
+  incomeTaxRegime: 'ESTIMACION_DIRECTA_SIMPLIFICADA'
+});
+
+saveTaxProfile(contextFiscalB, {
+  vatRegime: 'RECARGO_EQUIVALENCIA',
+  defaultVatRate: 10,
+  irpfWithholdingApplicable: 0,
+  defaultIrpfRate: 0,
+  incomeTaxRegime: 'OBJETIVA'
+});
+
+const profileA = getTaxProfile(contextFiscalA);
+const profileB = getTaxProfile(contextFiscalB);
+
+assert(profileA.vatRegime === 'GENERAL' && profileA.defaultIrpfRate === 15, "9a. Tax Profile Isolation: Perfil de Alpha mantiene su régimen General e IRPF 15%");
+assert(profileB.vatRegime === 'RECARGO_EQUIVALENCIA' && profileB.defaultIrpfRate === 0, "9b. Tax Profile Isolation: Perfil de Beta mantiene Recargo de Equivalencia");
+
+// 10. Fiscal period isolation: getOrCreateFiscalPeriod y updateFiscalPeriodStatus
+const periodA = getOrCreateFiscalPeriod(contextFiscalA, 2026, 4);
+const periodB = getOrCreateFiscalPeriod(contextFiscalB, 2026, 4);
+
+assert(periodA.status === 'OPEN', "10a. Fiscal Period: El periodo 4T 2026 de Alpha se inicializa en OPEN");
+assert(periodB.status === 'OPEN', "10b. Fiscal Period: El periodo 4T 2026 de Beta se inicializa en OPEN");
+
+updateFiscalPeriodStatus(contextFiscalB, 2026, 4, 'CLOSED');
+const periodAAfterBUpdate = currentDb.prepare("SELECT status FROM fiscal_periods WHERE business_id = ? AND fiscal_year = 2026 AND quarter = 4").get(phoneFiscalA);
+const periodBAfterBUpdate = currentDb.prepare("SELECT status FROM fiscal_periods WHERE business_id = ? AND fiscal_year = 2026 AND quarter = 4").get(phoneFiscalB);
+
+assert(periodBAfterBUpdate.status === 'CLOSED', "10c. Fiscal Period: El periodo de Beta pasa a CLOSED");
+assert(periodAAfterBUpdate.status === 'OPEN', "10d. Fiscal Period Isolation: El periodo de Alpha permanece en OPEN (inmune a mutaciones de Beta)");
+
+// 11. Integridad relacional y verificación de base de datos
+const fkCheck34 = currentDb.prepare('PRAGMA foreign_key_check').all();
+assert(fkCheck34.length === 0, "11a. Integridad: PRAGMA foreign_key_check 0 violaciones tras TEST 34");
+
+const integrityCheck34 = currentDb.prepare('PRAGMA integrity_check').get();
+assert(integrityCheck34.integrity_check === 'ok', "11b. Integridad: PRAGMA integrity_check confirma base de datos 100% íntegra (ok)");
+
+// Limpieza final de TEST 34
+cleanupTest34(phoneFiscalA);
+cleanupTest34(phoneFiscalB);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

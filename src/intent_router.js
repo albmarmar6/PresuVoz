@@ -24,6 +24,7 @@ import {
   listAppointmentsWeek,
   getDashboard,
   getCompany,
+  getCompanyById,
   saveCompany
 } from './db_service.js';
 
@@ -677,20 +678,21 @@ function formatDashboard(data) {
 export async function resolveIntent(intentResult, phone, session) {
   const { intent, params } = intentResult;
   const cleanPhone = String(phone).replace(/\D/g, '');
+  const tenantContext = session?.authContext || (session?.companyId ? { companyId: session.companyId, phone: cleanPhone } : cleanPhone);
 
   try {
     switch (intent) {
 
       case 'FISCAL_QUARTER_SUMMARY': {
         const { quarter, year } = params;
-        return formatQuarterWhatsAppSummary(cleanPhone, year, quarter);
+        return formatQuarterWhatsAppSummary(tenantContext, year, quarter);
       }
 
       case 'SEND_TO_GESTORIA': {
         const { quarter, year } = params;
-        const quarterData = getQuarterSummary(cleanPhone, year, quarter);
-        const company = getCompany(cleanPhone);
-        if (!company.gestoriaEmail) {
+        const quarterData = getQuarterSummary(tenantContext, year, quarter);
+        const company = session?.companyId ? getCompanyById(session.companyId) : getCompany(cleanPhone);
+        if (!company?.gestoriaEmail) {
           return '⚠️ *No tienes configurado el correo de tu gestoría.*\n\nEscribe *"mi gestoría es correo@ejemplo.com"* para registrarlo y poder enviar los libros oficiales.';
         }
         return `🔒 *Confirmación de seguridad requerida (Nivel C):*\n\nVas a enviar por correo electrónico el paquete oficial de cierre de *${quarterData.period.label}* a tu gestoría en *${company.gestoriaEmail}* con los libros de IVA, IRPF, incidencias y PDF.\n\nPor favor, responde *"CONFIRMAR"* para proceder o *"CANCELAR"* para descartar.`;

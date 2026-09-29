@@ -24,6 +24,9 @@ const ExcelJS = require('exceljs');
 import {
   db,
   getCompany,
+  getCompanyById,
+  resolveCompanyTenant,
+  resolveLegacyBusinessId,
   getTaxProfile,
   listPurchaseInvoices,
   listExpensePayments,
@@ -140,17 +143,31 @@ function round2(num) {
  * @param {number|null} quarter
  * @returns {object} Resumen determinístico completo
  */
-export function getQuarterSummary(businessId, year = null, quarter = null) {
-  const cleanId = String(businessId || '').replace(/\D/g, '');
+export function getQuarterSummary(companyContextOrIdOrBusinessId, year = null, quarter = null) {
+  if (!companyContextOrIdOrBusinessId) return null;
+
+  const tenant = resolveCompanyTenant(companyContextOrIdOrBusinessId);
+  const companyId = tenant?.companyId || null;
+  const cleanId = resolveLegacyBusinessId(companyContextOrIdOrBusinessId) || tenant?.phone || (typeof companyContextOrIdOrBusinessId === 'string' && !String(companyContextOrIdOrBusinessId).includes('-') ? String(companyContextOrIdOrBusinessId).replace(/\D/g, '') : null);
+
   const bounds = getFiscalPeriodBounds(year, quarter);
   const fiscalPeriodId = `${bounds.year}_Q${bounds.quarter}`;
 
-  // 1. Consultar facturas emitidas del periodo
-  const issuedRows = db.prepare(`
-    SELECT * FROM invoices
-    WHERE company_phone = ?
-    ORDER BY created_at ASC
-  `).all(cleanId);
+  // 1. Consultar facturas emitidas del periodo (priorizando company_id canónico)
+  let issuedRows = [];
+  if (companyId) {
+    issuedRows = db.prepare(`
+      SELECT * FROM invoices
+      WHERE company_id = ?
+      ORDER BY created_at ASC
+    `).all(companyId);
+  } else if (cleanId) {
+    issuedRows = db.prepare(`
+      SELECT * FROM invoices
+      WHERE company_phone = ?
+      ORDER BY created_at ASC
+    `).all(cleanId);
+  }
 
   const issuedInvoices = [];
   for (const row of issuedRows) {
@@ -251,7 +268,7 @@ export function getQuarterSummary(businessId, year = null, quarter = null) {
   }
 
   // 2. Consultar facturas recibidas / compras / gastos
-  const receivedInvoices = listPurchaseInvoices(cleanId, {
+  const receivedInvoices = listPurchaseInvoices(companyContextOrIdOrBusinessId, {
     fiscalPeriod: fiscalPeriodId,
     startDate: bounds.startDate,
     endDate: bounds.endDate
@@ -309,7 +326,7 @@ export function getQuarterSummary(businessId, year = null, quarter = null) {
   }
 
   // 3. Consultar Bienes de Inversión
-  const allAssets = listInvestmentAssets(cleanId);
+  const allAssets = listInvestmentAssets(companyContextOrIdOrBusinessId);
   const quarterAssets = allAssets.filter(a => {
     return (!a.purchase_date || (a.purchase_date >= bounds.startDate && a.purchase_date <= bounds.endDate));
   });
@@ -322,7 +339,7 @@ export function getQuarterSummary(businessId, year = null, quarter = null) {
   const tipoResultado303 = resultado303 > 0 ? 'A_INGRESAR' : (resultado303 < 0 ? 'A_COMPENSAR' : 'CERO');
 
   // Modelo 130 (IRPF Autónomos - Estimación Directa Simplificada, Orientativo)
-  const taxProfile = getTaxProfile(cleanId);
+  const taxProfile = getTaxProfile(companyContextOrIdOrBusinessId) || {};
   const ingresosComputables = round2(issuedTaxBase);
   // Gastos deducibles en IRPF: suma de bases imponibles deducibles
   const gastosDeduciblesIRPF = round2(
@@ -337,6 +354,7 @@ export function getQuarterSummary(businessId, year = null, quarter = null) {
   // 5. Devolución de estructura completa
   return {
     businessId: cleanId,
+    companyId: companyId,
     period: bounds,
     taxProfile,
     summary: {
@@ -419,9 +437,10 @@ export function getQuarterSummary(businessId, year = null, quarter = null) {
  * @param {number|null} quarter
  * @returns {object} { isValid, criticalCount, warningsCount, incidents }
  */
-export function runFiscalQualityChecks(businessId, year = null, quarter = null) {
-  const cleanId = String(businessId || '').replace(/\D/g, '');
-  const quarterData = getQuarterSummary(cleanId, year, quarter);
+export function runFiscalQualityChecks(companyContextOrId, year = null, quarter = null) {
+  if (!companyContextOrId) return { isValid: false, criticalCount: 0, warningsCount: 0, incidents: [] };
+  const quarterData = getQuarterSummary(companyContextOrId, year, quarter);
+  if (!quarterData) return { isValid: false, criticalCount: 0, warningsCount: 0, incidents: [] };
   const { period, invoices, purchaseInvoices } = quarterData;
   const fiscalPeriodId = `${period.year}_Q${period.quarter}`;
 
@@ -438,7 +457,7 @@ export function runFiscalQualityChecks(businessId, year = null, quarter = null) 
       message,
       resolutionStatus: 'OPEN'
     };
-    saveFiscalIncident(cleanId, inc);
+    saveFiscalIncident(companyContextOrId, inc);
     incidents.push(inc);
   }
 
@@ -537,7 +556,7 @@ export function runFiscalQualityChecks(businessId, year = null, quarter = null) 
   const isValid = criticalCount === 0;
 
   // Actualizar la tabla fiscal_periods
-  updateFiscalPeriodStatus(cleanId, period.year, period.quarter, isValid ? 'READY_FOR_GESTORIA' : 'HAS_INCIDENTS', {
+  updateFiscalPeriodStatus(companyContextOrId, period.year, period.quarter, isValid ? 'READY_FOR_GESTORIA' : 'HAS_INCIDENTS', {
     criticalCount,
     warningsCount,
     lastQualityCheckAt: new Date().toISOString()
@@ -569,10 +588,11 @@ export function runFiscalQualityChecks(businessId, year = null, quarter = null) 
  * @param {number|null} quarter
  * @returns {Promise<Buffer>} Buffer del archivo Excel
  */
-export async function generateNormalizedExcel(businessId, year = null, quarter = null) {
-  const cleanId = String(businessId || '').replace(/\D/g, '');
-  const quarterData = getQuarterSummary(cleanId, year, quarter);
-  const company = getCompany(cleanId);
+export async function generateNormalizedExcel(companyContextOrId, year = null, quarter = null) {
+  if (!companyContextOrId) throw new Error("❌ [Tenant Boundary] generateNormalizedExcel requiere tenant context obligatorio.");
+  const tenant = resolveCompanyTenant(companyContextOrId);
+  const company = tenant?.companyId ? getCompanyById(tenant.companyId) : getCompany(tenant?.phone);
+  const quarterData = getQuarterSummary(companyContextOrId, year, quarter);
   const { period, summary, invoices, purchaseInvoices, investmentAssets } = quarterData;
 
   const workbook = new ExcelJS.Workbook();
@@ -783,7 +803,7 @@ export async function generateNormalizedExcel(businessId, year = null, quarter =
   }
 
   // Pagos de facturas recibidas
-  const expensePayments = listExpensePayments(cleanId);
+  const expensePayments = listExpensePayments(companyContextOrId);
   for (const ep of expensePayments) {
     wsCash.addRow({
       type: 'PAGO',
@@ -863,16 +883,17 @@ export async function generateNormalizedExcel(businessId, year = null, quarter =
  * Genera el documento PDF formal de "Informe de Cierre Fiscal para Gestoría"
  * Estilo visual limpio y profesional de PresuVoz (paleta Slate y Emerald).
  *
- * @param {string} businessId
+ * @param {string|object} companyContextOrId
  * @param {number|null} year
  * @param {number|null} quarter
  * @returns {Promise<Buffer>} Buffer del documento PDF
  */
-export function generateGestoriaSummaryPDF(businessId, year = null, quarter = null) {
-  const cleanId = String(businessId || '').replace(/\D/g, '');
-  const quarterData = getQuarterSummary(cleanId, year, quarter);
-  const quality = runFiscalQualityChecks(cleanId, year, quarter);
-  const company = getCompany(cleanId);
+export function generateGestoriaSummaryPDF(companyContextOrId, year = null, quarter = null) {
+  if (!companyContextOrId) throw new Error("❌ [Tenant Boundary] generateGestoriaSummaryPDF requiere tenant context obligatorio.");
+  const tenant = resolveCompanyTenant(companyContextOrId);
+  const company = tenant?.companyId ? getCompanyById(tenant.companyId) : getCompany(tenant?.phone);
+  const quarterData = getQuarterSummary(companyContextOrId, year, quarter);
+  const quality = runFiscalQualityChecks(companyContextOrId, year, quarter);
   const { period, summary, taxProfile } = quarterData;
 
   return new Promise((resolve, reject) => {
@@ -1216,24 +1237,34 @@ export function generateReceivedInvoicesCSV(quarterData) {
  * Genera el paquete completo para la gestoría en formato ZIP:
  *  - Informe PDF oficial
  *  - Libro de Registro normalizado AEAT en Excel (XLSX)
+/**
+ * Empaqueta todos los entregables fiscales en un archivo .ZIP listo para enviar a la gestoría:
+ *  - Dossier oficial en PDF
+ *  - Libros de Registro AEAT en Excel (.xlsx) con fórmulas
  *  - Libro de Facturas Emitidas (CSV)
  *  - Libro de Facturas Recibidas y Gastos (CSV)
  *  - Informe de incidencias y auditoría de calidad (TXT)
  *  - Copias de justificantes / adjuntos si existen
  *
- * @param {string} businessId
+ * @param {string|object} companyContextOrId - Contexto tenant o ID
  * @param {number|null} year
  * @param {number|null} quarter
  * @returns {Promise<{ zipPath: string, fileName: string, zipBuffer: Buffer, quarterData: object, quality: object }>}
  */
-export async function buildGestoriaPackageZip(businessId, year = null, quarter = null) {
-  const cleanId = String(businessId || '').replace(/\D/g, '');
-  const quarterData = getQuarterSummary(cleanId, year, quarter);
-  const quality = runFiscalQualityChecks(cleanId, year, quarter);
-  const company = getCompany(cleanId);
+export async function buildGestoriaPackageZip(companyContextOrId, year = null, quarter = null) {
+  if (!companyContextOrId) throw new Error("❌ [Tenant Boundary] buildGestoriaPackageZip requiere tenant context obligatorio.");
+  const tenant = resolveCompanyTenant(companyContextOrId);
+  const company = (tenant?.companyId ? getCompanyById(tenant.companyId) : getCompany(tenant?.phone)) || {};
+  const legacyBusinessId = resolveLegacyBusinessId(companyContextOrId);
+  const companyId = tenant?.companyId || null;
+
+  const quarterData = getQuarterSummary(companyContextOrId, year, quarter);
+  if (!quarterData) throw new Error("❌ [Tenant Boundary] No se pudo obtener resumen fiscal del período.");
+  const quality = runFiscalQualityChecks(companyContextOrId, year, quarter);
   const { period } = quarterData;
 
-  const exportDir = path.resolve('data', 'fiscal_exports');
+  const tenantFolder = companyId || legacyBusinessId || 'unknown_tenant';
+  const exportDir = path.resolve('data', 'fiscal_exports', tenantFolder);
   if (!fs.existsSync(exportDir)) {
     fs.mkdirSync(exportDir, { recursive: true });
   }
@@ -1243,8 +1274,8 @@ export async function buildGestoriaPackageZip(businessId, year = null, quarter =
   const zipPath = path.join(exportDir, fileName);
 
   // Generar buffers de documentos
-  const pdfBuffer = await generateGestoriaSummaryPDF(cleanId, period.year, period.quarter);
-  const excelBuffer = await generateNormalizedExcel(cleanId, period.year, period.quarter);
+  const pdfBuffer = await generateGestoriaSummaryPDF(companyContextOrId, period.year, period.quarter);
+  const excelBuffer = await generateNormalizedExcel(companyContextOrId, period.year, period.quarter);
   const issuedCsv = generateIssuedInvoicesCSV(quarterData);
   const receivedCsv = generateReceivedInvoicesCSV(quarterData);
 
@@ -1301,14 +1332,14 @@ export async function buildGestoriaPackageZip(businessId, year = null, quarter =
   fs.writeFileSync(zipPath, zipBuffer);
 
   // Actualizar estado en la base de datos
-  updateFiscalPeriodStatus(cleanId, period.year, period.quarter, 'READY_FOR_GESTORIA', {
+  updateFiscalPeriodStatus(companyContextOrId, period.year, period.quarter, 'READY_FOR_GESTORIA', {
     packagePath: zipPath,
     lastQualityCheckAt: new Date().toISOString()
   });
 
   // Registrar auditoría
   recordAuditLog({
-    businessId: cleanId,
+    businessId: companyContextOrId,
     entityType: 'FISCAL_PERIOD',
     entityId: `${period.year}_Q${period.quarter}`,
     action: 'BUILD_PACKAGE',
@@ -1334,7 +1365,7 @@ export async function buildGestoriaPackageZip(businessId, year = null, quarter =
  * Realiza el envío del paquete completo a la gestoría vía Resend.
  * DEBE ejecutarse únicamente tras la confirmación explícita del usuario.
  *
- * @param {string} businessId
+ * @param {string|object} companyContextOrId
  * @param {number|null} year
  * @param {number|null} quarter
  * @param {object} resendInstance - Instancia de Resend
@@ -1343,13 +1374,16 @@ export async function buildGestoriaPackageZip(businessId, year = null, quarter =
  */
 export async function sendFiscalPackageToGestoria({
   businessId,
+  companyContextOrId = null,
   year = null,
   quarter = null,
   resendInstance = null,
   customEmail = null
 }) {
-  const cleanId = String(businessId || '').replace(/\D/g, '');
-  const company = getCompany(cleanId);
+  const context = companyContextOrId || businessId;
+  if (!context) throw new Error("❌ [Tenant Boundary] sendFiscalPackageToGestoria requiere tenant context obligatorio.");
+  const tenant = resolveCompanyTenant(context);
+  const company = (tenant?.companyId ? getCompanyById(tenant.companyId) : getCompany(tenant?.phone)) || {};
   const targetEmail = customEmail || company.gestoriaEmail;
 
   if (!targetEmail) {
@@ -1357,17 +1391,17 @@ export async function sendFiscalPackageToGestoria({
   }
 
   // Generar o recuperar el paquete ZIP
-  const { zipBuffer, pdfBuffer, fileName, quarterData, quality } = await buildGestoriaPackageZip(cleanId, year, quarter);
+  const { zipBuffer, pdfBuffer, fileName, quarterData, quality } = await buildGestoriaPackageZip(context, year, quarter);
   const { period, summary } = quarterData;
 
   if (!resendInstance) {
     // Si no hay API key de Resend en el entorno de pruebas, registramos el evento y devolvemos éxito simulado
     console.log(`[FiscalService] Simulación de envío a ${targetEmail} (Sin Resend API Key)`);
-    updateFiscalPeriodStatus(cleanId, period.year, period.quarter, 'SENT', {
+    updateFiscalPeriodStatus(context, period.year, period.quarter, 'SENT', {
       sentToEmail: targetEmail
     });
     recordAuditLog({
-      businessId: cleanId,
+      businessId: context,
       entityType: 'FISCAL_PERIOD',
       entityId: `${period.year}_Q${period.quarter}`,
       action: 'SEND_PACKAGE_GESTORIA',
@@ -1438,12 +1472,12 @@ export async function sendFiscalPackageToGestoria({
   });
 
   // Actualizar estado y registrar auditoría
-  updateFiscalPeriodStatus(cleanId, period.year, period.quarter, 'SENT', {
+  updateFiscalPeriodStatus(context, period.year, period.quarter, 'SENT', {
     sentToEmail: targetEmail
   });
 
   recordAuditLog({
-    businessId: cleanId,
+    businessId: context,
     entityType: 'FISCAL_PERIOD',
     entityId: `${period.year}_Q${period.quarter}`,
     action: 'SEND_PACKAGE_GESTORIA',
@@ -1466,16 +1500,18 @@ export async function sendFiscalPackageToGestoria({
  * Genera el resumen ejecutivo para WhatsApp cuando el usuario pregunta
  * "prepárame lo de la gestoría" o "¿cómo llevo el trimestre?".
  *
- * @param {string} businessId
+ * @param {string|object} companyContextOrId
  * @param {number|null} year
  * @param {number|null} quarter
  * @returns {string} Mensaje formateado para WhatsApp
  */
-export function formatQuarterWhatsAppSummary(businessId, year = null, quarter = null) {
-  const cleanId = String(businessId || '').replace(/\D/g, '');
-  const quarterData = getQuarterSummary(cleanId, year, quarter);
-  const quality = runFiscalQualityChecks(cleanId, year, quarter);
-  const company = getCompany(cleanId);
+export function formatQuarterWhatsAppSummary(companyContextOrId, year = null, quarter = null) {
+  if (!companyContextOrId) return '';
+  const tenant = resolveCompanyTenant(companyContextOrId);
+  const company = (tenant?.companyId ? getCompanyById(tenant.companyId) : getCompany(tenant?.phone)) || {};
+  const quarterData = getQuarterSummary(companyContextOrId, year, quarter);
+  if (!quarterData) return '';
+  const quality = runFiscalQualityChecks(companyContextOrId, year, quarter);
   const { period, summary, taxProfile } = quarterData;
 
   const fmtEur = num => `${Number(num || 0).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;

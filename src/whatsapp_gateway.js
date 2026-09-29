@@ -2863,11 +2863,12 @@ async function startWhatsAppGateway() {
     // 4.1 Factura de compra / gasto recibido (desde audio o texto interpretado por Gemini)
     if (aiResult?.action === 'purchase_invoice' && aiResult?.purchaseInvoiceInfo) {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const normalizedInvoice = validateAndNormalizePurchaseInvoice(aiResult.purchaseInvoiceInfo, cleanPhone);
-      const savedInvoice = savePurchaseInvoice(cleanPhone, normalizedInvoice);
+      const tenantContext = session.authContext || { companyId: session.companyId, phone: cleanPhone };
+      const normalizedInvoice = validateAndNormalizePurchaseInvoice(aiResult.purchaseInvoiceInfo, tenantContext);
+      const savedInvoice = savePurchaseInvoice(tenantContext, normalizedInvoice);
 
       if (normalizedInvoice.isInvestmentAsset) {
-        saveInvestmentAsset(cleanPhone, {
+        saveInvestmentAsset(tenantContext, {
           purchaseInvoiceId: savedInvoice.id,
           description: savedInvoice.description || savedInvoice.supplierName,
           purchaseDate: savedInvoice.issueDate,
@@ -2878,7 +2879,7 @@ async function startWhatsAppGateway() {
         });
       }
 
-      saveExpensePayment(cleanPhone, {
+      saveExpensePayment(tenantContext, {
         purchaseInvoiceId: savedInvoice.id,
         amount: savedInvoice.paidAmount,
         paymentDate: savedInvoice.issueDate,
@@ -3343,10 +3344,12 @@ async function startWhatsAppGateway() {
               { logger, reuploadRequest: sock.updateMediaMessage }
             );
 
-            // Guardar justificante en disco
-            const receiptsDir = path.resolve('data', 'purchase_receipts');
+            // Guardar justificante en disco aislado por tenant
+            const tenantContext = session.authContext || { companyId: session.companyId, phone: senderNumber };
+            const tenantFolder = session.companyId || senderNumber;
+            const receiptsDir = path.resolve('data', 'purchase_receipts', tenantFolder);
             if (!fs.existsSync(receiptsDir)) fs.mkdirSync(receiptsDir, { recursive: true });
-            const receiptPath = path.join(receiptsDir, `${senderNumber}_${Date.now()}.jpg`);
+            const receiptPath = path.join(receiptsDir, `${Date.now()}.jpg`);
             fs.writeFileSync(receiptPath, buffer);
 
             const rawExtraction = await parsePurchaseInvoiceWithGemini(
@@ -3354,12 +3357,12 @@ async function startWhatsAppGateway() {
               GEMINI_API_KEY
             );
 
-            const normalizedInvoice = validateAndNormalizePurchaseInvoice(rawExtraction, senderNumber, receiptPath);
-            const savedInvoice = savePurchaseInvoice(senderNumber, normalizedInvoice);
+            const normalizedInvoice = validateAndNormalizePurchaseInvoice(rawExtraction, tenantContext, receiptPath);
+            const savedInvoice = savePurchaseInvoice(tenantContext, normalizedInvoice);
 
             // Si es un bien de inversión (>3.005,06€), registrar automáticamente en inventario
             if (normalizedInvoice.isInvestmentAsset) {
-              saveInvestmentAsset(senderNumber, {
+              saveInvestmentAsset(tenantContext, {
                 purchaseInvoiceId: savedInvoice.id,
                 description: savedInvoice.description || savedInvoice.supplierName,
                 purchaseDate: savedInvoice.issueDate,
@@ -3371,7 +3374,7 @@ async function startWhatsAppGateway() {
             }
 
             // También registrar el pago del gasto
-            saveExpensePayment(senderNumber, {
+            saveExpensePayment(tenantContext, {
               purchaseInvoiceId: savedInvoice.id,
               amount: savedInvoice.paidAmount,
               paymentDate: savedInvoice.issueDate,
@@ -3580,8 +3583,10 @@ async function startWhatsAppGateway() {
 
           if (act.type === 'send_gestoria_package') {
             const phone = session.phone || String(remoteJid).replace(/\D/g, '');
+            const tenantContext = session.authContext || { companyId: session.companyId, phone };
             try {
               const res = await sendFiscalPackageToGestoria({
+                companyContextOrId: tenantContext,
                 businessId: phone,
                 year: act.data.year,
                 quarter: act.data.quarter,
@@ -3589,7 +3594,7 @@ async function startWhatsAppGateway() {
               });
 
               // También enviar el paquete ZIP y el informe PDF a WhatsApp para el profesional
-              const { zipBuffer, pdfBuffer, fileName } = await buildGestoriaPackageZip(phone, act.data.year, act.data.quarter);
+              const { zipBuffer, pdfBuffer, fileName } = await buildGestoriaPackageZip(tenantContext, act.data.year, act.data.quarter);
 
               const sentOk = await sock.sendMessage(remoteJid, {
                 text: `✅ *¡Paquete de Cierre Trimestral enviado con éxito!*\n\n📧 Se ha remitido el dossier completo a tu gestoría en *${res.targetEmail || session.company?.gestoriaEmail}*.\n\n📎 Te dejo aquí también una copia del ZIP oficial y el PDF para tu archivo personal:`
@@ -4131,8 +4136,9 @@ async function startWhatsAppGateway() {
               if (sentIntentMsg?.key?.id) botSentMessageIds.add(sentIntentMsg.key.id);
             }
             try {
+              const tenantContext = session.authContext || { companyId: session.companyId, phone: senderNumber };
               const { zipBuffer, pdfBuffer, fileName } = await buildGestoriaPackageZip(
-                senderNumber,
+                tenantContext,
                 detected.params.year,
                 detected.params.quarter
               );
