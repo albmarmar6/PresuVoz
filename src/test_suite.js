@@ -4346,6 +4346,8 @@ import {
   resolveLegacyBusinessId,
   getPurchaseInvoice,
   deletePurchaseInvoice,
+  getExpensePayment,
+  deleteExpensePayment,
   saveFiscalIncident,
   resolveFiscalIncident,
   getFiscalIncident,
@@ -5748,6 +5750,367 @@ assert(integrityResult39 && (integrityResult39.integrity_check === 'ok' || integ
 
 cleanupTest39(phonePiTenantA);
 cleanupTest39(phonePiTenantB);
+
+console.log("\nTEST 40: Migración Controlada de expense_payments a company_id (Fase 2E-4 — Backfill, Tenant Isolation & Relational Integrity)");
+
+// ─── A. MIGRATION 010: EJECUCIÓN Y REGISTRO ───
+// A1. migration 010 se registra correctamente en TEST con versión 10
+const schemaRow010 = currentDb.prepare("SELECT version, name, applied_at FROM schema_migrations WHERE version = 10").get();
+assert(schemaRow010 && schemaRow010.version === 10, "A1. Migración 010 registrada en schema_migrations con versión 10");
+assert(schemaRow010 && schemaRow010.name === '010_expense_payments_company_id', "A2. Nombre de migración 010 coincide exactamente");
+assert(schemaRow010 && typeof schemaRow010.applied_at === 'string' && schemaRow010.applied_at.length > 10, "A3. Migración 010 tiene timestamp applied_at válido");
+
+// A4 & A5. production sigue con máximo migration 006 (007, 008, 009 y 010 NO registradas)
+const prodDbFor010Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+const prodSchema010 = prodDbFor010Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
+const prodMaxVersion010 = prodDbFor010Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
+prodDbFor010Check.close();
+assert(prodSchema010.length === 0, "A4. DB de producción (data/presuvoz.db) NO tiene registradas las migraciones 007, 008, 009 ni 010");
+assert(prodMaxVersion010 === 6, "A5. Versión máxima en DB de producción permanece inalterada en 6");
+
+// A6 & A7. migrations 008 y 009 siguen intactas en test
+const schemaRow008In40 = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 8").get();
+const schemaRow009In40 = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 9").get();
+assert(schemaRow008In40 && schemaRow008In40.name === '008_fiscal_periods_company_id', "A6. Migración 008 permanece intacta en la base de datos de test");
+assert(schemaRow009In40 && schemaRow009In40.name === '009_purchase_invoices_company_id', "A7. Migración 009 permanece intacta en la base de datos de test");
+
+// ─── B. BACKFILL DETERMINISTA & CASOS FAIL-CLOSED ───
+// B1..B5. Memoria con datos existentes
+const memDb40B = new DatabaseSync(':memory:');
+initMigrationTable(memDb40B);
+runMigrations(memDb40B, { migrations: MIGRATIONS.slice(0, 9), authorized: true });
+
+// Insertar 2 empresas, sus facturas de compra y 3 pagos de gasto según esquema previo a 010
+memDb40B.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-ep-comp1', '34677220001', 'Empresa Pagos 1 S.L.'),
+    ('uuid-ep-comp2', '34677220002', 'Empresa Pagos 2 S.L.');
+  INSERT INTO purchase_invoices (
+    id, company_id, business_id, supplier_name, invoice_date,
+    taxable_base, vat_rate, vat_amount, total_amount, deductible_vat_amount, fiscal_period
+  ) VALUES
+    ('PINV-40-01', 'uuid-ep-comp1', '34677220001', 'Prov 1', '2026-07-01', 100, 21, 21, 121, 21, '2026_Q3'),
+    ('PINV-40-02', 'uuid-ep-comp2', '34677220002', 'Prov 2', '2026-07-02', 200, 21, 42, 242, 42, '2026_Q3');
+  INSERT INTO expense_payments (
+    id, purchase_invoice_id, business_id, amount, payment_date, payment_method, reference
+  ) VALUES
+    ('EXP-BF-01', 'PINV-40-01', '34677220001', 60.5, '2026-07-10', 'Transferencia', 'Pago parcial 1'),
+    ('EXP-BF-02', 'PINV-40-01', '34677220001', 60.5, '2026-07-20', 'Tarjeta', 'Pago parcial 2'),
+    ('EXP-BF-03', 'PINV-40-02', '34677220002', 242, '2026-07-15', 'Transferencia', 'Pago total');
+`);
+
+const migRes40 = runMigrations(memDb40B, { migrations: [MIGRATIONS[9]], authorized: true });
+assert(migRes40.appliedCount === 1, "B1. Migración 010 se aplica con éxito sobre base de datos con datos");
+
+const epRows40 = memDb40B.prepare("SELECT id, company_id, business_id, purchase_invoice_id, amount, payment_method, reference FROM expense_payments ORDER BY id ASC").all();
+assert(epRows40.length === 3, "B2. Recuento de filas se preserva exactamente tras migración (3 filas)");
+assert(epRows40[0].company_id === 'uuid-ep-comp1' && epRows40[0].business_id === '34677220001', "B3. Fila 1 migrada con company_id correcto de Empresa 1");
+assert(epRows40[1].company_id === 'uuid-ep-comp1' && epRows40[1].business_id === '34677220001', "B4. Fila 2 migrada con company_id correcto de Empresa 1");
+assert(epRows40[2].company_id === 'uuid-ep-comp2' && epRows40[2].business_id === '34677220002', "B5. Fila 3 migrada con company_id correcto de Empresa 2");
+
+// B6..B10. Rollback atómico ante pago huérfano
+const memDb40Rollback = new DatabaseSync(':memory:');
+initMigrationTable(memDb40Rollback);
+runMigrations(memDb40Rollback, { migrations: MIGRATIONS.slice(0, 9), authorized: true });
+
+memDb40Rollback.exec(`
+  INSERT INTO companies (id, phone, name) VALUES ('uuid-ep-comp-ok', '34677220001', 'Empresa OK');
+  INSERT INTO expense_payments (
+    id, purchase_invoice_id, business_id, amount, payment_date
+  ) VALUES
+    ('EXP-OK-01', 'PINV-ANY', '34677220001', 100, '2026-07-10'),
+    ('EXP-ORPHAN-01', 'PINV-ANY', '34699999999', 50, '2026-07-10');
+`);
+
+let caughtOrphan010 = false;
+let orphanErrMsg010 = '';
+try {
+  runMigrations(memDb40Rollback, { migrations: [MIGRATIONS[9]], authorized: true });
+} catch (err) {
+  caughtOrphan010 = true;
+  orphanErrMsg010 = err.message;
+}
+assert(caughtOrphan010 === true, "B6. Migración 010 aborta inmediatamente ante pago huérfano (fail-closed)");
+assert(orphanErrMsg010.includes('fail-closed') && orphanErrMsg010.includes('huérfano'), "B7. Error descriptivo fail-closed ante pago con business_id huérfano");
+
+// Verificar rollback atómico
+const schemaAfterFail010 = memDb40Rollback.prepare("SELECT * FROM schema_migrations WHERE version = 10").get();
+assert(!schemaAfterFail010, "B8. Rollback atómico: Versión 10 NO queda registrada en schema_migrations");
+
+const colsAfterFail010 = memDb40Rollback.prepare('PRAGMA table_info("expense_payments")').all();
+assert(!colsAfterFail010.some(c => c.name === 'company_id'), "B9. Rollback atómico: La tabla expense_payments queda exactamente como estaba");
+
+const tempTableCheck010 = memDb40Rollback.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='expense_payments_new'").get();
+assert(!tempTableCheck010, "B10. Rollback atómico: No quedan tablas temporales (expense_payments_new)");
+
+// B11..B12. Fallo ante ambigüedad de companies con el mismo teléfono
+const memDb40Ambig = new DatabaseSync(':memory:');
+initMigrationTable(memDb40Ambig);
+runMigrations(memDb40Ambig, { migrations: MIGRATIONS.slice(0, 9), authorized: true });
+memDb40Ambig.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-ep-ambig-1', '34677000099', 'Empresa Ambigua 1'),
+    ('uuid-ep-ambig-2', '+34 677 00 00 99', 'Empresa Ambigua 2');
+  INSERT INTO expense_payments (
+    id, purchase_invoice_id, business_id, amount, payment_date
+  ) VALUES
+    ('EXP-AMBIG-01', 'PINV-X', '34677000099', 100, '2026-07-10');
+`);
+let caughtAmbig010 = false;
+try {
+  runMigrations(memDb40Ambig, { migrations: [MIGRATIONS[9]], authorized: true });
+} catch (err) {
+  caughtAmbig010 = true;
+  assert(err.message.includes('Ambigüedad crítica'), "B11. Fail-closed: Múltiples empresas ambiguas provocan aborto y rollback");
+}
+assert(caughtAmbig010 === true, "B12. Migración 010 aborta ante ambigüedad en companies");
+
+// B13..B14. Fallo ante inconsistencia cross-tenant entre pago y factura
+const memDb40CrossTenant = new DatabaseSync(':memory:');
+initMigrationTable(memDb40CrossTenant);
+runMigrations(memDb40CrossTenant, { migrations: MIGRATIONS.slice(0, 9), authorized: true });
+memDb40CrossTenant.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-ep-cross-1', '34677330001', 'Empresa Alpha'),
+    ('uuid-ep-cross-2', '34677330002', 'Empresa Beta');
+  INSERT INTO purchase_invoices (
+    id, company_id, business_id, supplier_name, invoice_date,
+    taxable_base, vat_rate, vat_amount, total_amount, deductible_vat_amount, fiscal_period
+  ) VALUES
+    ('PINV-BETA-01', 'uuid-ep-cross-2', '34677330002', 'Prov Beta', '2026-07-01', 100, 21, 21, 121, 21, '2026_Q3');
+  INSERT INTO expense_payments (
+    id, purchase_invoice_id, business_id, amount, payment_date
+  ) VALUES
+    ('EXP-CROSS-01', 'PINV-BETA-01', '34677330001', 121, '2026-07-02');
+`);
+let caughtCrossTenant010 = false;
+try {
+  runMigrations(memDb40CrossTenant, { migrations: [MIGRATIONS[9]], authorized: true });
+} catch (err) {
+  caughtCrossTenant010 = true;
+  assert(err.message.includes('Inconsistencia cross-tenant'), "B13. Fail-closed: Inconsistencia cross-tenant entre pago y factura provoca aborto");
+}
+assert(caughtCrossTenant010 === true, "B14. Migración 010 aborta ante inconsistencia cross-tenant");
+
+// ─── C. PRESERVACIÓN DE DATOS DOCUMENTALES ───
+assert(epRows40[0].purchase_invoice_id === 'PINV-40-01', "C1. purchase_invoice_id preservado intacto ('PINV-40-01')");
+assert(epRows40[0].amount === 60.5, "C2. amount preservado intacto (60.5€)");
+assert(epRows40[0].payment_method === 'Transferencia', "C3. payment_method preservado intacto ('Transferencia')");
+assert(epRows40[0].reference === 'Pago parcial 1', "C4. reference preservado intacto ('Pago parcial 1')");
+
+// ─── D. AISLAMIENTO MULTI-TENANT EN TEST DB ───
+const phoneEpTenantA = '34677331101';
+const phoneEpTenantB = '34677331102';
+
+const cleanupTest40 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM expense_payments WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM purchase_invoices WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM investment_assets WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM business_tax_profiles WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_periods WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_incidents WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM audit_logs WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM invoices WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+
+cleanupTest40(phoneEpTenantA);
+cleanupTest40(phoneEpTenantB);
+
+const compEpA = createCompanyWithIdentity({
+  name: 'Empresa Alpha Clima S.L.',
+  phone: phoneEpTenantA,
+  trade: 'Climatización'
+});
+const contextEpA = resolveAuthenticatedContext('whatsapp', phoneEpTenantA);
+
+const compEpB = createCompanyWithIdentity({
+  name: 'Empresa Beta Pinturas S.L.',
+  phone: phoneEpTenantB,
+  trade: 'Pintura'
+});
+const contextEpB = resolveAuthenticatedContext('whatsapp', phoneEpTenantB);
+
+// Crear facturas recibidas legítimas para cada tenant
+const invA40 = savePurchaseInvoice(contextEpA, {
+  id: 'REC-40-A01',
+  supplierName: 'Material Clima A',
+  taxBase: 1000,
+  vatRate: 21,
+  totalAmount: 1210,
+  issueDate: '2026-08-10'
+});
+const invB40 = savePurchaseInvoice(contextEpB, {
+  id: 'REC-40-B01',
+  supplierName: 'Pinturas Pro B',
+  taxBase: 500,
+  vatRate: 21,
+  totalAmount: 605,
+  issueDate: '2026-08-11'
+});
+
+// D1 & D2. Cada tenant registra su pago de gasto
+const payA40 = saveExpensePayment(contextEpA, {
+  id: 'EXP-40-A01',
+  purchaseInvoiceId: 'REC-40-A01',
+  amount: 1210,
+  paymentDate: '2026-08-10',
+  paymentMethod: 'Transferencia',
+  reference: 'Pago factura Clima'
+});
+assert(payA40 && payA40.id === 'EXP-40-A01', "D1. saveExpensePayment de Tenant A registra su pago");
+
+const payB40 = saveExpensePayment(contextEpB, {
+  id: 'EXP-40-B01',
+  purchaseInvoiceId: 'REC-40-B01',
+  amount: 605,
+  paymentDate: '2026-08-11',
+  paymentMethod: 'Tarjeta',
+  reference: 'Pago pintura B'
+});
+assert(payB40 && payB40.id === 'EXP-40-B01', "D2. saveExpensePayment de Tenant B registra su pago");
+
+// D3. Cross-Tenant Read: getExpensePayment(contextB, idA) devuelve null
+const crossReadAfromB_40 = getExpensePayment(contextEpB, 'EXP-40-A01');
+assert(crossReadAfromB_40 === null, "D3. Cross-Tenant Read: getExpensePayment(tenantB, idA) devuelve null (Zero-Disclosure)");
+
+// D4. Cross-Tenant Read: getExpensePayment(contextA, idB) devuelve null
+const crossReadBfromA_40 = getExpensePayment(contextEpA, 'EXP-40-B01');
+assert(crossReadBfromA_40 === null, "D4. Cross-Tenant Read: getExpensePayment(tenantA, idB) devuelve null (Zero-Disclosure)");
+
+// D5. Lectura legítima de Tenant A
+const legitReadA_40 = getExpensePayment(contextEpA, 'EXP-40-A01');
+assert(legitReadA_40 !== null && legitReadA_40.id === 'EXP-40-A01' && legitReadA_40.companyId === compEpA.companyId, "D5. Lectura legítima: getExpensePayment(tenantA, idA) recupera su pago");
+
+// D6. Lectura legítima de Tenant B
+const legitReadB_40 = getExpensePayment(contextEpB, 'EXP-40-B01');
+assert(legitReadB_40 !== null && legitReadB_40.id === 'EXP-40-B01' && legitReadB_40.companyId === compEpB.companyId, "D6. Lectura legítima: getExpensePayment(tenantB, idB) recupera su pago");
+
+// D7. Cross-Tenant Delete: deleteExpensePayment(tenantA, idB) devuelve false
+const crossDeleteBfromA_40 = deleteExpensePayment(contextEpA, 'EXP-40-B01');
+assert(crossDeleteBfromA_40 === false, "D7. Cross-Tenant Delete: deleteExpensePayment(tenantA, idB) devuelve false");
+
+// D8. Pago de Tenant B permanece intacto tras intento cross-tenant
+const verifyEpBIntact_40 = currentDb.prepare("SELECT * FROM expense_payments WHERE id = ?").get('EXP-40-B01');
+assert(verifyEpBIntact_40 !== null && verifyEpBIntact_40.company_id === compEpB.companyId, "D8. Pago de Tenant B permanece 100% intacto en SQLite");
+
+// D9. listExpensePayments(contextA) solo retorna pagos de Tenant A
+const listEpA = listExpensePayments(contextEpA);
+assert(listEpA.every(p => p.companyId === compEpA.companyId) && listEpA.some(p => p.id === 'EXP-40-A01'), "D9. listExpensePayments(contextA) solo retorna pagos del Tenant A");
+
+// D10. listExpensePayments(contextB) solo retorna pagos de Tenant B
+const listEpB = listExpensePayments(contextEpB);
+assert(listEpB.every(p => p.companyId === compEpB.companyId) && listEpB.some(p => p.id === 'EXP-40-B01'), "D10. listExpensePayments(contextB) solo retorna pagos del Tenant B");
+
+// D11. Intento de asociar pago a factura de otro tenant es bloqueado
+const crossTenantPayAttempt = saveExpensePayment(contextEpA, {
+  id: 'EXP-CROSS-ATTEMPT',
+  purchaseInvoiceId: 'REC-40-B01', // Factura de Tenant B
+  amount: 100,
+  paymentDate: '2026-08-12'
+});
+assert(crossTenantPayAttempt === null, "D11. Intento de asociar pago a factura de otro tenant es bloqueado (retorna null)");
+
+// ─── E. INYECCIÓN DE MODELO (DEFENSA FAIL-CLOSED) ───
+// E1..E4. Gemini spoofing company_id / business_id en payload es neutralizado
+const maliciousAiExpensePayment = {
+  id: 'EXP-40-INJECT-01',
+  companyId: compEpB.companyId,
+  company_id: compEpB.companyId,
+  businessId: phoneEpTenantB,
+  business_id: phoneEpTenantB,
+  purchaseInvoiceId: 'REC-40-A01',
+  amount: 250,
+  paymentDate: '2026-08-15',
+  paymentMethod: 'Efectivo',
+  reference: 'Inyección maliciosa'
+};
+const savedInjected_40 = saveExpensePayment(contextEpA, maliciousAiExpensePayment);
+assert(savedInjected_40.companyId === compEpA.companyId, "E1. Modelo injection defendida: companyId de A se mantiene como autoridad");
+assert(savedInjected_40.businessId === phoneEpTenantA, "E2. Modelo injection defendida: businessId de A se mantiene sincronizado con phoneA");
+
+const verifyInjectedEpInDb = currentDb.prepare("SELECT company_id, business_id FROM expense_payments WHERE id = ?").get('EXP-40-INJECT-01');
+assert(verifyInjectedEpInDb.company_id === compEpA.companyId && verifyInjectedEpInDb.business_id === phoneEpTenantA, "E3. En SQLite, el pago inyectado pertenece legítimamente a Tenant A");
+
+const readInjectedEpFromB = getExpensePayment(contextEpB, 'EXP-40-INJECT-01');
+assert(readInjectedEpFromB === null, "E4. Tenant B permanece completamente protegido contra payload spoofed");
+
+// ─── F. ROBUSTEZ DE UUID v4 ───
+assert(isUuid(savedInjected_40.companyId), "F1. companyId retornado es un UUID v4 canónico");
+assert(savedInjected_40.companyId.length === 36 && savedInjected_40.companyId.includes('-'), "F2. companyId tiene formato UUID con guiones intactos (36 caracteres)");
+
+const sqliteRowEpA = currentDb.prepare("SELECT company_id FROM expense_payments WHERE id = ?").get('EXP-40-A01');
+assert(sqliteRowEpA && sqliteRowEpA.company_id === compEpA.companyId, "F3. SQLite almacena el UUID con guiones intactos sin regex stripping");
+
+// ─── G. CLAVE FORÁNEA & ON DELETE RESTRICT ───
+// G1. Inserción con company_id inexistente lanza FK constraint violation
+let caughtFkInexistenteEp = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO expense_payments (id, company_id, purchase_invoice_id, business_id, amount, payment_date)
+    VALUES ('fake-id-ep', '00000000-0000-4000-8000-000000000099', 'PINV-ANY', '34600999999', 50, '2026-08-01');
+  `).run();
+} catch (err) {
+  caughtFkInexistenteEp = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "G1. Violación de Foreign Key hacia companies(id) detectada");
+}
+assert(caughtFkInexistenteEp === true, "G2. SQLite rechaza inserción en expense_payments con company inexistente");
+
+// G3. Inserción con company_id NULL es rechazada
+let caughtNullCidEp = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO expense_payments (id, company_id, purchase_invoice_id, business_id, amount, payment_date)
+    VALUES ('fake-id-ep2', NULL, 'PINV-ANY', '34600999999', 50, '2026-08-01');
+  `).run();
+} catch (err) {
+  caughtNullCidEp = true;
+  assert(err.message.includes('NOT NULL constraint failed'), "G3. NOT NULL constraint en company_id detectada");
+}
+assert(caughtNullCidEp === true, "G4. Inserción con company_id NULL es rechazada");
+
+// G5. ON DELETE RESTRICT previene el borrado de empresa con historial de pagos
+let caughtRestrictDeleteEp = false;
+try {
+  currentDb.prepare("DELETE FROM companies WHERE id = ?").run(compEpB.companyId);
+} catch (err) {
+  caughtRestrictDeleteEp = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "G5. ON DELETE RESTRICT previene el borrado de empresa con historial de pagos");
+}
+assert(caughtRestrictDeleteEp === true, "G6. La empresa no puede ser eliminada mientras tenga registros en expense_payments");
+
+// ─── H. COMPATIBILIDAD HACIA ATRÁS (LEGACY ADAPTER & DUAL-WRITE) ───
+// H1. getExpensePayment(phone) funciona vía legacy adapter
+const legacyReadEpA = getExpensePayment(phoneEpTenantA, 'EXP-40-A01');
+assert(legacyReadEpA !== null && legacyReadEpA.companyId === compEpA.companyId, "H1. getExpensePayment(phone) funciona vía legacy adapter");
+
+// H2. listExpensePayments(phone) funciona vía legacy adapter
+const legacyListEpA = listExpensePayments(phoneEpTenantA);
+assert(legacyListEpA.length >= 1 && legacyListEpA.some(p => p.id === 'EXP-40-A01'), "H2. listExpensePayments(phone) funciona vía legacy adapter");
+
+// H3. saveExpensePayment(phone) actualiza y mantiene dual-write sincronizado
+saveExpensePayment(phoneEpTenantA, {
+  id: 'EXP-40-A01',
+  reference: 'Referencia actualizada vía legacy adapter'
+});
+const updatedLegacyEpA = getExpensePayment(compEpA.companyId, 'EXP-40-A01');
+assert(updatedLegacyEpA.reference === 'Referencia actualizada vía legacy adapter', "H3. saveExpensePayment(phone) actualiza correctamente la fila");
+assert(updatedLegacyEpA.companyId === compEpA.companyId && updatedLegacyEpA.businessId === phoneEpTenantA, "H4. Dual-write preservado: company_id y business_id sincronizados");
+
+// ─── I. INTEGRIDAD RELACIONAL FINAL ───
+const fkViolations40 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult40 = currentDb.prepare("PRAGMA integrity_check;").get();
+assert(fkViolations40.length === 0, "I1. PRAGMA foreign_key_check = 0 violaciones en base de datos de test");
+assert(integrityResult40 && (integrityResult40.integrity_check === 'ok' || integrityResult40.integrity_check === 'OK'), "I2. PRAGMA integrity_check = ok en base de datos de test");
+
+cleanupTest40(phoneEpTenantA);
+cleanupTest40(phoneEpTenantB);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

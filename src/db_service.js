@@ -3748,48 +3748,251 @@ export function deletePurchaseInvoice(companyContextOrId, id) {
 }
 
 /**
- * Registra un pago de gasto/compra (desacoplamiento de pagos)
+ * Registra o actualiza un pago de gasto/compra (desacoplamiento de pagos)
+ * 
+ * Tenant Hardening & Dual-Write:
+ * - Requiere companyId (UUID) o authenticatedContext como autoridad canónica.
+ * - Soporta adapter transitorio por teléfono legacy para compañías existentes.
+ * - Inyección de modelo: cualquier company_id o business_id dentro de p es ignorado.
+ * - Dual-write: escribe company_id como autoridad y mantiene business_id sincronizado.
+ * - Validación relacional: Si purchaseInvoiceId pertenece a otro tenant, bloquea en fail-closed.
  */
 export function saveExpensePayment(companyContextOrId, p = {}) {
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) {
+  if (!companyContextOrId) {
     throw new Error("❌ [Tenant Boundary] saveExpensePayment requiere un companyId o contexto autenticado obligatorio.");
   }
-  const id = p.id || `EXP-PAY-${Date.now()}`;
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
+    throw new Error("❌ [Tenant Boundary] saveExpensePayment: no se pudo resolver un tenant válido.");
+  }
+  const { companyId, phone: cleanPhone } = tenant;
+
+  // Defensa contra inyección: Ignorar company_id y business_id provistos en payload del modelo
+  const {
+    companyId: _ignoredCid,
+    company_id: _ignoredCid2,
+    businessId: _ignoredBid,
+    business_id: _ignoredBid2,
+    companyPhone: _ignoredPhone1,
+    company_phone: _ignoredPhone2,
+    phone: _ignoredPhone3,
+    ...safeP
+  } = p;
+
+  const id = safeP.id || `EXP-PAY-${Date.now()}`;
+  const purchaseInvoiceId = safeP.purchaseInvoiceId || safeP.purchase_invoice_id || '';
+
+  const cols = db.prepare('PRAGMA table_info("expense_payments")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  // Comprobar existencia y tenant en caso de actualización
+  if (safeP.id) {
+    if (hasCompanyIdCol) {
+      const existing = db.prepare('SELECT company_id, business_id FROM expense_payments WHERE id = ?').get(safeP.id);
+      if (existing && existing.company_id !== companyId) {
+        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar pago de gasto ${safeP.id} de otro tenant.`);
+        return null;
+      }
+    } else {
+      const existing = db.prepare('SELECT business_id FROM expense_payments WHERE id = ?').get(safeP.id);
+      if (existing && existing.business_id !== cleanPhone) {
+        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar pago de gasto ${safeP.id} de otro tenant.`);
+        return null;
+      }
+    }
+  }
+
+  // Validación relacional: Si la factura de compra asociada existe, asegurar que pertenece al mismo tenant
+  if (purchaseInvoiceId) {
+    const pinvCols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
+    const pinvHasCompanyId = pinvCols.some(c => c.name === 'company_id');
+    if (pinvHasCompanyId) {
+      const pinv = db.prepare('SELECT company_id FROM purchase_invoices WHERE id = ?').get(purchaseInvoiceId);
+      if (pinv && pinv.company_id !== companyId) {
+        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de asociar pago ${id} a factura ${purchaseInvoiceId} de otro tenant.`);
+        return null;
+      }
+    }
+  }
+
   const now = new Date().toISOString();
+  const paymentDate = safeP.paymentDate || safeP.payment_date || now.split('T')[0];
+  const amount = Number(safeP.amount || 0);
+  const paymentMethod = safeP.paymentMethod || safeP.payment_method || 'Transferencia';
+  const reference = safeP.reference || null;
 
-  const stmt = db.prepare(`
-    INSERT INTO expense_payments (id, purchase_invoice_id, business_id, amount, payment_date, payment_method, reference, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+  if (hasCompanyIdCol) {
+    const stmt = db.prepare(`
+      INSERT INTO expense_payments (
+        id, company_id, purchase_invoice_id, business_id, amount,
+        payment_date, payment_method, reference, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        company_id = excluded.company_id,
+        purchase_invoice_id = excluded.purchase_invoice_id,
+        business_id = excluded.business_id,
+        amount = excluded.amount,
+        payment_date = excluded.payment_date,
+        payment_method = excluded.payment_method,
+        reference = excluded.reference
+    `);
 
-  stmt.run(
-    id,
-    p.purchaseInvoiceId || '',
-    cleanId,
-    Number(p.amount || 0),
-    p.paymentDate || now.split('T')[0],
-    p.paymentMethod || 'Transferencia',
-    p.reference || null,
-    now
-  );
+    stmt.run(
+      id,
+      companyId,
+      purchaseInvoiceId,
+      cleanPhone,
+      amount,
+      paymentDate,
+      paymentMethod,
+      reference,
+      now
+    );
+  } else {
+    // Compatibilidad pre-migración 010
+    const stmt = db.prepare(`
+      INSERT INTO expense_payments (
+        id, purchase_invoice_id, business_id, amount,
+        payment_date, payment_method, reference, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        purchase_invoice_id = excluded.purchase_invoice_id,
+        business_id = excluded.business_id,
+        amount = excluded.amount,
+        payment_date = excluded.payment_date,
+        payment_method = excluded.payment_method,
+        reference = excluded.reference
+    `);
 
-  return { id, ...p };
+    stmt.run(
+      id,
+      purchaseInvoiceId,
+      cleanPhone,
+      amount,
+      paymentDate,
+      paymentMethod,
+      reference,
+      now
+    );
+  }
+
+  return getExpensePayment(companyContextOrId, id);
 }
 
+/**
+ * Obtiene un pago de gasto por su ID (Tenant-Scoped)
+ */
+export function getExpensePayment(companyContextOrId, id) {
+  if (id === undefined) {
+    console.warn("🛑 [Seguridad Tenant] getExpensePayment invocado sin tenant context obligatorio. Retornando null.");
+    return null;
+  }
+  if (!companyContextOrId || !id) return null;
+
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
+    console.warn("🛑 [Seguridad Tenant] getExpensePayment: no se pudo resolver un tenant válido.");
+    return null;
+  }
+  const { companyId, phone: cleanPhone } = tenant;
+
+  const cols = db.prepare('PRAGMA table_info("expense_payments")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let row = null;
+  if (hasCompanyIdCol) {
+    row = db.prepare('SELECT * FROM expense_payments WHERE id = ? AND company_id = ?').get(id, companyId);
+    if (!row && cleanPhone) {
+      row = db.prepare('SELECT * FROM expense_payments WHERE id = ? AND business_id = ?').get(id, cleanPhone);
+    }
+  } else {
+    row = db.prepare('SELECT * FROM expense_payments WHERE id = ? AND business_id = ?').get(id, cleanPhone);
+  }
+  if (!row) return null;
+
+  return {
+    id: row.id,
+    companyId: row.company_id || companyId,
+    businessId: row.business_id || cleanPhone,
+    purchaseInvoiceId: row.purchase_invoice_id,
+    amount: Number(row.amount || 0),
+    paymentDate: row.payment_date,
+    paymentMethod: row.payment_method,
+    reference: row.reference,
+    createdAt: row.created_at
+  };
+}
+
+/**
+ * Lista pagos de gasto de un negocio con filtros opcionales (Tenant-Scoped)
+ */
 export function listExpensePayments(companyContextOrId, purchaseInvoiceId = null) {
   if (!companyContextOrId) return [];
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) return [];
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) return [];
+  const { companyId, phone: cleanPhone } = tenant;
 
-  let query = 'SELECT * FROM expense_payments WHERE business_id = ?';
-  const params = [cleanId];
+  const cols = db.prepare('PRAGMA table_info("expense_payments")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let query = '';
+  const params = [];
+
+  if (hasCompanyIdCol) {
+    query = 'SELECT * FROM expense_payments WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?))';
+    params.push(companyId, cleanPhone);
+  } else {
+    query = 'SELECT * FROM expense_payments WHERE business_id = ?';
+    params.push(cleanPhone);
+  }
+
   if (purchaseInvoiceId) {
     query += ' AND purchase_invoice_id = ?';
     params.push(purchaseInvoiceId);
   }
-  query += ' ORDER BY payment_date ASC';
-  return db.prepare(query).all(...params);
+  query += ' ORDER BY payment_date ASC, created_at ASC';
+
+  const rows = db.prepare(query).all(...params);
+  return rows.map(row => ({
+    id: row.id,
+    companyId: row.company_id || companyId,
+    businessId: row.business_id || cleanPhone,
+    purchaseInvoiceId: row.purchase_invoice_id,
+    amount: Number(row.amount || 0),
+    paymentDate: row.payment_date,
+    paymentMethod: row.payment_method,
+    reference: row.reference,
+    createdAt: row.created_at
+  }));
+}
+
+/**
+ * Elimina un pago de gasto por su ID (Tenant-Scoped)
+ */
+export function deleteExpensePayment(companyContextOrId, id) {
+  if (id === undefined) {
+    console.warn("🛑 [Seguridad Tenant] deleteExpensePayment invocado sin tenant context obligatorio.");
+    return false;
+  }
+  if (!companyContextOrId || !id) return false;
+
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
+    console.warn("🛑 [Seguridad Tenant] deleteExpensePayment: no se pudo resolver un tenant válido.");
+    return false;
+  }
+  const { companyId, phone: cleanPhone } = tenant;
+
+  const cols = db.prepare('PRAGMA table_info("expense_payments")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let res;
+  if (hasCompanyIdCol) {
+    res = db.prepare('DELETE FROM expense_payments WHERE id = ? AND company_id = ?').run(id, companyId);
+  } else {
+    res = db.prepare('DELETE FROM expense_payments WHERE id = ? AND business_id = ?').run(id, cleanPhone);
+  }
+  return res.changes > 0;
 }
 
 /**
