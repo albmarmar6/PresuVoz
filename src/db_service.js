@@ -2,7 +2,6 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { runMigrations } from './migration_service.js';
 
 const DATA_DIR = path.resolve('data');
 if (!fs.existsSync(DATA_DIR)) {

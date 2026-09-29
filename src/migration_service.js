@@ -46,8 +46,14 @@ export function initMigrationTable(db) {
  * @param {import('node:sqlite').DatabaseSync} db
  * @returns {Array<{ id: number, version: number, name: string, applied_at: string }>}
  */
-export function getAppliedMigrations(db) {
-  initMigrationTable(db);
+export function getAppliedMigrations(db, options = {}) {
+  const tableExists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get();
+  if (!tableExists) {
+    if (options.dryRun || options.readOnly) {
+      return [];
+    }
+    initMigrationTable(db);
+  }
   return db.prepare('SELECT id, version, name, applied_at FROM schema_migrations ORDER BY version ASC').all();
 }
 
@@ -55,15 +61,40 @@ export function getAppliedMigrations(db) {
  * Obtiene las migraciones pendientes de aplicar.
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {Array} [migrationList] Lista opcional de migraciones (por defecto MIGRATIONS)
+ * @param {object} [options] Opciones (dryRun, readOnly)
  * @returns {Array} Migraciones pendientes ordenadas por versión
  */
-export function getPendingMigrations(db, migrationList = MIGRATIONS) {
-  const applied = getAppliedMigrations(db);
+export function getPendingMigrations(db, migrationList = MIGRATIONS, options = {}) {
+  const applied = getAppliedMigrations(db, options);
   const appliedVersions = new Set(applied.map(m => m.version));
   return migrationList
     .slice()
     .sort((a, b) => a.version - b.version)
     .filter(m => !appliedVersions.has(m.version));
+}
+
+/**
+ * Realiza una comprobación en modo estrictamente READ-ONLY / DRY-RUN.
+ * NO ejecuta ninguna modificación, no crea tablas, no altera esquemas.
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {Array} [migrationList]
+ * @returns {{ isUpToDate: boolean, appliedCount: number, pendingCount: number, applied: Array, pending: Array }}
+ */
+export function checkMigrationsDryRun(db, migrationList = MIGRATIONS) {
+  const applied = getAppliedMigrations(db, { dryRun: true });
+  const appliedVersions = new Set(applied.map(m => m.version));
+  const pending = migrationList
+    .slice()
+    .sort((a, b) => a.version - b.version)
+    .filter(m => !appliedVersions.has(m.version));
+
+  return {
+    isUpToDate: pending.length === 0,
+    appliedCount: applied.length,
+    pendingCount: pending.length,
+    applied,
+    pending
+  };
 }
 
 /**

@@ -4581,7 +4581,7 @@ cleanupTest34(phoneFiscalB);
 
 console.log("\nTEST 35: Blindaje Crítico del Auto-Migrador y Protección Fail-Closed de Producción");
 
-import { isProductionDatabase as testIsProd } from './migration_service.js';
+import { isProductionDatabase as testIsProd, checkMigrationsDryRun } from './migration_service.js';
 import { execFileSync } from 'node:child_process';
 
 // TEST A — Import DB service no muta DB cuando hay migraciones pendientes
@@ -4698,6 +4698,72 @@ const shaAfterF_35 = computeFileSha256(tempDbF_Path);
 assert(readResult_35.c >= 0, "13. Test F: Operación de lectura/inspección completa con éxito");
 assert(shaBeforeF_35 === shaAfterF_35, "14. Test F: Las operaciones de lectura/inspección dejan el archivo SHA-256 100% idéntico");
 if (fs.existsSync(tempDbF_Path)) fs.unlinkSync(tempDbF_Path);
+
+console.log("\nTEST 36: Simulación de Futura Migración 007, Dry-Run y Protección Fail-Closed");
+
+const tempDb36_Path = path.resolve('data', 'temp_test36_future_m007.db');
+if (fs.existsSync(tempDb36_Path)) fs.unlinkSync(tempDb36_Path);
+const tempDb36 = new DatabaseSync(tempDb36_Path);
+initMigrationTable(tempDb36);
+runMigrations(tempDb36, { authorized: true });
+
+const mockMigration007 = {
+  version: 7,
+  name: '007_future_fiscal_company_id',
+  up: (db) => {
+    db.exec("CREATE TABLE IF NOT EXISTS test_future_007 (id TEXT PRIMARY KEY, note TEXT);");
+  }
+};
+const extendedMigrations = [...MIGRATIONS, mockMigration007];
+
+// 1. Dry run / check detection
+const dryRunCheck = checkMigrationsDryRun(tempDb36, extendedMigrations);
+assert(!dryRunCheck.isUpToDate, "1. Test 36: Migración 007 futura detectada como pendiente en dry-run");
+assert(dryRunCheck.pendingCount === 1, "2. Test 36: Hay exactamente 1 migración pendiente en dry-run");
+assert(dryRunCheck.pending[0].version === 7, "3. Test 36: La migración pendiente es la versión 7");
+assert(dryRunCheck.pending[0].name === '007_future_fiscal_company_id', "4. Test 36: Nombre de migración pendiente coincide");
+
+// 2. Comprobar que dry-run es estrictamente de solo lectura y no ejecuta nada
+const appliedBefore36 = getAppliedMigrations(tempDb36, { dryRun: true });
+assert(appliedBefore36.length === MIGRATIONS.length, "5. Test 36: El número de migraciones aplicadas en DB permanece inalterado tras dry-run");
+const tableCheckBefore36 = tempDb36.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='test_future_007'").get();
+assert(!tableCheckBefore36, "6. Test 36: La tabla de la migración 007 NO existe en la base de datos tras dry-run");
+
+// 3. Intento de ejecutar migración 007 sin autorización explícita (fail-closed)
+let caughtUnauthGen007 = false;
+try {
+  runMigrations(tempDb36, { migrations: extendedMigrations, authorized: false });
+} catch (err) {
+  caughtUnauthGen007 = true;
+  assert(err.message.includes('MIGRATION GUARD'), "7. Test 36: Ejecución sin authorized: true es rechazada inmediatamente (fail-closed)");
+}
+assert(caughtUnauthGen007, "8. Test 36: Base de datos no modificada ante intento no autorizado");
+
+// 4. Intento de ejecutar migración 007 sobre producción sin allowProduction (fail-closed)
+const simulatedProdWith007 = {
+  prepare: (sql) => ({
+    all: () => [{ seq: 0, name: 'main', file: path.resolve('data', 'presuvoz.db') }]
+  })
+};
+let caughtUnauthProd007 = false;
+try {
+  runMigrations(simulatedProdWith007, { migrations: extendedMigrations, authorized: true, allowProduction: false });
+} catch (err) {
+  caughtUnauthProd007 = true;
+  assert(err.message.includes('PRODUCCIÓN'), "9. Test 36: Intento de aplicar migración 007 a producción sin allowProduction lanza error crítico");
+}
+assert(caughtUnauthProd007, "10. Test 36: Producción blindada contra migración 007 accidental");
+
+// 5. Aplicación explícitamente autorizada en DB de prueba funciona correctamente
+const appliedResult36 = runMigrations(tempDb36, { migrations: extendedMigrations, authorized: true });
+assert(appliedResult36.appliedCount === 1, "11. Test 36: Migración 007 se aplica con éxito cuando está explícitamente autorizada");
+const appliedAfter36 = getAppliedMigrations(tempDb36, { dryRun: true });
+assert(appliedAfter36.length === extendedMigrations.length, "12. Test 36: schema_migrations contiene ahora la versión 7");
+const tableCheckAfter36 = tempDb36.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='test_future_007'").get();
+assert(!!tableCheckAfter36, "13. Test 36: La tabla test_future_007 ha sido creada correctamente por la migración");
+
+tempDb36.close();
+if (fs.existsSync(tempDb36_Path)) fs.unlinkSync(tempDb36_Path);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

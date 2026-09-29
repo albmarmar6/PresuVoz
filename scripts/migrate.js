@@ -12,8 +12,9 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
-import { runMigrations, isProductionDatabase, initMigrationTable, getPendingMigrations } from '../src/migration_service.js';
+import { runMigrations, isProductionDatabase, initMigrationTable, getPendingMigrations, checkMigrationsDryRun } from '../src/migration_service.js';
 
+const isDryRun = process.argv.includes('--dry-run') || process.argv.includes('--check');
 const targetDbPath = process.env.PRESUVOZ_DB_PATH || path.resolve('data', 'presuvoz.db');
 const isProd = isProductionDatabase(targetDbPath);
 const allowProd = process.env.ALLOW_PRODUCTION_MIGRATIONS === 'true';
@@ -23,6 +24,29 @@ console.log(' PresuVoz — Gestor Controlado de Migraciones SQL');
 console.log('====================================================');
 console.log(`Base de datos objetivo: ${targetDbPath}`);
 console.log(`¿Es producción?:       ${isProd ? 'SÍ (data/presuvoz.db)' : 'NO'}`);
+console.log(`Modo:                  ${isDryRun ? 'DRY-RUN / READ-ONLY (Sin modificaciones)' : 'EJECUCIÓN'}`);
+
+if (isDryRun) {
+  const readOnlyDb = new DatabaseSync(targetDbPath, { open: true, readOnly: true });
+  const check = checkMigrationsDryRun(readOnlyDb);
+  console.log(`\n📋 Estado del Esquema:`);
+  console.log(`  - Migraciones aplicadas: ${check.appliedCount}`);
+  for (const m of check.applied) {
+    console.log(`    ✅ [${m.version}] ${m.name} (${m.applied_at})`);
+  }
+  console.log(`  - Migraciones pendientes: ${check.pendingCount}`);
+  for (const p of check.pending) {
+    console.log(`    ⏳ [${p.version}] ${p.name}`);
+  }
+  if (check.isUpToDate) {
+    console.log('\n✨ La base de datos está 100% actualizada. Cero migraciones pendientes.');
+  } else {
+    console.log(`\n⚠️ Hay ${check.pendingCount} migración/es pendiente/s.`);
+  }
+  readOnlyDb.close();
+  console.log('====================================================');
+  process.exit(0);
+}
 
 if (isProd && !allowProd) {
   console.error('\n🛑 [ACCESO DENEGADO POR SEGURIDAD]');
