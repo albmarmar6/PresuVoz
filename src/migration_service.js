@@ -8,6 +8,7 @@
  * - Compatible con bases de datos nuevas y adopción de bases de datos existentes.
  */
 
+import path from 'node:path';
 import { migration as baselineMigration } from './migrations/001_baseline_schema.js';
 import { migration as identityMigration } from './migrations/002_identity_foundation.js';
 import { migration as budgetsMigration } from './migrations/003_budgets_company_id.js';
@@ -66,14 +67,68 @@ export function getPendingMigrations(db, migrationList = MIGRATIONS) {
 }
 
 /**
+ * Obtiene la ruta física del archivo SQLite de una instancia DatabaseSync.
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @returns {string|null}
+ */
+export function getDatabaseFilePath(db) {
+  try {
+    const list = db.prepare('PRAGMA database_list;').all();
+    const main = list.find(entry => entry.name === 'main');
+    return main ? main.file : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Determina si una base de datos o ruta corresponde a la base de datos de producción (data/presuvoz.db).
+ * @param {import('node:sqlite').DatabaseSync|string} dbOrPath
+ * @returns {boolean}
+ */
+export function isProductionDatabase(dbOrPath) {
+  let p = null;
+  if (typeof dbOrPath === 'string') {
+    p = dbOrPath;
+  } else if (dbOrPath && typeof dbOrPath.prepare === 'function') {
+    p = getDatabaseFilePath(dbOrPath);
+  }
+  if (!p) return false;
+  const resolved = path.resolve(p).toLowerCase();
+  const prod = path.resolve('data', 'presuvoz.db').toLowerCase();
+  return resolved === prod;
+}
+
+/**
  * Ejecuta todas las migraciones pendientes en estricto orden transaccional.
+ * 
+ * BARRERAS DE SEGURIDAD (FAIL-CLOSED):
+ * - Ninguna importación o apertura accidental puede mutar la base de datos.
+ * - Requiere autorización explícita (options.authorized === true || ALLOW_DATABASE_MIGRATIONS === 'true').
+ * - Si es la base de datos de PRODUCCIÓN, requiere autorización de producción explícita (ALLOW_PRODUCTION_MIGRATIONS === 'true').
+ * 
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {object} [options]
  * @param {Array} [options.migrations] Lista personalizada de migraciones
  * @param {number} [options.targetVersion] Versión máxima hasta la que migrar
+ * @param {boolean} [options.authorized] Autorización explícita para ejecutar migraciones
+ * @param {boolean} [options.allowProduction] Autorización explícita para ejecutar en producción
  * @returns {{ appliedCount: number, appliedVersions: number[] }}
  */
 export function runMigrations(db, options = {}) {
+  // 1. Barrera General: Por defecto NO migrar (Opening/inspecting a database must NEVER mutate its schema)
+  const isAuthorized = options.authorized === true || (options.authorized !== false && process.env.ALLOW_DATABASE_MIGRATIONS === 'true');
+  if (!isAuthorized) {
+    throw new Error("🛑 [MIGRATION GUARD] Migraciones no autorizadas. 'Opening/inspecting a database must NEVER mutate its schema'. Se requiere autorización explícita para migrar (ALLOW_DATABASE_MIGRATIONS='true' o scripts/migrate.js).");
+  }
+
+  // 2. Barrera de Producción: Fail-closed estricto
+  const isProd = isProductionDatabase(db);
+  const allowProd = options.allowProduction === true || process.env.ALLOW_PRODUCTION_MIGRATIONS === 'true';
+  if (isProd && !allowProd) {
+    throw new Error("🛑 [MIGRATION GUARD CRÍTICO] Se ha detectado la base de datos de PRODUCCIÓN (data/presuvoz.db). Las migraciones en producción están bloqueadas salvo autorización explícita (ALLOW_PRODUCTION_MIGRATIONS='true').");
+  }
+
   initMigrationTable(db);
   const migrationList = options.migrations || MIGRATIONS;
   const pending = getPendingMigrations(db, migrationList);

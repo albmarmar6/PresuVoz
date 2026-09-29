@@ -27,8 +27,10 @@ export const db = new DatabaseSync(DB_PATH);
 // Activar integridad referencial estricta
 db.exec('PRAGMA foreign_keys = ON;');
 
-// Ejecutar migraciones formales
-runMigrations(db);
+// NOTA DE SEGURIDAD CRÍTICA:
+// Opening/inspecting a database must NEVER mutate its schema.
+// Las migraciones NO se ejecutan automáticamente al importar db_service.js.
+// Para migrar, se debe usar explícitamente scripts/migrate.js o runMigrations(db, { authorized: true }).
 
 // Migración automática de datos creados accidentalmente bajo el LID de WhatsApp
 try {

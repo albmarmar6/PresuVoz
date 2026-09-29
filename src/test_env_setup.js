@@ -18,6 +18,9 @@ if (!process.env.PRESUVOZ_DB_PATH) {
   process.env.PRESUVOZ_DB_PATH = path.resolve('data', 'presuvoz_test.db');
 }
 
+// Autorizar formalmente las migraciones exclusivas en entorno de testing
+process.env.ALLOW_DATABASE_MIGRATIONS = 'true';
+
 // Barrera Técnica de Seguridad en tiempo de carga
 const resolvedPath = path.resolve(process.env.PRESUVOZ_DB_PATH);
 const prodPath = path.resolve('data', 'presuvoz.db');

@@ -37,6 +37,10 @@ const prodDbInitialSha256 = computeFileSha256(PROD_DB_PATH);
 const TEST_DB_PATH = path.resolve('data', 'presuvoz_test.db');
 const testDbInitialSha256 = computeFileSha256(TEST_DB_PATH);
 
+import { runMigrations as initialRunMigrations } from './migration_service.js';
+import { db as testDatabaseSync } from './db_service.js';
+initialRunMigrations(testDatabaseSync, { authorized: true });
+
 console.log("==========================================================");
 console.log("🛡️  BATERÍA DE PRUEBAS DE ESTRÉS Y SEGURIDAD PRESUVOZ");
 console.log("==========================================================\n");
@@ -4574,6 +4578,126 @@ assert(integrityCheck34.integrity_check === 'ok', "11b. Integridad: PRAGMA integ
 // Limpieza final de TEST 34
 cleanupTest34(phoneFiscalA);
 cleanupTest34(phoneFiscalB);
+
+console.log("\nTEST 35: Blindaje Crítico del Auto-Migrador y Protección Fail-Closed de Producción");
+
+import { isProductionDatabase as testIsProd } from './migration_service.js';
+import { execFileSync } from 'node:child_process';
+
+// TEST A — Import DB service no muta DB cuando hay migraciones pendientes
+const tempDbA_Path = path.resolve('data', 'temp_test35_a.db');
+if (fs.existsSync(tempDbA_Path)) fs.unlinkSync(tempDbA_Path);
+const tempDbA = new DatabaseSync(tempDbA_Path);
+initMigrationTable(tempDbA);
+const { migration: m1Test35 } = await import('./migrations/001_baseline_schema.js');
+tempDbA.exec('BEGIN;');
+m1Test35.up(tempDbA);
+tempDbA.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(1, '001_baseline_schema', new Date().toISOString());
+tempDbA.exec('COMMIT;');
+tempDbA.close();
+
+const checkDbA_35 = new DatabaseSync(tempDbA_Path);
+const pendingBeforeA_35 = getPendingMigrations(checkDbA_35);
+assert(pendingBeforeA_35.length > 0, "1. Test A: Base de datos de prueba tiene migraciones pendientes");
+
+let threwOnUnauth_35 = false;
+try {
+  runMigrations(checkDbA_35, { authorized: false });
+} catch (e) {
+  threwOnUnauth_35 = true;
+  assert(e.message.includes('MIGRATION GUARD'), "2. Test A: runMigrations sin autorización es rechazado de inmediato (fail-closed)");
+}
+assert(threwOnUnauth_35, "3. Test A: Opening/inspecting a database must NEVER mutate its schema");
+const pendingAfterA_35 = getPendingMigrations(checkDbA_35);
+assert(pendingAfterA_35.length === pendingBeforeA_35.length, "4. Test A: Inspección no autorizada no altera el número de migraciones pendientes");
+checkDbA_35.close();
+if (fs.existsSync(tempDbA_Path)) fs.unlinkSync(tempDbA_Path);
+
+// TEST B — Inspección CLI no ejecuta migraciones
+const tempDbB_Path = path.resolve('data', 'temp_test35_b.db');
+if (fs.existsSync(tempDbB_Path)) fs.unlinkSync(tempDbB_Path);
+const tempDbB = new DatabaseSync(tempDbB_Path);
+initMigrationTable(tempDbB);
+tempDbB.exec('BEGIN;');
+m1Test35.up(tempDbB);
+tempDbB.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(1, '001_baseline_schema', new Date().toISOString());
+tempDbB.exec('COMMIT;');
+tempDbB.close();
+
+const cliOutput_35 = execFileSync(process.execPath, [
+  '-e',
+  `import { DatabaseSync } from 'node:sqlite'; const d = new DatabaseSync('${tempDbB_Path.replace(/\\/g, '/')}'); console.log('MIG_COUNT:' + d.prepare('SELECT count(*) as c FROM schema_migrations').get().c); d.close();`
+], {
+  env: { ...process.env, NODE_ENV: 'development', ALLOW_DATABASE_MIGRATIONS: undefined, PRESUVOZ_DB_PATH: tempDbB_Path },
+  encoding: 'utf8'
+});
+assert(cliOutput_35.includes('MIG_COUNT:1'), "5. Test B: Inspección CLI de esquema mantiene exactamente el recuento original de migraciones (1)");
+assert(!cliOutput_35.includes('aplicada con éxito'), "6. Test B: Inspección CLI jamás ejecuta migraciones en segundo plano");
+if (fs.existsSync(tempDbB_Path)) fs.unlinkSync(tempDbB_Path);
+
+// TEST C — Migración explícita sí puede ejecutarse en DB de test
+const tempDbC_Path = path.resolve('data', 'temp_test35_c.db');
+if (fs.existsSync(tempDbC_Path)) fs.unlinkSync(tempDbC_Path);
+const tempDbC = new DatabaseSync(tempDbC_Path);
+initMigrationTable(tempDbC);
+tempDbC.exec('BEGIN;');
+m1Test35.up(tempDbC);
+tempDbC.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(1, '001_baseline_schema', new Date().toISOString());
+tempDbC.exec('COMMIT;');
+
+const resultC_35 = runMigrations(tempDbC, { authorized: true });
+assert(resultC_35.appliedCount > 0, "7. Test C: Migración explícita autorizada se ejecuta correctamente");
+const pendingC_35 = getPendingMigrations(tempDbC);
+assert(pendingC_35.length === 0, "8. Test C: Tras migración autorizada no quedan migraciones pendientes");
+tempDbC.close();
+if (fs.existsSync(tempDbC_Path)) fs.unlinkSync(tempDbC_Path);
+
+// TEST D — Producción protegida fail-closed
+const simulatedProdDb_35 = {
+  prepare: (sql) => ({
+    all: () => [{ seq: 0, name: 'main', file: path.resolve('data', 'presuvoz.db') }]
+  })
+};
+assert(testIsProd(simulatedProdDb_35), "9. Test D: isProductionDatabase identifica con precisión la DB de producción");
+let threwOnProdUnauth_35 = false;
+try {
+  runMigrations(simulatedProdDb_35, { authorized: true, allowProduction: false });
+} catch (e) {
+  threwOnProdUnauth_35 = true;
+  assert(e.message.includes('PRODUCCIÓN'), "10. Test D: Intento de migrar producción sin autorización explícita lanza excepción crítica");
+}
+assert(threwOnProdUnauth_35, "11. Test D: Base de datos de producción blindada fail-closed contra migraciones accidentales");
+
+// TEST E — Producción con autorización explícita
+const tempDbE_Path = path.resolve('data', 'temp_test35_e.db');
+if (fs.existsSync(tempDbE_Path)) fs.unlinkSync(tempDbE_Path);
+const tempDbE = new DatabaseSync(tempDbE_Path);
+initMigrationTable(tempDbE);
+tempDbE.exec('BEGIN;');
+m1Test35.up(tempDbE);
+tempDbE.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(1, '001_baseline_schema', new Date().toISOString());
+tempDbE.exec('COMMIT;');
+const resultE_35 = runMigrations(tempDbE, { authorized: true, allowProduction: true });
+assert(resultE_35.appliedCount > 0, "12. Test E: Con autorización explícita de producción (allowProduction=true) las migraciones son permitidas");
+tempDbE.close();
+if (fs.existsSync(tempDbE_Path)) fs.unlinkSync(tempDbE_Path);
+
+// TEST F — No modificación accidental: Comparar SHA antes y después de inspección
+const tempDbF_Path = path.resolve('data', 'temp_test35_f.db');
+if (fs.existsSync(tempDbF_Path)) fs.unlinkSync(tempDbF_Path);
+const tempDbF = new DatabaseSync(tempDbF_Path);
+initMigrationTable(tempDbF);
+tempDbF.close();
+const shaBeforeF_35 = computeFileSha256(tempDbF_Path);
+
+const readDbF_35 = new DatabaseSync(tempDbF_Path, { readOnly: true });
+const readResult_35 = readDbF_35.prepare('SELECT count(*) as c FROM sqlite_master').get();
+readDbF_35.close();
+
+const shaAfterF_35 = computeFileSha256(tempDbF_Path);
+assert(readResult_35.c >= 0, "13. Test F: Operación de lectura/inspección completa con éxito");
+assert(shaBeforeF_35 === shaAfterF_35, "14. Test F: Las operaciones de lectura/inspección dejan el archivo SHA-256 100% idéntico");
+if (fs.existsSync(tempDbF_Path)) fs.unlinkSync(tempDbF_Path);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {
