@@ -1359,6 +1359,8 @@ import {
   savePayment as dbSavePaymentFiscal,
   saveTaxProfile,
   getTaxProfile,
+  deleteTaxProfile,
+  isUuid,
   savePurchaseInvoice,
   listPurchaseInvoices,
   saveExpensePayment,
@@ -4817,28 +4819,28 @@ initMigrationTable(tempDb36);
 runMigrations(tempDb36, { authorized: true });
 
 const mockMigration007 = {
-  version: 7,
-  name: '007_future_fiscal_company_id',
+  version: 99,
+  name: '099_future_simulation_check',
   up: (db) => {
-    db.exec("CREATE TABLE IF NOT EXISTS test_future_007 (id TEXT PRIMARY KEY, note TEXT);");
+    db.exec("CREATE TABLE IF NOT EXISTS test_future_mock (id TEXT PRIMARY KEY, note TEXT);");
   }
 };
 const extendedMigrations = [...MIGRATIONS, mockMigration007];
 
 // 1. Dry run / check detection
 const dryRunCheck = checkMigrationsDryRun(tempDb36, extendedMigrations);
-assert(!dryRunCheck.isUpToDate, "1. Test 36: Migración 007 futura detectada como pendiente en dry-run");
+assert(!dryRunCheck.isUpToDate, "1. Test 36: Migración futura detectada como pendiente en dry-run");
 assert(dryRunCheck.pendingCount === 1, "2. Test 36: Hay exactamente 1 migración pendiente en dry-run");
-assert(dryRunCheck.pending[0].version === 7, "3. Test 36: La migración pendiente es la versión 7");
-assert(dryRunCheck.pending[0].name === '007_future_fiscal_company_id', "4. Test 36: Nombre de migración pendiente coincide");
+assert(dryRunCheck.pending[0].version === 99, "3. Test 36: La migración pendiente es la versión 99");
+assert(dryRunCheck.pending[0].name === '099_future_simulation_check', "4. Test 36: Nombre de migración pendiente coincide");
 
 // 2. Comprobar que dry-run es estrictamente de solo lectura y no ejecuta nada
 const appliedBefore36 = getAppliedMigrations(tempDb36, { dryRun: true });
 assert(appliedBefore36.length === MIGRATIONS.length, "5. Test 36: El número de migraciones aplicadas en DB permanece inalterado tras dry-run");
-const tableCheckBefore36 = tempDb36.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='test_future_007'").get();
-assert(!tableCheckBefore36, "6. Test 36: La tabla de la migración 007 NO existe en la base de datos tras dry-run");
+const tableCheckBefore36 = tempDb36.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='test_future_mock'").get();
+assert(!tableCheckBefore36, "6. Test 36: La tabla de la migración futura NO existe en la base de datos tras dry-run");
 
-// 3. Intento de ejecutar migración 007 sin autorización explícita (fail-closed)
+// 3. Intento de ejecutar migración sin autorización explícita (fail-closed)
 let caughtUnauthGen007 = false;
 try {
   runMigrations(tempDb36, { migrations: extendedMigrations, authorized: false });
@@ -4848,7 +4850,7 @@ try {
 }
 assert(caughtUnauthGen007, "8. Test 36: Base de datos no modificada ante intento no autorizado");
 
-// 4. Intento de ejecutar migración 007 sobre producción sin allowProduction (fail-closed)
+// 4. Intento de ejecutar migración sobre producción sin allowProduction (fail-closed)
 const simulatedProdWith007 = {
   prepare: (sql) => ({
     all: () => [{ seq: 0, name: 'main', file: path.resolve('data', 'presuvoz.db') }]
@@ -4859,20 +4861,287 @@ try {
   runMigrations(simulatedProdWith007, { migrations: extendedMigrations, authorized: true, allowProduction: false });
 } catch (err) {
   caughtUnauthProd007 = true;
-  assert(err.message.includes('PRODUCCIÓN'), "9. Test 36: Intento de aplicar migración 007 a producción sin allowProduction lanza error crítico");
+  assert(err.message.includes('PRODUCCIÓN'), "9. Test 36: Intento de aplicar migración a producción sin allowProduction lanza error crítico");
 }
-assert(caughtUnauthProd007, "10. Test 36: Producción blindada contra migración 007 accidental");
+assert(caughtUnauthProd007, "10. Test 36: Producción blindada contra migración futura accidental");
 
 // 5. Aplicación explícitamente autorizada en DB de prueba funciona correctamente
 const appliedResult36 = runMigrations(tempDb36, { migrations: extendedMigrations, authorized: true });
-assert(appliedResult36.appliedCount === 1, "11. Test 36: Migración 007 se aplica con éxito cuando está explícitamente autorizada");
+assert(appliedResult36.appliedCount === 1, "11. Test 36: Migración futura se aplica con éxito cuando está explícitamente autorizada");
 const appliedAfter36 = getAppliedMigrations(tempDb36, { dryRun: true });
-assert(appliedAfter36.length === extendedMigrations.length, "12. Test 36: schema_migrations contiene ahora la versión 7");
-const tableCheckAfter36 = tempDb36.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='test_future_007'").get();
-assert(!!tableCheckAfter36, "13. Test 36: La tabla test_future_007 ha sido creada correctamente por la migración");
+assert(appliedAfter36.length === extendedMigrations.length, "12. Test 36: schema_migrations contiene ahora la versión 99");
+const tableCheckAfter36 = tempDb36.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='test_future_mock'").get();
+assert(!!tableCheckAfter36, "13. Test 36: La tabla test_future_mock ha sido creada correctamente por la migración");
 
 tempDb36.close();
 if (fs.existsSync(tempDb36_Path)) fs.unlinkSync(tempDb36_Path);
+
+console.log("\nTEST 37: Migración Controlada de business_tax_profiles a company_id (Fase 2E-1 — Dual-Write, Backfill & Tenant Isolation)");
+
+// ─── A. MIGRACIÓN 007: EJECUCIÓN Y REGISTRO ───
+const schemaRow007 = currentDb.prepare("SELECT version, name, applied_at FROM schema_migrations WHERE version = 7").get();
+assert(schemaRow007 && schemaRow007.version === 7, "A1. Migración 007 registrada en schema_migrations con versión 7");
+assert(schemaRow007 && schemaRow007.name === '007_business_tax_profiles_company_id', "A2. Nombre de migración 007 coincide exactamente");
+assert(schemaRow007 && typeof schemaRow007.applied_at === 'string' && schemaRow007.applied_at.length > 10, "A3. Migración 007 tiene timestamp applied_at válido");
+
+// Producción NO tiene la versión 7 registrada
+const prodDbFor007Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+const prodSchema007 = prodDbFor007Check.prepare("SELECT version FROM schema_migrations WHERE version = 7").get();
+const prodMaxVersion = prodDbFor007Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
+prodDbFor007Check.close();
+assert(!prodSchema007, "A4. DB de producción (data/presuvoz.db) NO tiene la migración 007 registrada");
+assert(prodMaxVersion === 6, "A5. Versión máxima en DB de producción permanece en 6");
+
+// ─── B. BACKFILL DETERMINISTA & FAIL-CLOSED EN MIGRACIÓN ───
+// B1: Migración limpia con múltiples perfiles
+const memDb37Backfill = new DatabaseSync(':memory:');
+initMigrationTable(memDb37Backfill);
+runMigrations(memDb37Backfill, { migrations: MIGRATIONS.slice(0, 6), authorized: true });
+
+// Insertar dos empresas y dos perfiles fiscales según esquema previo a 007
+memDb37Backfill.exec(`
+  INSERT INTO companies (id, phone, name, fiscal_name, cif) VALUES
+    ('uuid-comp-bf1', '34688111111', 'Empresa BF 1', 'Empresa BF 1 S.L.', 'B88111111'),
+    ('uuid-comp-bf2', '34688222222', 'Empresa BF 2', 'Empresa BF 2 S.L.', 'B88222222');
+  INSERT INTO business_tax_profiles (business_id, legal_name, tax_id, tax_regime, vat_regime, default_vat_rate) VALUES
+    ('34688111111', 'Empresa BF 1 S.L.', 'B88111111', 'GENERAL', 'GENERAL', 21),
+    ('34688222222', 'Empresa BF 2 S.L.', 'B88222222', 'SIMPLIFICADO', 'RECARGO_EQUIVALENCIA', 10);
+`);
+
+// Ejecutar migración 007
+const migRes37B = runMigrations(memDb37Backfill, { migrations: [MIGRATIONS[6]], authorized: true });
+assert(migRes37B.appliedCount === 1, "B1. Migración 007 se ejecuta con éxito sobre base de datos con datos");
+
+const bfRows = memDb37Backfill.prepare("SELECT company_id, business_id, legal_name, default_vat_rate FROM business_tax_profiles ORDER BY company_id ASC").all();
+assert(bfRows.length === 2, "B2. Recuento de filas se preserva exactamente tras migración (2 filas)");
+assert(bfRows[0].company_id === 'uuid-comp-bf1' && bfRows[0].business_id === '34688111111' && bfRows[0].default_vat_rate === 21, "B3. Fila 1 migrada con company_id correcto y valores preservados");
+assert(bfRows[1].company_id === 'uuid-comp-bf2' && bfRows[1].business_id === '34688222222' && bfRows[1].default_vat_rate === 10, "B4. Fila 2 migrada con company_id correcto y valores preservados");
+
+// B2: Fail-Closed con business_id huérfano (teléfono que no existe en companies)
+const memDb37Orphan = new DatabaseSync(':memory:');
+initMigrationTable(memDb37Orphan);
+runMigrations(memDb37Orphan, { migrations: MIGRATIONS.slice(0, 6), authorized: true });
+memDb37Orphan.exec(`
+  INSERT INTO companies (id, phone, name) VALUES ('uuid-comp-ok', '34688333333', 'Empresa OK');
+  INSERT INTO business_tax_profiles (business_id, legal_name) VALUES
+    ('34688333333', 'Empresa OK'),
+    ('34699999999', 'Empresa Huérfana Fantasma');
+`);
+
+let caughtOrphan007 = false;
+try {
+  runMigrations(memDb37Orphan, { migrations: [MIGRATIONS[6]], authorized: true });
+} catch (err) {
+  caughtOrphan007 = true;
+  assert(err.message.includes('huérfano') || err.message.includes('fail-closed'), "B5. Error descriptivo de integridad ante perfil huérfano");
+}
+assert(caughtOrphan007 === true, "B6. Fail-Closed: Migración 007 aborta inmediatamente ante business_id huérfano");
+const orphanApplied007 = memDb37Orphan.prepare("SELECT 1 FROM schema_migrations WHERE version = 7").get();
+assert(!orphanApplied007, "B7. Rollback atómico: Versión 7 no se registra en schema_migrations tras fallo");
+
+// B3: Fail-Closed si existiese colisión de company_id
+const memDb37Collision = new DatabaseSync(':memory:');
+initMigrationTable(memDb37Collision);
+runMigrations(memDb37Collision, { migrations: MIGRATIONS.slice(0, 6), authorized: true });
+memDb37Collision.exec(`
+  INSERT INTO companies (id, phone, name) VALUES ('uuid-comp-shared', '34688444444', 'Empresa Compartida');
+  INSERT INTO business_tax_profiles (business_id, legal_name) VALUES
+    ('34688444444', 'Perfil 1'),
+    ('+34 688 44 44 44', 'Perfil Duplicado con formato');
+`);
+let caughtCollision007 = false;
+try {
+  runMigrations(memDb37Collision, { migrations: [MIGRATIONS[6]], authorized: true });
+} catch (err) {
+  caughtCollision007 = true;
+}
+assert(caughtCollision007 === true, "B8. Fail-Closed: Colisión de tenant que resolvería al mismo company_id es rechazada");
+
+// ─── C. AISLAMIENTO MULTI-TENANT ───
+const phoneTaxTenantA = '34677112201';
+const phoneTaxTenantB = '34677112202';
+
+const cleanupTest37 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM business_tax_profiles WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+cleanupTest37(phoneTaxTenantA);
+cleanupTest37(phoneTaxTenantB);
+
+const compTaxA = createCompanyWithIdentity({
+  name: 'Empresa A Fiscal S.L.',
+  phone: phoneTaxTenantA,
+  cif: 'B-77112201',
+  trade: 'Construcción'
+});
+const contextTaxA = resolveAuthenticatedContext('whatsapp', phoneTaxTenantA);
+
+const compTaxB = createCompanyWithIdentity({
+  name: 'Empresa B Fiscal S.L.',
+  phone: phoneTaxTenantB,
+  cif: 'B-77112202',
+  trade: 'Pintura'
+});
+const contextTaxB = resolveAuthenticatedContext('whatsapp', phoneTaxTenantB);
+
+// Guardar perfiles fiscales distintos
+saveTaxProfile(contextTaxA, {
+  legalName: 'Empresa A Fiscal S.L.',
+  taxId: 'B-77112201',
+  taxRegime: 'GENERAL',
+  vatRegime: 'GENERAL',
+  defaultVatRate: 21,
+  defaultIrpfRate: 15
+});
+
+saveTaxProfile(contextTaxB, {
+  legalName: 'Empresa B Fiscal S.L.',
+  taxId: 'B-77112202',
+  taxRegime: 'SIMPLIFICADO',
+  vatRegime: 'RECARGO_EQUIVALENCIA',
+  defaultVatRate: 10,
+  defaultIrpfRate: 0
+});
+
+// Lectura aislada
+const profReadA = getTaxProfile(contextTaxA.companyId);
+const profReadB = getTaxProfile(contextTaxB.companyId);
+
+assert(profReadA.companyId === compTaxA.companyId, "C1. Perfil A recupera companyId canónico de Empresa A");
+assert(profReadA.legalName === 'Empresa A Fiscal S.L.' && profReadA.defaultVatRate === 21, "C2. Perfil A recupera sus datos propios de régimen e IVA 21%");
+assert(profReadB.companyId === compTaxB.companyId, "C3. Perfil B recupera companyId canónico de Empresa B");
+assert(profReadB.legalName === 'Empresa B Fiscal S.L.' && profReadB.defaultVatRate === 10, "C4. Perfil B recupera sus datos propios de régimen e IVA 10%");
+
+// Intento de mutación cross-tenant
+saveTaxProfile(contextTaxA, {
+  legalName: 'Empresa A Modificada',
+  defaultVatRate: 21
+});
+const profBAfterAttack = getTaxProfile(contextTaxB.companyId);
+assert(profBAfterAttack.legalName === 'Empresa B Fiscal S.L.' && profBAfterAttack.defaultVatRate === 10, "C5. Intento de mutación de Tenant A jamás altera el perfil de Tenant B");
+
+// Intento de borrado cross-tenant
+const deletedA = deleteTaxProfile(contextTaxA);
+assert(deletedA === true, "C6. deleteTaxProfile(contextA) elimina con éxito el perfil de Tenant A");
+const profBAfterDelA = getTaxProfile(contextTaxB.companyId);
+assert(profBAfterDelA !== null && profBAfterDelA.companyId === compTaxB.companyId, "C7. El perfil fiscal de Tenant B sigue existiendo intacto tras borrado de Tenant A");
+
+// Recrear perfil de A para los siguientes tests
+saveTaxProfile(contextTaxA, {
+  legalName: 'Empresa A Fiscal S.L.',
+  taxId: 'B-77112201',
+  taxRegime: 'GENERAL',
+  defaultVatRate: 21
+});
+
+// ─── D. INYECCIÓN DE MODELO (DEFENSA FAIL-CLOSED) ───
+const injectedPayload = {
+  companyId: compTaxB.companyId,
+  businessId: phoneTaxTenantB,
+  legalName: 'Inyección Maliciosa de Modelo',
+  defaultVatRate: 4
+};
+saveTaxProfile(contextTaxA, injectedPayload);
+
+const profAVerifyInject = getTaxProfile(contextTaxA.companyId);
+const profBVerifyInject = getTaxProfile(contextTaxB.companyId);
+
+assert(profAVerifyInject.companyId === compTaxA.companyId, "D1. Modelo injection defendida: companyId de A se mantiene como autoridad");
+assert(profAVerifyInject.businessId === phoneTaxTenantA, "D2. Modelo injection defendida: businessId de A se mantiene sincronizado con phoneA");
+assert(profBVerifyInject.legalName === 'Empresa B Fiscal S.L.', "D3. Tenant B permanece completamente protegido contra payload spoofed");
+
+// ─── E. ROBUSTEZ DE UUID ───
+assert(isUuid(profAVerifyInject.companyId), "E1. companyId retornado es un UUID v4 canónico");
+assert(profAVerifyInject.companyId.includes('-') && profAVerifyInject.companyId.length === 36, "E2. companyId tiene formato UUID con guiones intactos (36 caracteres)");
+
+// Comprobación directa en SQLite
+const sqliteRowTaxA = currentDb.prepare("SELECT company_id, business_id FROM business_tax_profiles WHERE company_id = ?").get(compTaxA.companyId);
+assert(sqliteRowTaxA && sqliteRowTaxA.company_id === compTaxA.companyId, "E3. SQLite almacena el UUID con guiones intactos sin sufrir regex stripping");
+
+// ─── F. RESTRICCIONES RELACIONALES EN SQLITE ───
+// F1. FK Constraint: Inserción directa con company_id inexistente falla
+let caughtFkError = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO business_tax_profiles (company_id, business_id, legal_name)
+    VALUES ('00000000-0000-4000-8000-000000000099', '34600999999', 'Empresa Inexistente');
+  `).run();
+} catch (err) {
+  caughtFkError = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "F1. Violación de Foreign Key hacia companies(id) detectada");
+}
+assert(caughtFkError === true, "F2. SQLite rechaza inserción en business_tax_profiles sin company padre existente");
+
+// F2. NOT NULL Constraint en company_id
+let caughtNullCid = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO business_tax_profiles (company_id, business_id, legal_name)
+    VALUES (NULL, '34600999999', 'Null Cid');
+  `).run();
+} catch (err) {
+  caughtNullCid = true;
+  assert(err.message.includes('NOT NULL constraint failed'), "F3. NOT NULL constraint en company_id detectada");
+}
+assert(caughtNullCid === true, "F4. Inserción con company_id NULL es rechazada");
+
+// F3. NOT NULL Constraint en business_id
+let caughtNullBid = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO business_tax_profiles (company_id, business_id, legal_name)
+    VALUES (?, NULL, 'Null Bid');
+  `).run(compTaxA.companyId);
+} catch (err) {
+  caughtNullBid = true;
+  assert(err.message.includes('NOT NULL constraint failed'), "F5. NOT NULL constraint en business_id detectada");
+}
+assert(caughtNullBid === true, "F6. Inserción con business_id NULL es rechazada");
+
+// F4. Single profile per company (PRIMARY KEY / UNIQUE)
+let caughtDuplicateCid = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO business_tax_profiles (company_id, business_id, legal_name)
+    VALUES (?, '34600888888', 'Duplicado');
+  `).run(compTaxB.companyId);
+} catch (err) {
+  caughtDuplicateCid = true;
+  assert(err.message.includes('UNIQUE constraint failed'), "F7. Violación de PRIMARY KEY / UNIQUE en company_id detectada");
+}
+assert(caughtDuplicateCid === true, "F8. No se puede crear más de un perfil fiscal por company_id");
+
+// ─── G. COMPATIBILIDAD HACIA ATRÁS (DUAL-WRITE & ADAPTER TRANSITORIO) ───
+// G1. business_id almacena el teléfono normalizado
+assert(sqliteRowTaxA.business_id === phoneTaxTenantA, "G1. Dual-write: business_id almacena el teléfono limpio en SQLite");
+
+// G2. Lectura legacy con teléfono recupera el perfil correctamente
+const legacyReadTaxA = getTaxProfile(phoneTaxTenantA);
+assert(legacyReadTaxA !== null && legacyReadTaxA.companyId === compTaxA.companyId, "G2. getTaxProfile(phone) opera transparentemente vía adapter");
+assert(legacyReadTaxA.businessId === phoneTaxTenantA, "G3. Objeto retornado contiene tanto companyId como businessId");
+
+// G3. Escritura legacy con teléfono actualiza y mantiene dual-write
+saveTaxProfile(phoneTaxTenantA, {
+  economicActivity: 'Albañilería y Estructuras'
+});
+const updatedLegacyTaxA = getTaxProfile(compTaxA.companyId);
+assert(updatedLegacyTaxA.economicActivity === 'Albañilería y Estructuras', "G4. saveTaxProfile(phone) actualiza correctamente la fila");
+assert(updatedLegacyTaxA.companyId === compTaxA.companyId && updatedLegacyTaxA.businessId === phoneTaxTenantA, "G5. Dual-write preservado tras actualización legacy");
+
+// G4. Verificaciones de integridad en base de datos de test
+const fkViolations37 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult37 = currentDb.prepare("PRAGMA integrity_check;").get();
+assert(fkViolations37.length === 0, "G6. PRAGMA foreign_key_check = 0 violaciones en base de datos de test");
+assert(integrityResult37 && (integrityResult37.integrity_check === 'ok' || integrityResult37.integrity_check === 'OK'), "G7. PRAGMA integrity_check = ok en base de datos de test");
+
+cleanupTest37(phoneTaxTenantA);
+cleanupTest37(phoneTaxTenantB);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

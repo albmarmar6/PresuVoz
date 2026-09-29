@@ -2996,19 +2996,81 @@ export function listRecentMessages(chatId, limit = 50) {
 // ─── Métodos de Gestión Fiscal y Libros Registro (AEAT / Gestoría) ────────────
 
 /**
- * Obtiene el perfil fiscal completo de un negocio
+ * Obtiene el perfil fiscal completo de un negocio.
+ * Soporta companyId (UUID canónico), authenticatedContext ({ companyId, ... }),
+ * o identificador legacy (teléfono de WhatsApp de una compañía registrada).
  */
 export function getTaxProfile(companyContextOrId) {
   if (!companyContextOrId) return null;
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) return null;
 
-  const row = db.prepare('SELECT * FROM business_tax_profiles WHERE business_id = ?').get(cleanId);
+  let canonicalCompanyId = null;
+  let legacyPhone = null;
+
+  if (typeof companyContextOrId === 'object') {
+    canonicalCompanyId = companyContextOrId.companyId || companyContextOrId.id || null;
+    if (!canonicalCompanyId && (companyContextOrId.phone || companyContextOrId.company?.phone)) {
+      const rawPhone = companyContextOrId.company?.phone || companyContextOrId.phone;
+      legacyPhone = String(rawPhone).replace(/\D/g, '');
+      const compRow = db.prepare('SELECT id, phone FROM companies WHERE phone = ?').get(legacyPhone);
+      if (compRow) {
+        canonicalCompanyId = compRow.id;
+        legacyPhone = String(compRow.phone).replace(/\D/g, '');
+      }
+    }
+  } else if (typeof companyContextOrId === 'string') {
+    const trimmed = companyContextOrId.trim();
+    if (isUuid(trimmed)) {
+      canonicalCompanyId = trimmed;
+    } else {
+      // Compatibilidad legacy: buscar por teléfono
+      legacyPhone = trimmed.replace(/\D/g, '');
+      if (legacyPhone) {
+        const compRow = db.prepare('SELECT id, phone FROM companies WHERE phone = ?').get(legacyPhone);
+        if (compRow) {
+          canonicalCompanyId = compRow.id;
+          legacyPhone = String(compRow.phone).replace(/\D/g, '');
+        }
+      }
+    }
+  }
+
+  // Si tenemos canonicalCompanyId pero no legacyPhone, obtener phone de companies
+  if (canonicalCompanyId && !legacyPhone) {
+    const compRow = db.prepare('SELECT id, phone FROM companies WHERE id = ?').get(canonicalCompanyId);
+    if (compRow && compRow.phone) {
+      legacyPhone = String(compRow.phone).replace(/\D/g, '');
+    }
+  }
+
+  // Verificar si la tabla tiene ya la columna company_id (post-migración 007)
+  const cols = db.prepare('PRAGMA table_info("business_tax_profiles")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let row = null;
+  if (hasCompanyIdCol && canonicalCompanyId) {
+    row = db.prepare('SELECT * FROM business_tax_profiles WHERE company_id = ?').get(canonicalCompanyId);
+  }
+  // Fallback de compatibilidad por business_id si no se encontró por company_id o no existe la columna
+  if (!row && legacyPhone) {
+    row = db.prepare('SELECT * FROM business_tax_profiles WHERE business_id = ?').get(legacyPhone);
+  }
+
   if (!row) {
     // Si aún no existe el perfil fiscal específico, inicializarlo a partir de la tabla companies
-    const comp = getCompany(cleanId);
+    let comp = null;
+    if (canonicalCompanyId) {
+      comp = getCompanyById(canonicalCompanyId);
+    } else if (legacyPhone) {
+      comp = getCompany(legacyPhone);
+    }
+    if (!comp || (!canonicalCompanyId && !legacyPhone)) return null;
+
+    const resolvedCid = canonicalCompanyId || comp.id || comp.companyId || null;
+    const resolvedBid = legacyPhone || (comp.phone ? String(comp.phone).replace(/\D/g, '') : null);
+
     return {
-      businessId: cleanId,
+      companyId: resolvedCid,
+      businessId: resolvedBid,
       legalName: comp.fiscalName || comp.name || 'Empresa de Reformas',
       taxId: comp.cif || '',
       legalForm: comp.entityType === 'empresa' ? 'SL' : 'AUTONOMO',
@@ -3036,7 +3098,8 @@ export function getTaxProfile(companyContextOrId) {
   }
 
   return {
-    businessId: row.business_id,
+    companyId: row.company_id || canonicalCompanyId,
+    businessId: row.business_id || legacyPhone,
     legalName: row.legal_name,
     taxId: row.tax_id,
     legalForm: row.legal_form,
@@ -3064,81 +3127,236 @@ export function getTaxProfile(companyContextOrId) {
 }
 
 /**
- * Guarda o actualiza el perfil fiscal del negocio
+ * Guarda o actualiza el perfil fiscal del negocio.
+ * 
+ * Tenant Hardening & Dual-Write:
+ * - Requiere companyId (UUID) o authenticatedContext como autoridad canónica.
+ * - Soporta adapter transitorio por teléfono legacy para compañías existentes.
+ * - Inyección de modelo: cualquier company_id o business_id dentro de profileData es ignorado.
+ * - Dual-write: escribe company_id como clave primaria y mantiene business_id sincronizado.
  */
 export function saveTaxProfile(companyContextOrId, profileData = {}) {
   if (!companyContextOrId) {
     throw new Error("❌ [Tenant Boundary] saveTaxProfile requiere un companyId o contexto autenticado válido.");
   }
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) {
+
+  let canonicalCompanyId = null;
+  let canonicalPhone = null;
+
+  if (typeof companyContextOrId === 'object') {
+    canonicalCompanyId = companyContextOrId.companyId || companyContextOrId.id || null;
+    if (!canonicalCompanyId && (companyContextOrId.phone || companyContextOrId.company?.phone)) {
+      const rawPhone = companyContextOrId.company?.phone || companyContextOrId.phone;
+      const clean = String(rawPhone).replace(/\D/g, '');
+      const compRow = db.prepare('SELECT id, phone FROM companies WHERE phone = ?').get(clean);
+      if (compRow) {
+        canonicalCompanyId = compRow.id;
+        canonicalPhone = String(compRow.phone).replace(/\D/g, '');
+      }
+    }
+  } else if (typeof companyContextOrId === 'string') {
+    const trimmed = companyContextOrId.trim();
+    if (isUuid(trimmed)) {
+      canonicalCompanyId = trimmed;
+    } else {
+      // Compatibilidad legacy: buscar por teléfono
+      const clean = trimmed.replace(/\D/g, '');
+      if (clean) {
+        const compRow = db.prepare('SELECT id, phone FROM companies WHERE phone = ?').get(clean);
+        if (compRow) {
+          canonicalCompanyId = compRow.id;
+          canonicalPhone = String(compRow.phone).replace(/\D/g, '');
+        }
+      }
+    }
+  }
+
+  if (!canonicalCompanyId) {
     throw new Error("❌ [Tenant Boundary] saveTaxProfile: no se pudo resolver un tenant válido.");
   }
 
-  const existing = getTaxProfile(companyContextOrId) || {};
-  const updated = { ...existing, ...profileData, businessId: cleanId, updatedAt: new Date().toISOString() };
+  const companyRow = db.prepare('SELECT id, phone FROM companies WHERE id = ?').get(canonicalCompanyId);
+  if (!companyRow) {
+    throw new Error(`❌ [Tenant Boundary] saveTaxProfile: la empresa '${canonicalCompanyId}' no existe en la base de datos.`);
+  }
 
-  const stmt = db.prepare(`
-    INSERT INTO business_tax_profiles (
-      business_id, legal_name, tax_id, legal_form, economic_activity, iae_code,
-      tax_regime, vat_regime, income_tax_regime, vat_frequency, income_tax_frequency,
-      irpf_withholding_applicable, default_irpf_rate, default_vat_rate,
-      accounting_start_date, fiscal_year, current_invoice_series, verifactu_status,
-      gestor_name, gestor_email, gestor_phone, gestor_notes, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(business_id) DO UPDATE SET
-      legal_name = excluded.legal_name,
-      tax_id = excluded.tax_id,
-      legal_form = excluded.legal_form,
-      economic_activity = excluded.economic_activity,
-      iae_code = excluded.iae_code,
-      tax_regime = excluded.tax_regime,
-      vat_regime = excluded.vat_regime,
-      income_tax_regime = excluded.income_tax_regime,
-      vat_frequency = excluded.vat_frequency,
-      income_tax_frequency = excluded.income_tax_frequency,
-      irpf_withholding_applicable = excluded.irpf_withholding_applicable,
-      default_irpf_rate = excluded.default_irpf_rate,
-      default_vat_rate = excluded.default_vat_rate,
-      accounting_start_date = excluded.accounting_start_date,
-      fiscal_year = excluded.fiscal_year,
-      current_invoice_series = excluded.current_invoice_series,
-      verifactu_status = excluded.verifactu_status,
-      gestor_name = excluded.gestor_name,
-      gestor_email = excluded.gestor_email,
-      gestor_phone = excluded.gestor_phone,
-      gestor_notes = excluded.gestor_notes,
-      updated_at = excluded.updated_at
-  `);
+  if (!canonicalPhone && companyRow.phone) {
+    canonicalPhone = String(companyRow.phone).replace(/\D/g, '');
+  }
 
-  stmt.run(
-    updated.businessId,
-    updated.legalName,
-    updated.taxId,
-    updated.legalForm,
-    updated.economicActivity,
-    updated.iaeCode,
-    updated.taxRegime,
-    updated.vatRegime,
-    updated.incomeTaxRegime,
-    updated.vatFrequency,
-    updated.incomeTaxFrequency,
-    updated.irpfWithholdingApplicable ? 1 : 0,
-    updated.defaultIrpfRate,
-    updated.defaultVatRate,
-    updated.accountingStartDate,
-    updated.fiscalYear,
-    updated.currentInvoiceSeries,
-    updated.verifactuStatus,
-    updated.gestorName,
-    updated.gestorEmail,
-    updated.gestorPhone,
-    updated.gestorNotes,
-    updated.createdAt,
-    updated.updatedAt
-  );
+  // Defensa contra inyección: Ignorar cualquier companyId o businessId provisto en el payload
+  const { companyId: _ignoredCid, businessId: _ignoredBid, ...safeProfileData } = profileData;
 
-  return getTaxProfile(companyContextOrId);
+  const existing = getTaxProfile(canonicalCompanyId) || {};
+  const updated = {
+    ...existing,
+    ...safeProfileData,
+    companyId: canonicalCompanyId,
+    businessId: canonicalPhone,
+    updatedAt: new Date().toISOString()
+  };
+
+  const cols = db.prepare('PRAGMA table_info("business_tax_profiles")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  if (hasCompanyIdCol) {
+    const stmt = db.prepare(`
+      INSERT INTO business_tax_profiles (
+        company_id, business_id, legal_name, tax_id, legal_form, economic_activity, iae_code,
+        tax_regime, vat_regime, income_tax_regime, vat_frequency, income_tax_frequency,
+        irpf_withholding_applicable, default_irpf_rate, default_vat_rate,
+        accounting_start_date, fiscal_year, current_invoice_series, verifactu_status,
+        gestor_name, gestor_email, gestor_phone, gestor_notes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(company_id) DO UPDATE SET
+        business_id = excluded.business_id,
+        legal_name = excluded.legal_name,
+        tax_id = excluded.tax_id,
+        legal_form = excluded.legal_form,
+        economic_activity = excluded.economic_activity,
+        iae_code = excluded.iae_code,
+        tax_regime = excluded.tax_regime,
+        vat_regime = excluded.vat_regime,
+        income_tax_regime = excluded.income_tax_regime,
+        vat_frequency = excluded.vat_frequency,
+        income_tax_frequency = excluded.income_tax_frequency,
+        irpf_withholding_applicable = excluded.irpf_withholding_applicable,
+        default_irpf_rate = excluded.default_irpf_rate,
+        default_vat_rate = excluded.default_vat_rate,
+        accounting_start_date = excluded.accounting_start_date,
+        fiscal_year = excluded.fiscal_year,
+        current_invoice_series = excluded.current_invoice_series,
+        verifactu_status = excluded.verifactu_status,
+        gestor_name = excluded.gestor_name,
+        gestor_email = excluded.gestor_email,
+        gestor_phone = excluded.gestor_phone,
+        gestor_notes = excluded.gestor_notes,
+        updated_at = excluded.updated_at
+    `);
+
+    stmt.run(
+      updated.companyId,
+      updated.businessId,
+      updated.legalName,
+      updated.taxId,
+      updated.legalForm,
+      updated.economicActivity,
+      updated.iaeCode,
+      updated.taxRegime,
+      updated.vatRegime,
+      updated.incomeTaxRegime,
+      updated.vatFrequency,
+      updated.incomeTaxFrequency,
+      updated.irpfWithholdingApplicable ? 1 : 0,
+      updated.defaultIrpfRate,
+      updated.defaultVatRate,
+      updated.accountingStartDate,
+      updated.fiscalYear,
+      updated.currentInvoiceSeries,
+      updated.verifactuStatus,
+      updated.gestorName,
+      updated.gestorEmail,
+      updated.gestorPhone,
+      updated.gestorNotes,
+      updated.createdAt,
+      updated.updatedAt
+    );
+  } else {
+    // Compatibilidad pre-migración 007
+    const stmt = db.prepare(`
+      INSERT INTO business_tax_profiles (
+        business_id, legal_name, tax_id, legal_form, economic_activity, iae_code,
+        tax_regime, vat_regime, income_tax_regime, vat_frequency, income_tax_frequency,
+        irpf_withholding_applicable, default_irpf_rate, default_vat_rate,
+        accounting_start_date, fiscal_year, current_invoice_series, verifactu_status,
+        gestor_name, gestor_email, gestor_phone, gestor_notes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(business_id) DO UPDATE SET
+        legal_name = excluded.legal_name,
+        tax_id = excluded.tax_id,
+        legal_form = excluded.legal_form,
+        economic_activity = excluded.economic_activity,
+        iae_code = excluded.iae_code,
+        tax_regime = excluded.tax_regime,
+        vat_regime = excluded.vat_regime,
+        income_tax_regime = excluded.income_tax_regime,
+        vat_frequency = excluded.vat_frequency,
+        income_tax_frequency = excluded.income_tax_frequency,
+        irpf_withholding_applicable = excluded.irpf_withholding_applicable,
+        default_irpf_rate = excluded.default_irpf_rate,
+        default_vat_rate = excluded.default_vat_rate,
+        accounting_start_date = excluded.accounting_start_date,
+        fiscal_year = excluded.fiscal_year,
+        current_invoice_series = excluded.current_invoice_series,
+        verifactu_status = excluded.verifactu_status,
+        gestor_name = excluded.gestor_name,
+        gestor_email = excluded.gestor_email,
+        gestor_phone = excluded.gestor_phone,
+        gestor_notes = excluded.gestor_notes,
+        updated_at = excluded.updated_at
+    `);
+
+    stmt.run(
+      updated.businessId,
+      updated.legalName,
+      updated.taxId,
+      updated.legalForm,
+      updated.economicActivity,
+      updated.iaeCode,
+      updated.taxRegime,
+      updated.vatRegime,
+      updated.incomeTaxRegime,
+      updated.vatFrequency,
+      updated.incomeTaxFrequency,
+      updated.irpfWithholdingApplicable ? 1 : 0,
+      updated.defaultIrpfRate,
+      updated.defaultVatRate,
+      updated.accountingStartDate,
+      updated.fiscalYear,
+      updated.currentInvoiceSeries,
+      updated.verifactuStatus,
+      updated.gestorName,
+      updated.gestorEmail,
+      updated.gestorPhone,
+      updated.gestorNotes,
+      updated.createdAt,
+      updated.updatedAt
+    );
+  }
+
+  return getTaxProfile(canonicalCompanyId);
+}
+
+/**
+ * Elimina el perfil fiscal de un tenant de forma aislada y controlada.
+ */
+export function deleteTaxProfile(companyContextOrId) {
+  if (!companyContextOrId) return false;
+  let canonicalCompanyId = null;
+  if (typeof companyContextOrId === 'object') {
+    canonicalCompanyId = companyContextOrId.companyId || companyContextOrId.id || null;
+  } else if (typeof companyContextOrId === 'string' && isUuid(companyContextOrId.trim())) {
+    canonicalCompanyId = companyContextOrId.trim();
+  }
+  if (!canonicalCompanyId) {
+    const legacyId = resolveLegacyBusinessId(companyContextOrId);
+    if (!legacyId) return false;
+    const comp = db.prepare('SELECT id FROM companies WHERE phone = ?').get(legacyId);
+    canonicalCompanyId = comp?.id || null;
+  }
+  if (!canonicalCompanyId) return false;
+
+  const cols = db.prepare('PRAGMA table_info("business_tax_profiles")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+  if (hasCompanyIdCol) {
+    const result = db.prepare('DELETE FROM business_tax_profiles WHERE company_id = ?').run(canonicalCompanyId);
+    return result.changes > 0;
+  } else {
+    const legacyPhone = resolveLegacyBusinessId(canonicalCompanyId);
+    if (!legacyPhone) return false;
+    const result = db.prepare('DELETE FROM business_tax_profiles WHERE business_id = ?').run(legacyPhone);
+    return result.changes > 0;
+  }
 }
 
 /**
