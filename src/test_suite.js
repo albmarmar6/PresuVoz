@@ -4350,7 +4350,8 @@ import {
   resolveFiscalIncident,
   getFiscalIncident,
   deleteFiscalIncident,
-  getFiscalPeriod
+  getFiscalPeriod,
+  deleteFiscalPeriod
 } from './db_service.js';
 
 const phoneFiscalA = '34699554411';
@@ -5142,6 +5143,275 @@ assert(integrityResult37 && (integrityResult37.integrity_check === 'ok' || integ
 
 cleanupTest37(phoneTaxTenantA);
 cleanupTest37(phoneTaxTenantB);
+
+console.log("\nTEST 38: Migración Controlada de fiscal_periods a company_id (Fase 2E-2 — PK Compuesta, Backfill & Tenant Isolation)");
+
+// ─── A. MIGRATION ───
+// 1. migration 008 se registra correctamente en TEST
+const schemaRow008 = currentDb.prepare("SELECT version, name, applied_at FROM schema_migrations WHERE version = 8").get();
+assert(schemaRow008 && schemaRow008.version === 8, "A1. Migración 008 registrada en schema_migrations con versión 8");
+assert(schemaRow008 && schemaRow008.name === '008_fiscal_periods_company_id', "A2. Nombre de migración 008 coincide exactamente");
+assert(schemaRow008 && typeof schemaRow008.applied_at === 'string' && schemaRow008.applied_at.length > 10, "A3. Migración 008 tiene timestamp applied_at válido");
+
+// 2. production sigue con máximo migration 006 (007 y 008 NO registradas)
+const prodDbFor008Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+const prodSchema008 = prodDbFor008Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
+const prodMaxVersion008 = prodDbFor008Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
+prodDbFor008Check.close();
+assert(prodSchema008.length === 0, "A4. DB de producción (data/presuvoz.db) NO tiene registradas las migraciones 007 ni 008");
+assert(prodMaxVersion008 === 6, "A5. Versión máxima en DB de producción permanece inalterada en 6");
+
+// 3. migration 007 sigue intacta en test
+const schemaRow007Check = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 7").get();
+assert(schemaRow007Check && schemaRow007Check.name === '007_business_tax_profiles_company_id', "A6. Migración 007 permanece intacta en la base de datos de test");
+
+// ─── B. BACKFILL DETERMINISTA & CASOS DE ERROR FAIL-CLOSED ───
+// B1. business_id válido → company_id correcto y múltiples periodos del mismo negocio mantienen el mismo company_id
+const memDb38B = new DatabaseSync(':memory:');
+initMigrationTable(memDb38B);
+runMigrations(memDb38B, { migrations: MIGRATIONS.slice(0, 7), authorized: true });
+
+// Insertar 2 empresas con múltiples periodos fiscales según esquema previo a 008
+memDb38B.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-fp-comp1', '34677000001', 'Empresa FP 1'),
+    ('uuid-fp-comp2', '34677000002', 'Empresa FP 2');
+  INSERT INTO fiscal_periods (id, business_id, fiscal_year, quarter, status, critical_incidents_count, warnings_count, package_path) VALUES
+    ('34677000001_2026_Q1', '34677000001', 2026, 1, 'CLOSED', 0, 0, '/path/q1.zip'),
+    ('34677000001_2026_Q2', '34677000001', 2026, 2, 'SENT', 1, 2, '/path/q2.zip'),
+    ('34677000002_2026_Q1', '34677000002', 2026, 1, 'OPEN', 0, 0, NULL);
+`);
+
+const migRes38 = runMigrations(memDb38B, { migrations: [MIGRATIONS[7]], authorized: true });
+assert(migRes38.appliedCount === 1, "B1. Migración 008 se aplica con éxito sobre base de datos con datos");
+
+const fpRows38 = memDb38B.prepare("SELECT id, company_id, business_id, fiscal_year, quarter, status, critical_incidents_count, package_path FROM fiscal_periods ORDER BY company_id ASC, quarter ASC").all();
+assert(fpRows38.length === 3, "B2. Recuento de filas se preserva exactamente tras migración (3 filas)");
+assert(fpRows38[0].company_id === 'uuid-fp-comp1' && fpRows38[0].quarter === 1 && fpRows38[0].package_path === '/path/q1.zip', "B3. Fila 1 migrada con company_id correcto y datos intactos");
+assert(fpRows38[1].company_id === 'uuid-fp-comp1' && fpRows38[1].quarter === 2 && fpRows38[1].critical_incidents_count === 1, "B4. Múltiples periodos del mismo negocio mantienen el mismo company_id (Q1 y Q2)");
+assert(fpRows38[2].company_id === 'uuid-fp-comp2' && fpRows38[2].quarter === 1 && fpRows38[2].status === 'OPEN', "B5. Periodo de Empresa 2 migrado correctamente con su propio company_id");
+
+// ─── PASO 12: TEST DE ROLLBACK COMPLETO ───
+// Forzar fila huérfana (business_id sin empresa en companies)
+const memDb38Rollback = new DatabaseSync(':memory:');
+initMigrationTable(memDb38Rollback);
+runMigrations(memDb38Rollback, { migrations: MIGRATIONS.slice(0, 7), authorized: true });
+
+memDb38Rollback.exec(`
+  INSERT INTO companies (id, phone, name) VALUES ('uuid-fp-comp-ok', '34677000003', 'Empresa Valida');
+  INSERT INTO fiscal_periods (id, business_id, fiscal_year, quarter, status) VALUES
+    ('34677000003_2026_Q1', '34677000003', 2026, 1, 'OPEN'),
+    ('34699999999_2026_Q1', '34699999999', 2026, 1, 'OPEN');
+`);
+
+const countBeforeRollback = memDb38Rollback.prepare("SELECT COUNT(*) as c FROM fiscal_periods").get().c;
+let caughtOrphan008 = false;
+try {
+  runMigrations(memDb38Rollback, { migrations: [MIGRATIONS[7]], authorized: true });
+} catch (err) {
+  caughtOrphan008 = true;
+  assert(err.message.includes('huérfano') || err.message.includes('fail-closed'), "B6. Error descriptivo fail-closed ante periodo huérfano");
+}
+assert(caughtOrphan008 === true, "B7. Migración 008 aborta inmediatamente ante business_id huérfano");
+
+// Verificaciones de rollback
+const orphanApplied008 = memDb38Rollback.prepare("SELECT 1 FROM schema_migrations WHERE version = 8").get();
+assert(!orphanApplied008, "B8. Rollback atómico: Versión 8 NO queda registrada en schema_migrations");
+const countAfterRollback = memDb38Rollback.prepare("SELECT COUNT(*) as c FROM fiscal_periods").get().c;
+assert(countAfterRollback === countBeforeRollback, "B9. Rollback atómico: La tabla fiscal_periods queda exactamente como estaba");
+const tempTableCheck = memDb38Rollback.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fiscal_periods_new'").get();
+assert(!tempTableCheck, "B10. Rollback atómico: No quedan tablas temporales (fiscal_periods_new)");
+
+// Fail-closed por ambigüedad (>1 empresa para el mismo teléfono)
+const memDb38Ambig = new DatabaseSync(':memory:');
+initMigrationTable(memDb38Ambig);
+runMigrations(memDb38Ambig, { migrations: MIGRATIONS.slice(0, 7), authorized: true });
+memDb38Ambig.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-dup-1', '34677000099', 'Empresa Dup 1'),
+    ('uuid-dup-2', '+34 677 00 00 99', 'Empresa Dup 2');
+  INSERT INTO fiscal_periods (id, business_id, fiscal_year, quarter, status) VALUES
+    ('34677000099_2026_Q1', '34677000099', 2026, 1, 'OPEN');
+`);
+let caughtAmbig008 = false;
+try {
+  runMigrations(memDb38Ambig, { migrations: [MIGRATIONS[7]], authorized: true });
+} catch (err) {
+  caughtAmbig008 = true;
+}
+assert(caughtAmbig008 === true, "B11. Fail-closed: Múltiples empresas ambiguas provocan aborto y rollback");
+
+// ─── C. CLAVE PRIMARIA COMPUESTA (company_id, fiscal_year, quarter) ───
+// 9. dos periodos distintos del mismo company pueden coexistir: company_id + 2026 + Q1, company_id + 2026 + Q2
+// 10. dos empresas pueden tener el mismo: year + quarter sin colisionar
+// 11. mismo: company_id + year + quarter no puede duplicarse
+const phoneFpTenantA = '34677991101';
+const phoneFpTenantB = '34677991102';
+
+const cleanupTest38 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM fiscal_periods WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM business_tax_profiles WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+cleanupTest38(phoneFpTenantA);
+cleanupTest38(phoneFpTenantB);
+
+const compFpA = createCompanyWithIdentity({
+  name: 'Constructora Alpha Fiscal S.L.',
+  phone: phoneFpTenantA,
+  cif: 'B-77991101',
+  trade: 'Construcción'
+});
+const contextFpA = resolveAuthenticatedContext('whatsapp', phoneFpTenantA);
+
+const compFpB = createCompanyWithIdentity({
+  name: 'Reformas Beta Fiscal S.L.',
+  phone: phoneFpTenantB,
+  cif: 'B-77991102',
+  trade: 'Fontanería'
+});
+const contextFpB = resolveAuthenticatedContext('whatsapp', phoneFpTenantB);
+
+// Crear periodos
+const fpA_Q1 = getOrCreateFiscalPeriod(contextFpA, 2026, 1);
+const fpA_Q2 = getOrCreateFiscalPeriod(contextFpA, 2026, 2);
+const fpB_Q1 = getOrCreateFiscalPeriod(contextFpB, 2026, 1);
+
+assert(fpA_Q1 && fpA_Q2 && fpA_Q1.quarter === 1 && fpA_Q2.quarter === 2, "C1. Dos periodos del mismo company coexisten (2026 Q1 y 2026 Q2)");
+assert(fpB_Q1 && fpB_Q1.quarter === 1 && fpB_Q1.companyId === compFpB.companyId, "C2. Dos empresas tienen el mismo year + quarter (2026 Q1) sin colisionar");
+
+// Intento de duplicar (company_id, fiscal_year, quarter)
+let caughtDupPk = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO fiscal_periods (id, company_id, business_id, fiscal_year, quarter, status)
+    VALUES ('dup-id-test', ?, ?, 2026, 1, 'OPEN');
+  `).run(compFpA.companyId, phoneFpTenantA);
+} catch (err) {
+  caughtDupPk = true;
+  assert(err.message.includes('UNIQUE constraint failed'), "C3. Violación de clave primaria compuesta detectada en SQLite");
+}
+assert(caughtDupPk === true, "C4. SQLite rechaza duplicados de (company_id, fiscal_year, quarter)");
+
+// ─── D. AISLAMIENTO MULTI-TENANT ───
+// 12. Tenant A solo puede leer sus periodos
+const readPeriodA = getFiscalPeriod(contextFpA, 2026, 1);
+assert(readPeriodA !== null && readPeriodA.companyId === compFpA.companyId, "D1. Tenant A lee su propio periodo 2026 Q1");
+
+// 13. Tenant B solo puede leer sus periodos
+const readPeriodB = getFiscalPeriod(contextFpB, 2026, 1);
+assert(readPeriodB !== null && readPeriodB.companyId === compFpB.companyId, "D2. Tenant B lee su propio periodo 2026 Q1");
+
+// 14. Tenant A no puede modificar periodo de B
+updateFiscalPeriodStatus(contextFpA, 2026, 1, 'CLOSED', {
+  packagePath: '/alpha/cierre_q1.zip'
+});
+const checkBAfterAttack = getFiscalPeriod(contextFpB, 2026, 1);
+assert(checkBAfterAttack.status === 'OPEN' && checkBAfterAttack.packagePath === null, "D3. Tenant A no altera el periodo de Tenant B (permanece OPEN y sin packagePath)");
+
+// 15. Tenant A no puede borrar periodo de B
+const deleteAttemptByA = deleteFiscalPeriod(contextFpA, 2026, 1);
+assert(deleteAttemptByA === true, "D4. deleteFiscalPeriod elimina el periodo de Tenant A");
+const checkBAfterDelA = getFiscalPeriod(contextFpB, 2026, 1);
+assert(checkBAfterDelA !== null && checkBAfterDelA.companyId === compFpB.companyId, "D5. El periodo de Tenant B sigue existiendo intacto tras borrado de Tenant A");
+
+// Recrear periodo de A para siguientes pruebas
+getOrCreateFiscalPeriod(contextFpA, 2026, 1);
+
+// ─── E. INYECCIÓN DE MODELO (DEFENSA FAIL-CLOSED) ───
+// 16. company_id de Tenant B enviado desde Tenant A en extra es ignorado
+// 17. business_id de Tenant B enviado desde Tenant A en extra es ignorado
+const maliciousExtra = {
+  companyId: compFpB.companyId,
+  company_id: compFpB.companyId,
+  businessId: phoneFpTenantB,
+  business_id: phoneFpTenantB,
+  packagePath: '/alpha/injected.zip'
+};
+updateFiscalPeriodStatus(contextFpA, 2026, 1, 'SENT', maliciousExtra);
+
+const fpAVerified = getFiscalPeriod(contextFpA, 2026, 1);
+const fpBVerified = getFiscalPeriod(contextFpB, 2026, 1);
+assert(fpAVerified.companyId === compFpA.companyId, "E1. Modelo injection defendida: companyId de A se mantiene como autoridad");
+assert(fpAVerified.businessId === phoneFpTenantA, "E2. Modelo injection defendida: businessId de A se mantiene sincronizado con phoneA");
+assert(fpBVerified.status === 'OPEN' && fpBVerified.packagePath === null, "E3. Tenant B permanece completamente protegido contra payload spoofed");
+
+// ─── F. ROBUSTEZ DE UUID ───
+// 18. UUID se conserva íntegramente
+assert(isUuid(fpAVerified.companyId), "F1. companyId retornado es un UUID v4 canónico");
+assert(fpAVerified.companyId.length === 36 && fpAVerified.companyId.includes('-'), "F2. companyId tiene formato UUID con guiones intactos");
+
+// 19. No existe regex stripping de UUID en SQLite
+const sqliteRowFpA = currentDb.prepare("SELECT company_id, business_id FROM fiscal_periods WHERE company_id = ? AND fiscal_year = 2026 AND quarter = 1").get(compFpA.companyId);
+assert(sqliteRowFpA && sqliteRowFpA.company_id === compFpA.companyId, "F3. SQLite almacena el UUID con guiones intactos sin regex stripping");
+
+// ─── G. CLAVE FORÁNEA & ON DELETE RESTRICT ───
+// 20. company_id inexistente → FK violation
+let caughtFkInexistente = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO fiscal_periods (id, company_id, business_id, fiscal_year, quarter, status)
+    VALUES ('fake-id-fp', '00000000-0000-4000-8000-000000000099', '34600999999', 2026, 1, 'OPEN');
+  `).run();
+} catch (err) {
+  caughtFkInexistente = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "G1. Violación de Foreign Key hacia companies(id) detectada");
+}
+assert(caughtFkInexistente === true, "G2. SQLite rechaza inserción en fiscal_periods con company inexistente");
+
+// 21. company_id NULL → rechazado
+let caughtNullCidFp = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO fiscal_periods (id, company_id, business_id, fiscal_year, quarter, status)
+    VALUES ('fake-id-fp2', NULL, '34600999999', 2026, 1, 'OPEN');
+  `).run();
+} catch (err) {
+  caughtNullCidFp = true;
+  assert(err.message.includes('NOT NULL constraint failed'), "G3. NOT NULL constraint en company_id detectada");
+}
+assert(caughtNullCidFp === true, "G4. Inserción con company_id NULL es rechazada");
+
+// 22. ON DELETE RESTRICT: borrar una empresa con periodos fiscales es rechazado
+let caughtRestrictDelete = false;
+try {
+  currentDb.prepare("DELETE FROM companies WHERE id = ?").run(compFpB.companyId);
+} catch (err) {
+  caughtRestrictDelete = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "G5. ON DELETE RESTRICT previene el borrado de empresa con historial fiscal");
+}
+assert(caughtRestrictDelete === true, "G6. La empresa no puede ser eliminada mientras tenga registros en fiscal_periods");
+
+// ─── H. COMPATIBILIDAD HACIA ATRÁS (LEGACY ADAPTER & DUAL-WRITE) ───
+// 23. callers legacy existentes siguen funcionando mediante adapter
+const legacyReadFpA = getFiscalPeriod(phoneFpTenantA, 2026, 1);
+assert(legacyReadFpA !== null && legacyReadFpA.companyId === compFpA.companyId, "H1. getFiscalPeriod(phone) funciona vía legacy adapter");
+
+// 24. adapter termina resolviendo a company_id
+assert(legacyReadFpA.companyId === compFpA.companyId, "H2. Legacy adapter resuelve unívocamente a company_id canónico");
+
+// 25. Actualización legacy mantiene dual-write
+updateFiscalPeriodStatus(phoneFpTenantA, 2026, 1, 'READY_FOR_GESTORIA');
+const legacyUpdatedFpA = getFiscalPeriod(compFpA.companyId, 2026, 1);
+assert(legacyUpdatedFpA.status === 'READY_FOR_GESTORIA', "H3. updateFiscalPeriodStatus(phone) actualiza la fila correctamente");
+assert(legacyUpdatedFpA.companyId === compFpA.companyId && legacyUpdatedFpA.businessId === phoneFpTenantA, "H4. Dual-write preservado: company_id y business_id sincronizados");
+
+// ─── I. INTEGRIDAD RELACIONAL ───
+// 26. PRAGMA foreign_key_check = 0
+// 27. PRAGMA integrity_check = ok
+const fkViolations38 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult38 = currentDb.prepare("PRAGMA integrity_check;").get();
+assert(fkViolations38.length === 0, "I1. PRAGMA foreign_key_check = 0 violaciones en base de datos de test");
+assert(integrityResult38 && (integrityResult38.integrity_check === 'ok' || integrityResult38.integrity_check === 'OK'), "I2. PRAGMA integrity_check = ok en base de datos de test");
+
+cleanupTest38(phoneFpTenantA);
+cleanupTest38(phoneFpTenantB);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

@@ -3716,28 +3716,106 @@ export function listInvestmentAssets(companyContextOrId) {
 }
 
 /**
+ * Resuelve el tenant canónico (companyId UUID y phone limpio) para funciones fiscales.
+ * Garantiza comportamiento Fail-Closed si la empresa no existe.
+ */
+function resolveCanonicalFiscalTenant(companyContextOrId) {
+  if (!companyContextOrId) return null;
+  let companyId = null;
+  let phone = null;
+
+  if (typeof companyContextOrId === 'object') {
+    companyId = companyContextOrId.companyId || companyContextOrId.id || null;
+    if (!companyId && (companyContextOrId.phone || companyContextOrId.company?.phone)) {
+      const rawPhone = companyContextOrId.company?.phone || companyContextOrId.phone;
+      const clean = String(rawPhone).replace(/\D/g, '');
+      const comp = db.prepare('SELECT id, phone FROM companies WHERE phone = ?').get(clean);
+      if (comp) {
+        companyId = comp.id;
+        phone = String(comp.phone).replace(/\D/g, '');
+      }
+    }
+  } else if (typeof companyContextOrId === 'string') {
+    const trimmed = companyContextOrId.trim();
+    if (isUuid(trimmed)) {
+      companyId = trimmed;
+    } else {
+      const clean = trimmed.replace(/\D/g, '');
+      if (clean) {
+        const comp = db.prepare('SELECT id, phone FROM companies WHERE phone = ?').get(clean);
+        if (comp) {
+          companyId = comp.id;
+          phone = String(comp.phone).replace(/\D/g, '');
+        }
+      }
+    }
+  }
+
+  if (!companyId) return null;
+
+  if (!phone) {
+    const comp = db.prepare('SELECT phone FROM companies WHERE id = ?').get(companyId);
+    if (!comp) return null; // Fail-closed: la empresa no existe en companies
+    phone = comp.phone ? String(comp.phone).replace(/\D/g, '') : '';
+  }
+
+  return { companyId, phone };
+}
+
+/**
  * Periodos Fiscales y Control de Trimestre
+ * Identidad canónica: (company_id, fiscal_year, quarter)
  */
 export function getOrCreateFiscalPeriod(companyContextOrId, year, quarter) {
-  if (!companyContextOrId) return null;
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) return null;
-  const id = `${cleanId}_${year}_Q${quarter}`;
-  let period = db.prepare('SELECT * FROM fiscal_periods WHERE id = ?').get(id);
+  if (!companyContextOrId || !year || !quarter) return null;
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant) return null;
 
-  if (!period) {
-    const now = new Date().toISOString();
-    db.prepare(`
-      INSERT INTO fiscal_periods (id, business_id, fiscal_year, quarter, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'OPEN', ?, ?)
-    `).run(id, cleanId, year, quarter, now, now);
+  const { companyId, phone: cleanPhone } = tenant;
+  const fiscalYear = Number(year);
+  const q = Number(quarter);
+
+  const cols = db.prepare('PRAGMA table_info("fiscal_periods")').all();
+  const hasCompanyId = cols.some(c => c.name === 'company_id');
+
+  let period = null;
+
+  if (hasCompanyId) {
+    period = db.prepare('SELECT * FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').get(companyId, fiscalYear, q);
+
+    if (!period) {
+      const now = new Date().toISOString();
+      const canonicalId = `${companyId}_${fiscalYear}_Q${q}`;
+      db.prepare(`
+        INSERT INTO fiscal_periods (
+          id, company_id, business_id, fiscal_year, quarter, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?)
+      `).run(canonicalId, companyId, cleanPhone || '', fiscalYear, q, now, now);
+      period = db.prepare('SELECT * FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').get(companyId, fiscalYear, q);
+    }
+  } else {
+    // Compatibilidad pre-migración 008
+    const id = `${cleanPhone}_${fiscalYear}_Q${q}`;
     period = db.prepare('SELECT * FROM fiscal_periods WHERE id = ?').get(id);
+
+    if (!period) {
+      const now = new Date().toISOString();
+      db.prepare(`
+        INSERT INTO fiscal_periods (id, business_id, fiscal_year, quarter, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'OPEN', ?, ?)
+      `).run(id, cleanPhone, fiscalYear, q, now, now);
+      period = db.prepare('SELECT * FROM fiscal_periods WHERE id = ?').get(id);
+    }
   }
+
+  if (!period) return null;
 
   return {
     id: period.id,
-    businessId: period.business_id,
+    companyId: period.company_id || companyId,
+    businessId: period.business_id || cleanPhone,
     fiscalYear: period.fiscal_year,
+    year: period.fiscal_year,
     quarter: period.quarter,
     status: period.status,
     lastQualityCheckAt: period.last_quality_check_at,
@@ -3752,19 +3830,41 @@ export function getOrCreateFiscalPeriod(companyContextOrId, year, quarter) {
 }
 
 /**
- * Obtiene un periodo fiscal existente (Tenant-Scoped)
+ * Obtiene un periodo fiscal existente (Tenant-Scoped por company_id)
  */
 export function getFiscalPeriod(companyContextOrId, year, quarter) {
-  if (!companyContextOrId) return null;
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) return null;
-  const id = `${cleanId}_${year}_Q${quarter}`;
-  const period = db.prepare('SELECT * FROM fiscal_periods WHERE id = ? AND business_id = ?').get(id, cleanId);
+  if (!companyContextOrId || !year || !quarter) return null;
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant) return null;
+
+  const { companyId, phone: cleanPhone } = tenant;
+  const fiscalYear = Number(year);
+  const q = Number(quarter);
+
+  const cols = db.prepare('PRAGMA table_info("fiscal_periods")').all();
+  const hasCompanyId = cols.some(c => c.name === 'company_id');
+
+  let period = null;
+
+  if (hasCompanyId) {
+    period = db.prepare('SELECT * FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').get(companyId, fiscalYear, q);
+    // Fallback legacy por business_id si no se encontrara por company_id
+    if (!period && cleanPhone) {
+      period = db.prepare('SELECT * FROM fiscal_periods WHERE business_id = ? AND fiscal_year = ? AND quarter = ?').get(cleanPhone, fiscalYear, q);
+    }
+  } else {
+    const id = `${cleanPhone}_${fiscalYear}_Q${q}`;
+    period = db.prepare('SELECT * FROM fiscal_periods WHERE id = ? AND business_id = ?').get(id, cleanPhone);
+  }
+
   if (!period) return null;
+
   return {
     id: period.id,
-    businessId: period.business_id,
+    companyId: period.company_id || companyId,
+    businessId: period.business_id || cleanPhone,
     fiscalYear: period.fiscal_year,
+    year: period.fiscal_year,
     quarter: period.quarter,
     status: period.status,
     lastQualityCheckAt: period.last_quality_check_at,
@@ -3778,42 +3878,87 @@ export function getFiscalPeriod(companyContextOrId, year, quarter) {
   };
 }
 
+/**
+ * Actualiza el estado y metadatos de un periodo fiscal (Tenant-Scoped)
+ */
 export function updateFiscalPeriodStatus(companyContextOrId, year, quarter, status, extra = {}) {
-  if (!companyContextOrId) return null;
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) return null;
-  const id = `${cleanId}_${year}_Q${quarter}`;
+  if (!companyContextOrId || !year || !quarter) return null;
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant) return null;
+
+  const { companyId, phone: cleanPhone } = tenant;
+  const fiscalYear = Number(year);
+  const q = Number(quarter);
+
+  // Asegurar que el periodo existe
+  const existing = getOrCreateFiscalPeriod(companyContextOrId, fiscalYear, q);
+  if (!existing) return null;
+
+  // Sanitización de extra: Ignorar cualquier intento de inyección de tenant
+  const { companyId: _ignoredCid, businessId: _ignoredBid, ...safeExtra } = extra;
+
+  const cols = db.prepare('PRAGMA table_info("fiscal_periods")').all();
+  const hasCompanyId = cols.some(c => c.name === 'company_id');
   const now = new Date().toISOString();
 
   let query = 'UPDATE fiscal_periods SET status = ?, updated_at = ?';
   const params = [status, now];
 
-  if (extra.packagePath) {
+  if (safeExtra.packagePath !== undefined) {
     query += ', package_path = ?';
-    params.push(extra.packagePath);
+    params.push(safeExtra.packagePath);
   }
-  if (extra.sentToEmail) {
+  if (safeExtra.sentToEmail !== undefined) {
     query += ', sent_to_email = ?, sent_at = ?';
-    params.push(extra.sentToEmail, now);
+    params.push(safeExtra.sentToEmail, now);
   }
-  if (extra.criticalCount !== undefined) {
+  if (safeExtra.criticalCount !== undefined) {
     query += ', critical_incidents_count = ?';
-    params.push(extra.criticalCount);
+    params.push(safeExtra.criticalCount);
   }
-  if (extra.warningsCount !== undefined) {
+  if (safeExtra.warningsCount !== undefined) {
     query += ', warnings_count = ?';
-    params.push(extra.warningsCount);
+    params.push(safeExtra.warningsCount);
   }
-  if (extra.lastQualityCheckAt) {
+  if (safeExtra.lastQualityCheckAt !== undefined) {
     query += ', last_quality_check_at = ?';
-    params.push(extra.lastQualityCheckAt);
+    params.push(safeExtra.lastQualityCheckAt);
   }
 
-  query += ' WHERE id = ? AND business_id = ?';
-  params.push(id, cleanId);
+  if (hasCompanyId) {
+    query += ' WHERE company_id = ? AND fiscal_year = ? AND quarter = ?';
+    params.push(companyId, fiscalYear, q);
+  } else {
+    query += ' WHERE id = ? AND business_id = ?';
+    params.push(`${cleanPhone}_${fiscalYear}_Q${q}`, cleanPhone);
+  }
 
   db.prepare(query).run(...params);
-  return getOrCreateFiscalPeriod(companyContextOrId, year, quarter);
+  return getFiscalPeriod(companyContextOrId, fiscalYear, q);
+}
+
+/**
+ * Elimina un periodo fiscal de forma aislada y controlada (Tenant-Scoped).
+ */
+export function deleteFiscalPeriod(companyContextOrId, year, quarter) {
+  if (!companyContextOrId || !year || !quarter) return false;
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant) return false;
+
+  const { companyId, phone: cleanPhone } = tenant;
+  const fiscalYear = Number(year);
+  const q = Number(quarter);
+
+  const cols = db.prepare('PRAGMA table_info("fiscal_periods")').all();
+  const hasCompanyId = cols.some(c => c.name === 'company_id');
+
+  let result;
+  if (hasCompanyId) {
+    result = db.prepare('DELETE FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').run(companyId, fiscalYear, q);
+  } else {
+    result = db.prepare('DELETE FROM fiscal_periods WHERE business_id = ? AND fiscal_year = ? AND quarter = ?').run(cleanPhone, fiscalYear, q);
+  }
+  return result.changes > 0;
 }
 
 /**
