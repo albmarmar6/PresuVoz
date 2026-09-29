@@ -82,6 +82,9 @@ export const DEFAULT_COMPANY = {
 
 export function getCompany(phone) {
   if (!phone) return { ...DEFAULT_COMPANY, isConfigured: false };
+  if (typeof phone === 'string' && isUuid(phone)) {
+    return getCompanyById(phone) || { ...DEFAULT_COMPANY, id: phone, companyId: phone, isConfigured: false };
+  }
   const cleanPhone = String(phone).replace(/\D/g, '');
   const stmt = db.prepare('SELECT * FROM companies WHERE phone = ?');
   const row = stmt.get(cleanPhone);
@@ -3151,6 +3154,13 @@ export function savePurchaseInvoice(companyContextOrId, inv = {}) {
   }
 
   const id = inv.id || `REC-${new Date().getFullYear()}-${Date.now().toString().slice(-4)}`;
+  if (inv.id) {
+    const existing = db.prepare('SELECT business_id FROM purchase_invoices WHERE id = ?').get(inv.id);
+    if (existing && existing.business_id !== cleanId) {
+      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar factura recibida ${inv.id} de otro tenant.`);
+      return null;
+    }
+  }
   const now = new Date().toISOString();
 
   // Calcular periodo fiscal por fecha de factura si no viene dado
@@ -3436,6 +3446,13 @@ export function saveInvestmentAsset(companyContextOrId, asset = {}) {
     throw new Error("❌ [Tenant Boundary] saveInvestmentAsset requiere un companyId o contexto autenticado obligatorio.");
   }
   const id = asset.id || `AST-${new Date().getFullYear()}-${Date.now().toString().slice(-4)}`;
+  if (asset.id) {
+    const existing = db.prepare('SELECT business_id FROM investment_assets WHERE id = ?').get(asset.id);
+    if (existing && existing.business_id !== cleanId) {
+      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar bien de inversión ${asset.id} de otro tenant.`);
+      return null;
+    }
+  }
   const now = new Date().toISOString();
 
   const stmt = db.prepare(`
@@ -3516,6 +3533,33 @@ export function getOrCreateFiscalPeriod(companyContextOrId, year, quarter) {
   };
 }
 
+/**
+ * Obtiene un periodo fiscal existente (Tenant-Scoped)
+ */
+export function getFiscalPeriod(companyContextOrId, year, quarter) {
+  if (!companyContextOrId) return null;
+  const cleanId = resolveLegacyBusinessId(companyContextOrId);
+  if (!cleanId) return null;
+  const id = `${cleanId}_${year}_Q${quarter}`;
+  const period = db.prepare('SELECT * FROM fiscal_periods WHERE id = ? AND business_id = ?').get(id, cleanId);
+  if (!period) return null;
+  return {
+    id: period.id,
+    businessId: period.business_id,
+    fiscalYear: period.fiscal_year,
+    quarter: period.quarter,
+    status: period.status,
+    lastQualityCheckAt: period.last_quality_check_at,
+    criticalIncidentsCount: period.critical_incidents_count,
+    warningsCount: period.warnings_count,
+    packagePath: period.package_path,
+    sentAt: period.sent_at,
+    sentToEmail: period.sent_to_email,
+    createdAt: period.created_at,
+    updatedAt: period.updated_at
+  };
+}
+
 export function updateFiscalPeriodStatus(companyContextOrId, year, quarter, status, extra = {}) {
   if (!companyContextOrId) return null;
   const cleanId = resolveLegacyBusinessId(companyContextOrId);
@@ -3547,8 +3591,8 @@ export function updateFiscalPeriodStatus(companyContextOrId, year, quarter, stat
     params.push(extra.lastQualityCheckAt);
   }
 
-  query += ' WHERE id = ?';
-  params.push(id);
+  query += ' WHERE id = ? AND business_id = ?';
+  params.push(id, cleanId);
 
   db.prepare(query).run(...params);
   return getOrCreateFiscalPeriod(companyContextOrId, year, quarter);
@@ -3561,6 +3605,13 @@ export function saveFiscalIncident(companyContextOrId, incident = {}) {
   const cleanId = resolveLegacyBusinessId(companyContextOrId);
   if (!cleanId) return null;
   const id = incident.id || `INC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  if (incident.id) {
+    const existing = db.prepare('SELECT business_id FROM fiscal_incidents WHERE id = ?').get(incident.id);
+    if (existing && existing.business_id !== cleanId) {
+      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar incidencia fiscal ${incident.id} de otro tenant.`);
+      return null;
+    }
+  }
   const now = new Date().toISOString();
 
   db.prepare(`
@@ -3626,6 +3677,46 @@ export function resolveFiscalIncident(companyContextOrId, incidentId) {
 }
 
 /**
+ * Obtiene una incidencia fiscal por su ID (Tenant-Scoped)
+ */
+export function getFiscalIncident(companyContextOrId, incidentId) {
+  if (incidentId === undefined) {
+    console.warn("🛑 [Seguridad Tenant] getFiscalIncident invocado sin tenant context obligatorio.");
+    return null;
+  }
+  if (!companyContextOrId || !incidentId) return null;
+
+  const cleanId = resolveLegacyBusinessId(companyContextOrId);
+  if (!cleanId) {
+    console.warn("🛑 [Seguridad Tenant] getFiscalIncident: no se pudo resolver un tenant válido.");
+    return null;
+  }
+
+  const row = db.prepare('SELECT * FROM fiscal_incidents WHERE id = ? AND business_id = ?').get(incidentId, cleanId);
+  return row || null;
+}
+
+/**
+ * Elimina una incidencia fiscal por su ID (Tenant-Scoped)
+ */
+export function deleteFiscalIncident(companyContextOrId, incidentId) {
+  if (incidentId === undefined) {
+    console.warn("🛑 [Seguridad Tenant] deleteFiscalIncident invocado sin tenant context obligatorio.");
+    return false;
+  }
+  if (!companyContextOrId || !incidentId) return false;
+
+  const cleanId = resolveLegacyBusinessId(companyContextOrId);
+  if (!cleanId) {
+    console.warn("🛑 [Seguridad Tenant] deleteFiscalIncident: no se pudo resolver un tenant válido.");
+    return false;
+  }
+
+  const res = db.prepare('DELETE FROM fiscal_incidents WHERE id = ? AND business_id = ?').run(incidentId, cleanId);
+  return res.changes > 0;
+}
+
+/**
  * Trazabilidad y Auditoría Fiscal (Audit Log)
  */
 export function recordAuditLog({
@@ -3641,7 +3732,8 @@ export function recordAuditLog({
   reason = null
 }) {
   const target = companyContextOrId || businessId;
-  const cleanId = resolveLegacyBusinessId(target) || String(target || '').replace(/\D/g, '');
+  const cleanId = resolveLegacyBusinessId(target) || (typeof target === 'string' && !isUuid(target) && !target.includes('-') ? target.replace(/\D/g, '') : null);
+  if (!cleanId) return null;
   const id = `LOG-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
   const now = new Date().toISOString();
 
@@ -3666,7 +3758,7 @@ export function recordAuditLog({
 
 export function listAuditLogs(companyContextOrId, { entityType, entityId } = {}) {
   if (!companyContextOrId) return [];
-  const cleanId = resolveLegacyBusinessId(companyContextOrId) || String(companyContextOrId || '').replace(/\D/g, '');
+  const cleanId = resolveLegacyBusinessId(companyContextOrId) || (typeof companyContextOrId === 'string' && !isUuid(companyContextOrId) && !companyContextOrId.includes('-') ? companyContextOrId.replace(/\D/g, '') : null);
   if (!cleanId) return [];
 
   let query = 'SELECT * FROM audit_logs WHERE business_id = ?';

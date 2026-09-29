@@ -150,6 +150,8 @@ export function getQuarterSummary(companyContextOrIdOrBusinessId, year = null, q
   const companyId = tenant?.companyId || null;
   const cleanId = resolveLegacyBusinessId(companyContextOrIdOrBusinessId) || tenant?.phone || (typeof companyContextOrIdOrBusinessId === 'string' && !String(companyContextOrIdOrBusinessId).includes('-') ? String(companyContextOrIdOrBusinessId).replace(/\D/g, '') : null);
 
+  if (!companyId && !cleanId) return null;
+
   const bounds = getFiscalPeriodBounds(year, quarter);
   const fiscalPeriodId = `${bounds.year}_Q${bounds.quarter}`;
 
@@ -1263,7 +1265,10 @@ export async function buildGestoriaPackageZip(companyContextOrId, year = null, q
   const quality = runFiscalQualityChecks(companyContextOrId, year, quarter);
   const { period } = quarterData;
 
-  const tenantFolder = companyId || legacyBusinessId || 'unknown_tenant';
+  if (!companyId && !legacyBusinessId) {
+    throw new Error("❌ [Tenant Boundary] buildGestoriaPackageZip: no se pudo resolver un tenant válido.");
+  }
+  const tenantFolder = companyId || legacyBusinessId;
   const exportDir = path.resolve('data', 'fiscal_exports', tenantFolder);
   if (!fs.existsSync(exportDir)) {
     fs.mkdirSync(exportDir, { recursive: true });

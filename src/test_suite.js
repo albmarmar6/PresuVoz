@@ -4345,7 +4345,10 @@ import {
   getPurchaseInvoice,
   deletePurchaseInvoice,
   saveFiscalIncident,
-  resolveFiscalIncident
+  resolveFiscalIncident,
+  getFiscalIncident,
+  deleteFiscalIncident,
+  getFiscalPeriod
 } from './db_service.js';
 
 const phoneFiscalA = '34699554411';
@@ -4388,7 +4391,7 @@ const compFiscalB = createCompanyWithIdentity({
 });
 const contextFiscalB = resolveAuthenticatedContext('whatsapp', phoneFiscalB);
 
-// 1. Cross-tenant purchase invoice read: getPurchaseInvoice(tenantB, idA) devuelve null
+// TEST A — Purchase invoice isolation
 const invA34 = savePurchaseInvoice(contextFiscalA, {
   id: 'REC-34-A01',
   supplierName: 'Materiales Eléctricos A',
@@ -4399,45 +4402,83 @@ const invA34 = savePurchaseInvoice(contextFiscalA, {
   issueDate: '2026-08-10'
 });
 
-const crossReadPinv = getPurchaseInvoice(contextFiscalB, 'REC-34-A01');
-assert(crossReadPinv === null, "1. Cross-Tenant Read: getPurchaseInvoice(tenantB, idA) devuelve null (Zero-Disclosure cross-tenant)");
-const legitReadPinv = getPurchaseInvoice(contextFiscalA, 'REC-34-A01');
-assert(legitReadPinv !== null && legitReadPinv.id === 'REC-34-A01', "1b. Lectura legítima: getPurchaseInvoice(tenantA, idA) recupera la factura de compra");
+const invB34 = savePurchaseInvoice(contextFiscalB, {
+  id: 'REC-34-B01',
+  supplierName: 'Suministros Fontanería B',
+  supplierTaxId: 'B-22222222',
+  taxBase: 800,
+  vatRate: 21,
+  totalAmount: 968,
+  issueDate: '2026-08-11'
+});
 
-// 2. Cross-tenant purchase invoice delete: deletePurchaseInvoice(tenantB, idA) devuelve false y permanece intacta
-const crossDeletePinv = deletePurchaseInvoice(contextFiscalB, 'REC-34-A01');
-assert(crossDeletePinv === false, "2. Cross-Tenant Delete: deletePurchaseInvoice(tenantB, idA) devuelve false y bloquea la eliminación");
-const verifyPinvIntact = currentDb.prepare("SELECT * FROM purchase_invoices WHERE id = ?").get('REC-34-A01');
-assert(verifyPinvIntact !== null && verifyPinvIntact.supplier_name === 'Materiales Eléctricos A', "2b. Integridad en SQLite: la factura de Tenant A permanece 100% intacta tras intento cross-tenant");
+// Tenant B intenta leer factura de Tenant A -> null
+const crossReadAfromB = getPurchaseInvoice(contextFiscalB, 'REC-34-A01');
+assert(crossReadAfromB === null, "TEST A: Cross-Tenant Read: getPurchaseInvoice(tenantB, idA) devuelve null (Zero-Disclosure cross-tenant)");
 
-// 3. Cross-tenant fiscal incident resolve: resolveFiscalIncident(tenantB, incA) devuelve false y permanece OPEN
+// Tenant A intenta leer factura de Tenant B -> null
+const crossReadBfromA = getPurchaseInvoice(contextFiscalA, 'REC-34-B01');
+assert(crossReadBfromA === null, "TEST A: Cross-Tenant Read: getPurchaseInvoice(tenantA, idB) devuelve null (Zero-Disclosure cross-tenant)");
+
+// Lectura legítima de Tenant A
+const legitReadA = getPurchaseInvoice(contextFiscalA, 'REC-34-A01');
+assert(legitReadA !== null && legitReadA.id === 'REC-34-A01' && legitReadA.supplierName === 'Materiales Eléctricos A', "TEST A: Lectura legítima: getPurchaseInvoice(tenantA, idA) recupera su propia factura");
+
+// Lectura legítima de Tenant B
+const legitReadB = getPurchaseInvoice(contextFiscalB, 'REC-34-B01');
+assert(legitReadB !== null && legitReadB.id === 'REC-34-B01' && legitReadB.supplierName === 'Suministros Fontanería B', "TEST A: Lectura legítima: getPurchaseInvoice(tenantB, idB) recupera su propia factura");
+
+// TEST B — Purchase invoice delete isolation
+// Tenant A intenta borrar factura de Tenant B -> false
+const crossDeleteBfromA = deletePurchaseInvoice(contextFiscalA, 'REC-34-B01');
+assert(crossDeleteBfromA === false, "TEST B: Cross-Tenant Delete: deletePurchaseInvoice(tenantA, idB) devuelve false y bloquea la eliminación");
+const verifyPinvBIntact = currentDb.prepare("SELECT * FROM purchase_invoices WHERE id = ?").get('REC-34-B01');
+assert(verifyPinvBIntact !== null && verifyPinvBIntact.supplier_name === 'Suministros Fontanería B', "TEST B: Integridad en SQLite: la factura de Tenant B permanece 100% intacta tras intento cross-tenant");
+
+// TEST C — Fiscal incident isolation
 saveFiscalIncident(contextFiscalA, {
+  id: 'INC-34-A01',
   entityType: 'PURCHASE_INVOICE',
   entityId: 'REC-34-A01',
   errorCode: 'MISSING_DOC',
   severity: 'WARNING',
-  message: 'Justificante pendiente'
+  message: 'Justificante pendiente A'
 });
-const incidentsA = listFiscalIncidents(contextFiscalA);
-const incA = incidentsA.find(i => i.entity_id === 'REC-34-A01' || i.entityId === 'REC-34-A01');
-const incAId = incA ? (incA.id || incA.entity_id) : 'REC-34-A01';
+saveFiscalIncident(contextFiscalB, {
+  id: 'INC-34-B01',
+  entityType: 'PURCHASE_INVOICE',
+  entityId: 'REC-34-B01',
+  errorCode: 'MISSING_DOC',
+  severity: 'WARNING',
+  message: 'Justificante pendiente B'
+});
 
-const crossResolveInc = resolveFiscalIncident(contextFiscalB, incAId);
-assert(crossResolveInc === false, "3. Cross-Tenant Incident: resolveFiscalIncident(tenantB, incA) devuelve false");
-const verifyIncOpen = currentDb.prepare("SELECT resolution_status FROM fiscal_incidents WHERE id = ?").get(incAId);
-assert(verifyIncOpen && verifyIncOpen.resolution_status === 'OPEN', "3b. Integridad Incidencia: la incidencia de Tenant A permanece OPEN tras intento cross-tenant");
+// Tenant A intenta leer incidencia de B -> null
+assert(getFiscalIncident(contextFiscalA, 'INC-34-B01') === null, "TEST C: Cross-Tenant Incident Read: getFiscalIncident(tenantA, incB) devuelve null");
+// Tenant B lee su propia incidencia -> registro
+const legitIncB = getFiscalIncident(contextFiscalB, 'INC-34-B01');
+assert(legitIncB !== null && legitIncB.id === 'INC-34-B01', "TEST C: Lectura legítima de incidencia propia por Tenant B");
 
-const legitResolveInc = resolveFiscalIncident(contextFiscalA, incAId);
-assert(legitResolveInc === true, "3c. Resolución legítima: resolveFiscalIncident(tenantA, incA) resuelve con éxito");
-const verifyIncResolved = currentDb.prepare("SELECT resolution_status FROM fiscal_incidents WHERE id = ?").get(incAId);
-assert(verifyIncResolved && verifyIncResolved.resolution_status === 'RESOLVED', "3d. Integridad Incidencia: estado pasa a RESOLVED para el tenant autorizado");
+// Tenant A intenta resolver incidencia de B -> false
+const crossResolveInc = resolveFiscalIncident(contextFiscalA, 'INC-34-B01');
+assert(crossResolveInc === false, "TEST C: Cross-Tenant Incident Resolve: resolveFiscalIncident(tenantA, incB) devuelve false");
+const verifyIncBOpen = currentDb.prepare("SELECT resolution_status FROM fiscal_incidents WHERE id = ?").get('INC-34-B01');
+assert(verifyIncBOpen && verifyIncBOpen.resolution_status === 'OPEN', "TEST C: Integridad Incidencia: la incidencia de Tenant B permanece OPEN tras intento cross-tenant");
 
-// 4. Model Injection Defense: objeto malicioso emitido por IA con company_id / business_id de Beta
+// Tenant B resuelve legítimamente su propia incidencia
+const legitResolveIncB = resolveFiscalIncident(contextFiscalB, 'INC-34-B01');
+assert(legitResolveIncB === true, "TEST C: Resolución legítima: resolveFiscalIncident(tenantB, incB) resuelve con éxito");
+const verifyIncBResolved = currentDb.prepare("SELECT resolution_status FROM fiscal_incidents WHERE id = ?").get('INC-34-B01');
+assert(verifyIncBResolved && verifyIncBResolved.resolution_status === 'RESOLVED', "TEST C: Integridad Incidencia: estado pasa a RESOLVED para el tenant autorizado");
+
+// TEST D — Model injection defense
 const injectedAiPayload = {
   company_id: compFiscalB.companyId,
   companyId: compFiscalB.companyId,
   businessId: phoneFiscalB,
   business_id: phoneFiscalB,
+  company_phone: phoneFiscalB,
+  phone: phoneFiscalB,
   id: 'REC-34-INJECT-01',
   supplierName: 'Proveedor Inyección Maliciosa',
   taxBase: 300,
@@ -4445,27 +4486,21 @@ const injectedAiPayload = {
   totalAmount: 363,
   issueDate: '2026-08-12'
 };
-// Guardado ejecutado en sesión de Tenant A:
+// Guardado ejecutado en sesión autenticada de Tenant A:
 savePurchaseInvoice(contextFiscalA, injectedAiPayload);
 const verifyInjectionNeutralized = currentDb.prepare("SELECT business_id FROM purchase_invoices WHERE id = ?").get('REC-34-INJECT-01');
-assert(verifyInjectionNeutralized.business_id === phoneFiscalA, "4. Model Injection: savePurchaseInvoice neutraliza businessId/companyId inyectados y fuerza el tenant autenticado de Alpha");
+assert(verifyInjectionNeutralized && verifyInjectionNeutralized.business_id === phoneFiscalA, "TEST D: Model Injection: savePurchaseInvoice neutraliza businessId/companyId inyectados y fuerza el tenant autenticado de Alpha");
 
-// 5. Unauthenticated spoof defense: llamadas con contexto nulo/indefinido
-assert(getPurchaseInvoice(null, 'REC-34-A01') === null, "5a. Unauthenticated Spoof: getPurchaseInvoice(null) deniega acceso y retorna null");
-assert(deletePurchaseInvoice(null, 'REC-34-A01') === false, "5b. Unauthenticated Spoof: deletePurchaseInvoice(null) deniega eliminación y retorna false");
-assert(resolveFiscalIncident(null, incAId) === false, "5c. Unauthenticated Spoof: resolveFiscalIncident(null) deniega resolución y retorna false");
+// TEST E — UUID passed to legacy resolver
+const fakeUuid = '12345678-1234-1234-1234-123456789abc';
+const resolvedFakeUuid = resolveLegacyBusinessId(fakeUuid);
+assert(resolvedFakeUuid === null, "TEST E: UUID inexistente pasado a resolveLegacyBusinessId devuelve null (Fail-Closed, jamás dígitos extraídos)");
+const compByFakeUuid = getCompany(fakeUuid);
+assert(compByFakeUuid && compByFakeUuid.isConfigured === false, "TEST E: getCompany con UUID inexistente no extrae dígitos como teléfono y retorna no configurada");
+const logsFakeUuid = listAuditLogs(fakeUuid);
+assert(Array.isArray(logsFakeUuid) && logsFakeUuid.length === 0, "TEST E: listAuditLogs con UUID inexistente retorna array vacío sin llamar a replace(/\D/g, '')");
 
-// 6. resolveLegacyBusinessId verification
-const resByIdA = resolveLegacyBusinessId(compFiscalA.companyId);
-assert(resByIdA === phoneFiscalA, "6a. Resolver canónico: resolveLegacyBusinessId(UUID_A) retorna cleanPhone canónico");
-const resByContextA = resolveLegacyBusinessId({ companyId: compFiscalA.companyId });
-assert(resByContextA === phoneFiscalA, "6b. Resolver canónico: resolveLegacyBusinessId({ companyId: UUID_A }) retorna cleanPhone canónico");
-const resInvalidUuid = resolveLegacyBusinessId('00000000-0000-0000-0000-000000000000');
-assert(resInvalidUuid === null, "6c. Resolver canónico: UUID inexistente retorna null (Fail-Closed)");
-const resNull = resolveLegacyBusinessId(null);
-assert(resNull === null, "6d. Resolver canónico: contexto nulo retorna null");
-
-// 7. Modelo 303 isolation: getQuarterSummary solo computa facturas emitidas de su company_id
+// TEST F — Model 303 isolation
 currentDb.prepare(`
   INSERT INTO invoices (id, company_id, company_phone, client_name, total_amount, status, data_json, fiscal_period, created_at)
   VALUES (?, ?, ?, ?, ?, 'EMITIDA', ?, ?, ?)
@@ -4503,23 +4538,23 @@ currentDb.prepare(`
 const summaryA34 = getQuarterSummary(contextFiscalA, 2026, 3);
 const summaryB34 = getQuarterSummary(contextFiscalB, 2026, 3);
 
-assert(summaryA34.summary.issuedCount === 1, "7a. Modelo 303 Isolation: Tenant A solo computa 1 factura emitida propia");
-assert(summaryA34.summary.issuedTaxBase === 1000, "7b. Modelo 303 Isolation: Base imponible de Tenant A es 1.000€ (sin contaminar con Beta)");
-assert(summaryA34.summary.issuedVatTotal === 210, "7c. Modelo 303 Isolation: IVA devengado de Tenant A es 210€");
-assert(summaryB34.summary.issuedCount === 1, "7d. Modelo 303 Isolation: Tenant B solo computa 1 factura emitida propia");
-assert(summaryB34.summary.issuedTaxBase === 2000, "7e. Modelo 303 Isolation: Base imponible de Tenant B es 2.000€");
-assert(summaryB34.summary.issuedVatTotal === 420, "7f. Modelo 303 Isolation: IVA devengado de Tenant B es 420€");
+assert(summaryA34.summary.issuedCount === 1, "TEST F: Modelo 303 Isolation: Tenant A solo computa 1 factura emitida propia");
+assert(summaryA34.summary.issuedTaxBase === 1000, "TEST F: Modelo 303 Isolation: Base imponible de Tenant A es 1.000€ (sin contaminar con Beta)");
+assert(summaryA34.summary.issuedVatTotal === 210, "TEST F: Modelo 303 Isolation: IVA devengado de Tenant A es 210€");
+assert(summaryB34.summary.issuedCount === 1, "TEST F: Modelo 303 Isolation: Tenant B solo computa 1 factura emitida propia");
+assert(summaryB34.summary.issuedTaxBase === 2000, "TEST F: Modelo 303 Isolation: Base imponible de Tenant B es 2.000€");
+assert(summaryB34.summary.issuedVatTotal === 420, "TEST F: Modelo 303 Isolation: IVA devengado de Tenant B es 420€");
 
-// 8. Export collision defense: Dos empresas sin CIF generan Cierre_Fiscal_..._SINCIF.zip
+// TEST G — Export isolation (ambas empresas sin CIF generan Cierre_Fiscal_..._SIN_CIF.zip)
 const pkgA = await buildGestoriaPackageZip(contextFiscalA, 2026, 3);
 const pkgB = await buildGestoriaPackageZip(contextFiscalB, 2026, 3);
 
-assert(path.basename(pkgA.zipPath) === pkgA.fileName && pkgA.fileName.startsWith('Cierre_Fiscal_2026_Q3_'), "8a. Export Collision: Nombre de archivo de exportación coincide con patrón oficial");
-assert(path.basename(pkgB.zipPath) === pkgB.fileName && pkgB.fileName.startsWith('Cierre_Fiscal_2026_Q3_'), "8b. Export Collision: Nombre de archivo de exportación de B coincide");
-assert(pkgA.zipPath !== pkgB.zipPath, "8c. Export Collision: Las rutas físicas de almacenamiento son distintas (aisladas por companyId)");
-assert(pkgA.zipPath.includes(compFiscalA.companyId), "8d. Export Collision: El archivo de Alpha reside dentro de su directorio data/fiscal_exports/<company_id>/");
-assert(pkgB.zipPath.includes(compFiscalB.companyId), "8e. Export Collision: El archivo de Beta reside dentro de su directorio data/fiscal_exports/<company_id>/");
-assert(fs.existsSync(pkgA.zipPath) && fs.existsSync(pkgB.zipPath), "8f. Export Collision: Ambos archivos coexisten simultáneamente en disco sin sobrescribirse");
+assert(path.basename(pkgA.zipPath) === pkgA.fileName && pkgA.fileName.startsWith('Cierre_Fiscal_2026_Q3_'), "TEST G: Export Collision: Nombre de archivo de exportación coincide con patrón oficial");
+assert(path.basename(pkgB.zipPath) === pkgB.fileName && pkgB.fileName.startsWith('Cierre_Fiscal_2026_Q3_'), "TEST G: Export Collision: Nombre de archivo de exportación de B coincide");
+assert(pkgA.zipPath !== pkgB.zipPath, "TEST G: Export Collision: Las rutas físicas de almacenamiento son distintas (aisladas por companyId)");
+assert(pkgA.zipPath.includes(compFiscalA.companyId), "TEST G: Export Collision: El archivo de Alpha reside dentro de su directorio data/fiscal_exports/<company_id>/");
+assert(pkgB.zipPath.includes(compFiscalB.companyId), "TEST G: Export Collision: El archivo de Beta reside dentro de su directorio data/fiscal_exports/<company_id>/");
+assert(fs.existsSync(pkgA.zipPath) && fs.existsSync(pkgB.zipPath), "TEST G: Export Collision: Ambos archivos coexisten simultáneamente en disco sin sobrescribirse");
 
 // Limpiar archivos físicos de exportación generados durante el test
 try {
@@ -4531,7 +4566,86 @@ try {
   if (fs.existsSync(dirB)) fs.rmdirSync(dirB);
 } catch (e) {}
 
-// 9. Tax profile isolation: saveTaxProfile y getTaxProfile
+// TEST H — Unauthenticated fiscal operation
+assert(getPurchaseInvoice(null, 'REC-34-A01') === null, "TEST H: Unauthenticated: getPurchaseInvoice(null) deniega acceso y retorna null");
+assert(deletePurchaseInvoice(null, 'REC-34-A01') === false, "TEST H: Unauthenticated: deletePurchaseInvoice(null) deniega eliminación y retorna false");
+assert(resolveFiscalIncident(null, 'INC-34-A01') === false, "TEST H: Unauthenticated: resolveFiscalIncident(null) deniega resolución y retorna false");
+assert(getFiscalIncident(null, 'INC-34-A01') === null, "TEST H: Unauthenticated: getFiscalIncident(null) deniega lectura y retorna null");
+assert(getQuarterSummary(null, 2026, 3) === null, "TEST H: Unauthenticated: getQuarterSummary(null) retorna null");
+
+let threwSaveUnauth = false;
+try {
+  savePurchaseInvoice(null, { id: 'REC-UNAUTH-01' });
+} catch (e) {
+  threwSaveUnauth = true;
+  assert(e.message.includes('Tenant Boundary'), "TEST H: savePurchaseInvoice(null) lanza error de Tenant Boundary");
+}
+assert(threwSaveUnauth, "TEST H: Intento no autenticado de savePurchaseInvoice se bloquea en fail-closed");
+
+let threwExportUnauth = false;
+try {
+  await buildGestoriaPackageZip(null, 2026, 3);
+} catch (e) {
+  threwExportUnauth = true;
+}
+assert(threwExportUnauth, "TEST H: buildGestoriaPackageZip(null) lanza error y bloquea exportación no autenticada");
+
+// TEST I — Cross-tenant update
+// Tenant A intenta actualizar factura REC-34-B01 de Tenant B
+const crossUpdateRes = savePurchaseInvoice(contextFiscalA, {
+  id: 'REC-34-B01',
+  supplierName: 'Ataque Modificación Cross-Tenant',
+  taxBase: 9999
+});
+assert(crossUpdateRes === null, "TEST I: Cross-Tenant Update: savePurchaseInvoice de factura de otro tenant es bloqueado y retorna null");
+const verifyBNotUpdated = currentDb.prepare("SELECT * FROM purchase_invoices WHERE id = ?").get('REC-34-B01');
+assert(verifyBNotUpdated && verifyBNotUpdated.supplier_name === 'Suministros Fontanería B' && verifyBNotUpdated.taxable_base === 800, "TEST I: En SQLite, la factura de Tenant B mantiene sus valores originales sin alteración");
+
+// Tenant B crea un activo de inversión
+saveInvestmentAsset(contextFiscalB, {
+  id: 'AST-34-B01',
+  description: 'Furgoneta Taller Beta',
+  purchaseBase: 15000,
+  vatAmount: 3150,
+  totalAmount: 18150
+});
+// Tenant A intenta actualizar activo AST-34-B01 de Tenant B
+const crossAssetUpdateRes = saveInvestmentAsset(contextFiscalA, {
+  id: 'AST-34-B01',
+  description: 'Ataque Modificación Activo'
+});
+assert(crossAssetUpdateRes === null, "TEST I: Cross-Tenant Asset Update: saveInvestmentAsset de activo de otro tenant retorna null");
+const verifyAssetBNotUpdated = currentDb.prepare("SELECT * FROM investment_assets WHERE id = ?").get('AST-34-B01');
+assert(verifyAssetBNotUpdated && verifyAssetBNotUpdated.description === 'Furgoneta Taller Beta', "TEST I: En SQLite, el bien de inversión de Tenant B mantiene su descripción original");
+
+// Tenant A intenta actualizar incidencia INC-34-B01 de Tenant B
+const crossIncidentUpdateRes = saveFiscalIncident(contextFiscalA, {
+  id: 'INC-34-B01',
+  message: 'Ataque Modificación Incidencia'
+});
+assert(crossIncidentUpdateRes === null, "TEST I: Cross-Tenant Incident Update: saveFiscalIncident de incidencia de otro tenant retorna null");
+
+// TEST J — Cross-tenant delete
+const crossDeletePinvJ = deletePurchaseInvoice(contextFiscalA, 'REC-34-B01');
+assert(crossDeletePinvJ === false, "TEST J: Cross-Tenant Delete: deletePurchaseInvoice(tenantA, idB) retorna false");
+const crossDeleteIncJ = deleteFiscalIncident(contextFiscalA, 'INC-34-B01');
+assert(crossDeleteIncJ === false, "TEST J: Cross-Tenant Delete: deleteFiscalIncident(tenantA, incB) retorna false");
+const verifyRowStillPresent = currentDb.prepare("SELECT id FROM purchase_invoices WHERE id = ?").get('REC-34-B01');
+assert(verifyRowStillPresent !== null, "TEST J: 0 eliminaciones en purchase_invoices de Tenant B tras intento de Tenant A");
+const verifyIncStillPresent = currentDb.prepare("SELECT id FROM fiscal_incidents WHERE id = ?").get('INC-34-B01');
+assert(verifyIncStillPresent !== null, "TEST J: 0 eliminaciones en fiscal_incidents de Tenant B tras intento de Tenant A");
+
+// TEST K — Legacy compatibility
+const resByIdA = resolveLegacyBusinessId(compFiscalA.companyId);
+assert(resByIdA === phoneFiscalA, "TEST K: Resolver canónico: resolveLegacyBusinessId(UUID_A) retorna cleanPhone canónico");
+const resByContextA = resolveLegacyBusinessId({ companyId: compFiscalA.companyId });
+assert(resByContextA === phoneFiscalA, "TEST K: Resolver canónico: resolveLegacyBusinessId({ companyId: UUID_A }) retorna cleanPhone canónico");
+
+// listPurchaseInvoices pasando companyId en lugar de teléfono legacy
+const listAByUuid = listPurchaseInvoices(compFiscalA.companyId);
+assert(listAByUuid.length >= 1 && listAByUuid.some(i => i.id === 'REC-34-A01'), "TEST K: listPurchaseInvoices funciona transparentemente con UUID companyId mediante resolver");
+
+// saveTaxProfile y getTaxProfile con companyId / authContext
 saveTaxProfile(contextFiscalA, {
   vatRegime: 'GENERAL',
   defaultVatRate: 21,
@@ -4539,7 +4653,6 @@ saveTaxProfile(contextFiscalA, {
   defaultIrpfRate: 15,
   incomeTaxRegime: 'ESTIMACION_DIRECTA_SIMPLIFICADA'
 });
-
 saveTaxProfile(contextFiscalB, {
   vatRegime: 'RECARGO_EQUIVALENCIA',
   defaultVatRate: 10,
@@ -4547,33 +4660,29 @@ saveTaxProfile(contextFiscalB, {
   defaultIrpfRate: 0,
   incomeTaxRegime: 'OBJETIVA'
 });
+const profileA = getTaxProfile(compFiscalA.companyId);
+const profileB = getTaxProfile(compFiscalB.companyId);
+assert(profileA.vatRegime === 'GENERAL' && profileA.defaultIrpfRate === 15, "TEST K: getTaxProfile(companyId) recupera régimen General e IRPF 15% de Alpha");
+assert(profileB.vatRegime === 'RECARGO_EQUIVALENCIA' && profileB.defaultIrpfRate === 0, "TEST K: getTaxProfile(companyId) recupera Recargo de Equivalencia de Beta");
 
-const profileA = getTaxProfile(contextFiscalA);
-const profileB = getTaxProfile(contextFiscalB);
-
-assert(profileA.vatRegime === 'GENERAL' && profileA.defaultIrpfRate === 15, "9a. Tax Profile Isolation: Perfil de Alpha mantiene su régimen General e IRPF 15%");
-assert(profileB.vatRegime === 'RECARGO_EQUIVALENCIA' && profileB.defaultIrpfRate === 0, "9b. Tax Profile Isolation: Perfil de Beta mantiene Recargo de Equivalencia");
-
-// 10. Fiscal period isolation: getOrCreateFiscalPeriod y updateFiscalPeriodStatus
-const periodA = getOrCreateFiscalPeriod(contextFiscalA, 2026, 4);
-const periodB = getOrCreateFiscalPeriod(contextFiscalB, 2026, 4);
-
-assert(periodA.status === 'OPEN', "10a. Fiscal Period: El periodo 4T 2026 de Alpha se inicializa en OPEN");
-assert(periodB.status === 'OPEN', "10b. Fiscal Period: El periodo 4T 2026 de Beta se inicializa en OPEN");
+// getOrCreateFiscalPeriod y getFiscalPeriod con companyId
+const periodA = getOrCreateFiscalPeriod(compFiscalA.companyId, 2026, 4);
+const periodB = getOrCreateFiscalPeriod(compFiscalB.companyId, 2026, 4);
+assert(periodA.status === 'OPEN', "TEST K: Fiscal Period: Periodo 4T 2026 de Alpha se inicializa en OPEN");
+assert(periodB.status === 'OPEN', "TEST K: Fiscal Period: Periodo 4T 2026 de Beta se inicializa en OPEN");
 
 updateFiscalPeriodStatus(contextFiscalB, 2026, 4, 'CLOSED');
-const periodAAfterBUpdate = currentDb.prepare("SELECT status FROM fiscal_periods WHERE business_id = ? AND fiscal_year = 2026 AND quarter = 4").get(phoneFiscalA);
-const periodBAfterBUpdate = currentDb.prepare("SELECT status FROM fiscal_periods WHERE business_id = ? AND fiscal_year = 2026 AND quarter = 4").get(phoneFiscalB);
+const periodAGet = getFiscalPeriod(compFiscalA.companyId, 2026, 4);
+const periodBGet = getFiscalPeriod(compFiscalB.companyId, 2026, 4);
+assert(periodBGet.status === 'CLOSED', "TEST K: Fiscal Period: Periodo de Beta pasa a CLOSED tras update");
+assert(periodAGet.status === 'OPEN', "TEST K: Fiscal Period Isolation: Periodo de Alpha permanece OPEN con getFiscalPeriod(UUID)");
 
-assert(periodBAfterBUpdate.status === 'CLOSED', "10c. Fiscal Period: El periodo de Beta pasa a CLOSED");
-assert(periodAAfterBUpdate.status === 'OPEN', "10d. Fiscal Period Isolation: El periodo de Alpha permanece en OPEN (inmune a mutaciones de Beta)");
-
-// 11. Integridad relacional y verificación de base de datos
+// Integridad relacional y verificación de base de datos
 const fkCheck34 = currentDb.prepare('PRAGMA foreign_key_check').all();
-assert(fkCheck34.length === 0, "11a. Integridad: PRAGMA foreign_key_check 0 violaciones tras TEST 34");
+assert(fkCheck34.length === 0, "PRAGMA foreign_key_check 0 violaciones tras TEST 34");
 
 const integrityCheck34 = currentDb.prepare('PRAGMA integrity_check').get();
-assert(integrityCheck34.integrity_check === 'ok', "11b. Integridad: PRAGMA integrity_check confirma base de datos 100% íntegra (ok)");
+assert(integrityCheck34.integrity_check === 'ok', "PRAGMA integrity_check confirma base de datos 100% íntegra (ok)");
 
 // Limpieza final de TEST 34
 cleanupTest34(phoneFiscalA);

@@ -2862,8 +2862,26 @@ async function startWhatsAppGateway() {
 
     // 4.1 Factura de compra / gasto recibido (desde audio o texto interpretado por Gemini)
     if (aiResult?.action === 'purchase_invoice' && aiResult?.purchaseInvoiceInfo) {
+      const authenticatedCompanyId = session.authContext?.companyId || session.companyId;
+      if (!authenticatedCompanyId) {
+        console.warn(`🛑 [Seguridad Tenant] Operación fiscal rechazada: sesión no autenticada para ${senderNumber}.`);
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: "⚠️ No se ha podido verificar la empresa asociada a este número. Por favor, asegúrate de haber configurado tu cuenta."
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+        return;
+      }
+
+      // Sanitizar posibles inyecciones de Gemini
+      delete aiResult.purchaseInvoiceInfo.company_id;
+      delete aiResult.purchaseInvoiceInfo.companyId;
+      delete aiResult.purchaseInvoiceInfo.business_id;
+      delete aiResult.purchaseInvoiceInfo.businessId;
+      delete aiResult.purchaseInvoiceInfo.company_phone;
+      delete aiResult.purchaseInvoiceInfo.phone;
+
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-      const tenantContext = session.authContext || { companyId: session.companyId, phone: cleanPhone };
+      const tenantContext = session.authContext || { companyId: authenticatedCompanyId, phone: cleanPhone };
       const normalizedInvoice = validateAndNormalizePurchaseInvoice(aiResult.purchaseInvoiceInfo, tenantContext);
       const savedInvoice = savePurchaseInvoice(tenantContext, normalizedInvoice);
 
@@ -3344,10 +3362,19 @@ async function startWhatsAppGateway() {
               { logger, reuploadRequest: sock.updateMediaMessage }
             );
 
-            // Guardar justificante en disco aislado por tenant
-            const tenantContext = session.authContext || { companyId: session.companyId, phone: senderNumber };
-            const tenantFolder = session.companyId || senderNumber;
-            const receiptsDir = path.resolve('data', 'purchase_receipts', tenantFolder);
+            const authenticatedCompanyId = session.authContext?.companyId || session.companyId;
+            if (!authenticatedCompanyId) {
+              console.warn(`🛑 [Seguridad Tenant] Imagen de factura rechazada: no existe companyId autenticado para ${senderNumber}.`);
+              const sentErr = await sock.sendMessage(remoteJid, {
+                text: "⚠️ No se ha podido verificar la empresa asociada a este número. Por favor, asegúrate de haber configurado tu cuenta."
+              });
+              if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+              return;
+            }
+
+            // Guardar justificante en disco aislado por company_id
+            const tenantContext = session.authContext || { companyId: authenticatedCompanyId, phone: senderNumber };
+            const receiptsDir = path.resolve('data', 'purchase_receipts', authenticatedCompanyId);
             if (!fs.existsSync(receiptsDir)) fs.mkdirSync(receiptsDir, { recursive: true });
             const receiptPath = path.join(receiptsDir, `${Date.now()}.jpg`);
             fs.writeFileSync(receiptPath, buffer);
@@ -3356,6 +3383,14 @@ async function startWhatsAppGateway() {
               { buffer, mimeType: 'image/jpeg', caption: rawCaption },
               GEMINI_API_KEY
             );
+
+            // Sanitizar posibles inyecciones del modelo
+            delete rawExtraction.company_id;
+            delete rawExtraction.companyId;
+            delete rawExtraction.business_id;
+            delete rawExtraction.businessId;
+            delete rawExtraction.company_phone;
+            delete rawExtraction.phone;
 
             const normalizedInvoice = validateAndNormalizePurchaseInvoice(rawExtraction, tenantContext, receiptPath);
             const savedInvoice = savePurchaseInvoice(tenantContext, normalizedInvoice);
@@ -3582,8 +3617,17 @@ async function startWhatsAppGateway() {
           }
 
           if (act.type === 'send_gestoria_package') {
+            const companyId = session?.authContext?.companyId || session?.companyId;
+            if (!companyId) {
+              console.warn(`🛑 [Tenant Authority] pendingAction 'send_gestoria_package' rechazada: sesión sin companyId para JID '${remoteJid}'`);
+              const sentErr = await sock.sendMessage(remoteJid, {
+                text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+              });
+              if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+              return;
+            }
             const phone = session.phone || String(remoteJid).replace(/\D/g, '');
-            const tenantContext = session.authContext || { companyId: session.companyId, phone };
+            const tenantContext = session.authContext || { companyId, phone };
             try {
               const res = await sendFiscalPackageToGestoria({
                 companyContextOrId: tenantContext,
@@ -4136,7 +4180,12 @@ async function startWhatsAppGateway() {
               if (sentIntentMsg?.key?.id) botSentMessageIds.add(sentIntentMsg.key.id);
             }
             try {
-              const tenantContext = session.authContext || { companyId: session.companyId, phone: senderNumber };
+              const companyId = session.authContext?.companyId || session.companyId;
+              if (!companyId) {
+                console.warn(`🛑 [Seguridad Tenant] No se genera paquete fiscal: sesión sin companyId autenticado para ${senderNumber}.`);
+                return;
+              }
+              const tenantContext = session.authContext || { companyId, phone: senderNumber };
               const { zipBuffer, pdfBuffer, fileName } = await buildGestoriaPackageZip(
                 tenantContext,
                 detected.params.year,
