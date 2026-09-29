@@ -3361,29 +3361,60 @@ export function deleteTaxProfile(companyContextOrId) {
 
 /**
  * Guarda o actualiza una Factura Recibida (Compra / Proveedor)
+ * 
+ * Tenant Hardening & Dual-Write:
+ * - Requiere companyId (UUID) o authenticatedContext como autoridad canónica.
+ * - Soporta adapter transitorio por teléfono legacy para compañías existentes.
+ * - Inyección de modelo: cualquier company_id o business_id dentro de inv es ignorado.
+ * - Dual-write: escribe company_id como autoridad y mantiene business_id sincronizado.
  */
 export function savePurchaseInvoice(companyContextOrId, inv = {}) {
   if (!companyContextOrId) {
     throw new Error("❌ [Tenant Boundary] savePurchaseInvoice requiere un companyId o contexto autenticado obligatorio.");
   }
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) {
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
     throw new Error("❌ [Tenant Boundary] savePurchaseInvoice: no se pudo resolver un tenant válido.");
   }
+  const { companyId, phone: cleanPhone } = tenant;
 
-  const id = inv.id || `REC-${new Date().getFullYear()}-${Date.now().toString().slice(-4)}`;
-  if (inv.id) {
-    const existing = db.prepare('SELECT business_id FROM purchase_invoices WHERE id = ?').get(inv.id);
-    if (existing && existing.business_id !== cleanId) {
-      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar factura recibida ${inv.id} de otro tenant.`);
-      return null;
+  // Defensa contra inyección: Ignorar company_id y business_id provistos en payload del modelo
+  const {
+    companyId: _ignoredCid,
+    company_id: _ignoredCid2,
+    businessId: _ignoredBid,
+    business_id: _ignoredBid2,
+    companyPhone: _ignoredPhone1,
+    company_phone: _ignoredPhone2,
+    phone: _ignoredPhone3,
+    ...safeInv
+  } = inv;
+
+  const id = safeInv.id || `REC-${new Date().getFullYear()}-${Date.now().toString().slice(-4)}`;
+
+  const cols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  if (safeInv.id) {
+    if (hasCompanyIdCol) {
+      const existing = db.prepare('SELECT company_id, business_id FROM purchase_invoices WHERE id = ?').get(safeInv.id);
+      if (existing && existing.company_id !== companyId) {
+        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar factura recibida ${safeInv.id} de otro tenant.`);
+        return null;
+      }
+    } else {
+      const existing = db.prepare('SELECT business_id FROM purchase_invoices WHERE id = ?').get(safeInv.id);
+      if (existing && existing.business_id !== cleanPhone) {
+        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar factura recibida ${safeInv.id} de otro tenant.`);
+        return null;
+      }
     }
   }
   const now = new Date().toISOString();
 
   // Calcular periodo fiscal por fecha de factura si no viene dado
-  let fiscalPeriod = inv.fiscalPeriod || inv.fiscal_period;
-  const invDate = inv.invoiceDate || inv.issueDate || inv.issue_date || now.split('T')[0];
+  let fiscalPeriod = safeInv.fiscalPeriod || safeInv.fiscal_period;
+  const invDate = safeInv.invoiceDate || safeInv.issueDate || safeInv.issue_date || now.split('T')[0];
   if (!fiscalPeriod && invDate) {
     const d = new Date(invDate);
     if (!isNaN(d.getTime())) {
@@ -3396,80 +3427,151 @@ export function savePurchaseInvoice(companyContextOrId, inv = {}) {
     fiscalPeriod = `${new Date().getFullYear()}_Q${q}`;
   }
 
-  const base = Number(inv.taxableBase ?? inv.taxBase ?? inv.baseAmount ?? 0);
-  const vatRate = Number(inv.vatRate !== undefined ? inv.vatRate : 21);
-  const vatAmount = Number(inv.vatAmount !== undefined ? inv.vatAmount : (base * vatRate) / 100);
-  const total = Number(inv.totalAmount !== undefined ? inv.totalAmount : base + vatAmount);
+  const base = Number(safeInv.taxableBase ?? safeInv.taxBase ?? safeInv.baseAmount ?? 0);
+  const vatRate = Number(safeInv.vatRate !== undefined ? safeInv.vatRate : 21);
+  const vatAmount = Number(safeInv.vatAmount !== undefined ? safeInv.vatAmount : (base * vatRate) / 100);
+  const total = Number(safeInv.totalAmount !== undefined ? safeInv.totalAmount : base + vatAmount);
 
   // Deducibilidad de IVA
-  const deductibilityStatus = inv.deductibilityStatus || 'LIKELY_DEDUCTIBLE';
-  const deductPercent = Number(inv.deductiblePercentage !== undefined ? inv.deductiblePercentage : (inv.vatDeductible === false || deductibilityStatus === 'NOT_DEDUCTIBLE' ? 0 : 100));
-  const deductibleVat = deductibilityStatus === 'NOT_DEDUCTIBLE' || inv.vatDeductible === false ? 0 : (vatAmount * (deductPercent / 100));
-  const isAsset = Boolean(inv.isInvestmentAsset || base >= 3005.06 || total >= 3005.06);
+  const deductibilityStatus = safeInv.deductibilityStatus || 'LIKELY_DEDUCTIBLE';
+  const deductPercent = Number(safeInv.deductiblePercentage !== undefined ? safeInv.deductiblePercentage : (safeInv.vatDeductible === false || deductibilityStatus === 'NOT_DEDUCTIBLE' ? 0 : 100));
+  const deductibleVat = deductibilityStatus === 'NOT_DEDUCTIBLE' || safeInv.vatDeductible === false ? 0 : (vatAmount * (deductPercent / 100));
+  const isAsset = Boolean(safeInv.isInvestmentAsset || base >= 3005.06 || total >= 3005.06);
 
-  const stmt = db.prepare(`
-    INSERT INTO purchase_invoices (
-      id, business_id, supplier_name, supplier_tax_id, invoice_number,
-      invoice_date, operation_date, description, taxable_base, vat_rate,
-      vat_amount, total_amount, deductible_vat_amount, deductibility_status,
-      income_tax_relevance, expense_category, payment_status, payment_method,
-      payment_date, document_path, is_investment_asset, fiscal_period, notes,
-      data_json, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      supplier_name = excluded.supplier_name,
-      supplier_tax_id = excluded.supplier_tax_id,
-      invoice_number = excluded.invoice_number,
-      invoice_date = excluded.invoice_date,
-      operation_date = excluded.operation_date,
-      description = excluded.description,
-      taxable_base = excluded.taxable_base,
-      vat_rate = excluded.vat_rate,
-      vat_amount = excluded.vat_amount,
-      total_amount = excluded.total_amount,
-      deductible_vat_amount = excluded.deductible_vat_amount,
-      deductibility_status = excluded.deductibility_status,
-      income_tax_relevance = excluded.income_tax_relevance,
-      expense_category = excluded.expense_category,
-      payment_status = excluded.payment_status,
-      payment_method = excluded.payment_method,
-      payment_date = excluded.payment_date,
-      document_path = excluded.document_path,
-      is_investment_asset = excluded.is_investment_asset,
-      fiscal_period = excluded.fiscal_period,
-      notes = excluded.notes,
-      data_json = excluded.data_json,
-      updated_at = excluded.updated_at
-  `);
+  if (hasCompanyIdCol) {
+    const stmt = db.prepare(`
+      INSERT INTO purchase_invoices (
+        id, company_id, business_id, supplier_name, supplier_tax_id, invoice_number,
+        invoice_date, operation_date, description, taxable_base, vat_rate,
+        vat_amount, total_amount, deductible_vat_amount, deductibility_status,
+        income_tax_relevance, expense_category, payment_status, payment_method,
+        payment_date, document_path, is_investment_asset, fiscal_period, notes,
+        data_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        company_id = excluded.company_id,
+        business_id = excluded.business_id,
+        supplier_name = excluded.supplier_name,
+        supplier_tax_id = excluded.supplier_tax_id,
+        invoice_number = excluded.invoice_number,
+        invoice_date = excluded.invoice_date,
+        operation_date = excluded.operation_date,
+        description = excluded.description,
+        taxable_base = excluded.taxable_base,
+        vat_rate = excluded.vat_rate,
+        vat_amount = excluded.vat_amount,
+        total_amount = excluded.total_amount,
+        deductible_vat_amount = excluded.deductible_vat_amount,
+        deductibility_status = excluded.deductibility_status,
+        income_tax_relevance = excluded.income_tax_relevance,
+        expense_category = excluded.expense_category,
+        payment_status = excluded.payment_status,
+        payment_method = excluded.payment_method,
+        payment_date = excluded.payment_date,
+        document_path = excluded.document_path,
+        is_investment_asset = excluded.is_investment_asset,
+        fiscal_period = excluded.fiscal_period,
+        notes = excluded.notes,
+        data_json = excluded.data_json,
+        updated_at = excluded.updated_at
+    `);
 
-  stmt.run(
-    id,
-    cleanId,
-    inv.supplierName || 'Proveedor General',
-    inv.supplierTaxId || null,
-    inv.invoiceNumber || id,
-    invDate,
-    inv.operationDate || invDate,
-    inv.description || 'Compra de materiales y suministros',
-    Number(base.toFixed(2)),
-    vatRate,
-    Number(vatAmount.toFixed(2)),
-    Number(total.toFixed(2)),
-    Number(deductibleVat.toFixed(2)),
-    deductibilityStatus,
-    inv.incomeTaxRelevance || 'DEDUCTIBLE',
-    inv.expenseCategory || inv.category || 'MATERIALES',
-    inv.paymentStatus || 'PAGADA',
-    inv.paymentMethod || 'Tarjeta',
-    inv.paymentDate || invDate,
-    inv.documentPath || null,
-    isAsset ? 1 : 0,
-    fiscalPeriod,
-    inv.notes || null,
-    JSON.stringify(inv),
-    now,
-    now
-  );
+    stmt.run(
+      id,
+      companyId,
+      cleanPhone,
+      safeInv.supplierName || 'Proveedor General',
+      safeInv.supplierTaxId || null,
+      safeInv.invoiceNumber || id,
+      invDate,
+      safeInv.operationDate || invDate,
+      safeInv.description || 'Compra de materiales y suministros',
+      Number(base.toFixed(2)),
+      vatRate,
+      Number(vatAmount.toFixed(2)),
+      Number(total.toFixed(2)),
+      Number(deductibleVat.toFixed(2)),
+      deductibilityStatus,
+      safeInv.incomeTaxRelevance || 'DEDUCTIBLE',
+      safeInv.expenseCategory || safeInv.category || 'MATERIALES',
+      safeInv.paymentStatus || 'PAGADA',
+      safeInv.paymentMethod || 'Tarjeta',
+      safeInv.paymentDate || invDate,
+      safeInv.documentPath || null,
+      isAsset ? 1 : 0,
+      fiscalPeriod,
+      safeInv.notes || null,
+      JSON.stringify(inv),
+      now,
+      now
+    );
+  } else {
+    // Compatibilidad pre-migración 009
+    const stmt = db.prepare(`
+      INSERT INTO purchase_invoices (
+        id, business_id, supplier_name, supplier_tax_id, invoice_number,
+        invoice_date, operation_date, description, taxable_base, vat_rate,
+        vat_amount, total_amount, deductible_vat_amount, deductibility_status,
+        income_tax_relevance, expense_category, payment_status, payment_method,
+        payment_date, document_path, is_investment_asset, fiscal_period, notes,
+        data_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        business_id = excluded.business_id,
+        supplier_name = excluded.supplier_name,
+        supplier_tax_id = excluded.supplier_tax_id,
+        invoice_number = excluded.invoice_number,
+        invoice_date = excluded.invoice_date,
+        operation_date = excluded.operation_date,
+        description = excluded.description,
+        taxable_base = excluded.taxable_base,
+        vat_rate = excluded.vat_rate,
+        vat_amount = excluded.vat_amount,
+        total_amount = excluded.total_amount,
+        deductible_vat_amount = excluded.deductible_vat_amount,
+        deductibility_status = excluded.deductibility_status,
+        income_tax_relevance = excluded.income_tax_relevance,
+        expense_category = excluded.expense_category,
+        payment_status = excluded.payment_status,
+        payment_method = excluded.payment_method,
+        payment_date = excluded.payment_date,
+        document_path = excluded.document_path,
+        is_investment_asset = excluded.is_investment_asset,
+        fiscal_period = excluded.fiscal_period,
+        notes = excluded.notes,
+        data_json = excluded.data_json,
+        updated_at = excluded.updated_at
+    `);
+
+    stmt.run(
+      id,
+      cleanPhone,
+      safeInv.supplierName || 'Proveedor General',
+      safeInv.supplierTaxId || null,
+      safeInv.invoiceNumber || id,
+      invDate,
+      safeInv.operationDate || invDate,
+      safeInv.description || 'Compra de materiales y suministros',
+      Number(base.toFixed(2)),
+      vatRate,
+      Number(vatAmount.toFixed(2)),
+      Number(total.toFixed(2)),
+      Number(deductibleVat.toFixed(2)),
+      deductibilityStatus,
+      safeInv.incomeTaxRelevance || 'DEDUCTIBLE',
+      safeInv.expenseCategory || safeInv.category || 'MATERIALES',
+      safeInv.paymentStatus || 'PAGADA',
+      safeInv.paymentMethod || 'Tarjeta',
+      safeInv.paymentDate || invDate,
+      safeInv.documentPath || null,
+      isAsset ? 1 : 0,
+      fiscalPeriod,
+      safeInv.notes || null,
+      JSON.stringify(inv),
+      now,
+      now
+    );
+  }
 
   return getPurchaseInvoice(companyContextOrId, id);
 }
@@ -3484,18 +3586,31 @@ export function getPurchaseInvoice(companyContextOrId, id) {
   }
   if (!companyContextOrId || !id) return null;
 
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) {
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
     console.warn("🛑 [Seguridad Tenant] getPurchaseInvoice: no se pudo resolver un tenant válido.");
     return null;
   }
+  const { companyId, phone: cleanPhone } = tenant;
 
-  const row = db.prepare('SELECT * FROM purchase_invoices WHERE id = ? AND business_id = ?').get(id, cleanId);
+  const cols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let row = null;
+  if (hasCompanyIdCol) {
+    row = db.prepare('SELECT * FROM purchase_invoices WHERE id = ? AND company_id = ?').get(id, companyId);
+    if (!row && cleanPhone) {
+      row = db.prepare('SELECT * FROM purchase_invoices WHERE id = ? AND business_id = ?').get(id, cleanPhone);
+    }
+  } else {
+    row = db.prepare('SELECT * FROM purchase_invoices WHERE id = ? AND business_id = ?').get(id, cleanPhone);
+  }
   if (!row) return null;
 
   return {
     id: row.id,
-    businessId: row.business_id,
+    companyId: row.company_id || companyId,
+    businessId: row.business_id || cleanPhone,
     supplierName: row.supplier_name,
     supplierTaxId: row.supplier_tax_id,
     invoiceNumber: row.invoice_number,
@@ -3533,11 +3648,23 @@ export function getPurchaseInvoice(companyContextOrId, id) {
  */
 export function listPurchaseInvoices(companyContextOrId, { fiscalPeriod, startDate, endDate } = {}) {
   if (!companyContextOrId) return [];
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) return [];
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) return [];
+  const { companyId, phone: cleanPhone } = tenant;
 
-  let query = 'SELECT * FROM purchase_invoices WHERE business_id = ?';
-  const params = [cleanId];
+  const cols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let query = '';
+  const params = [];
+
+  if (hasCompanyIdCol) {
+    query = 'SELECT * FROM purchase_invoices WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?))';
+    params.push(companyId, cleanPhone);
+  } else {
+    query = 'SELECT * FROM purchase_invoices WHERE business_id = ?';
+    params.push(cleanPhone);
+  }
 
   if (fiscalPeriod) {
     const altPeriod = fiscalPeriod.includes('_') ? fiscalPeriod.replace('_', '-') : fiscalPeriod.replace('-', '_');
@@ -3557,7 +3684,8 @@ export function listPurchaseInvoices(companyContextOrId, { fiscalPeriod, startDa
   const rows = db.prepare(query).all(...params);
   return rows.map(row => ({
     id: row.id,
-    businessId: row.business_id,
+    companyId: row.company_id || companyId,
+    businessId: row.business_id || cleanPhone,
     supplierName: row.supplier_name,
     supplierTaxId: row.supplier_tax_id,
     invoiceNumber: row.invoice_number,
@@ -3600,13 +3728,22 @@ export function deletePurchaseInvoice(companyContextOrId, id) {
   }
   if (!companyContextOrId || !id) return false;
 
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) {
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
     console.warn("🛑 [Seguridad Tenant] deletePurchaseInvoice: no se pudo resolver un tenant válido.");
     return false;
   }
+  const { companyId, phone: cleanPhone } = tenant;
 
-  const res = db.prepare('DELETE FROM purchase_invoices WHERE id = ? AND business_id = ?').run(id, cleanId);
+  const cols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let res;
+  if (hasCompanyIdCol) {
+    res = db.prepare('DELETE FROM purchase_invoices WHERE id = ? AND company_id = ?').run(id, companyId);
+  } else {
+    res = db.prepare('DELETE FROM purchase_invoices WHERE id = ? AND business_id = ?').run(id, cleanPhone);
+  }
   return res.changes > 0;
 }
 

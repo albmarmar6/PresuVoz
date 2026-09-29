@@ -5413,6 +5413,342 @@ assert(integrityResult38 && (integrityResult38.integrity_check === 'ok' || integ
 cleanupTest38(phoneFpTenantA);
 cleanupTest38(phoneFpTenantB);
 
+console.log("\nTEST 39: Migración Controlada de purchase_invoices a company_id (Fase 2E-3 — Backfill, Tenant Isolation & Expense Payments Compatibility)");
+
+// ─── A. MIGRATION 009: EJECUCIÓN Y REGISTRO ───
+// A1. migration 009 se registra correctamente en TEST con versión 9
+const schemaRow009 = currentDb.prepare("SELECT version, name, applied_at FROM schema_migrations WHERE version = 9").get();
+assert(schemaRow009 && schemaRow009.version === 9, "A1. Migración 009 registrada en schema_migrations con versión 9");
+assert(schemaRow009 && schemaRow009.name === '009_purchase_invoices_company_id', "A2. Nombre de migración 009 coincide exactamente");
+assert(schemaRow009 && typeof schemaRow009.applied_at === 'string' && schemaRow009.applied_at.length > 10, "A3. Migración 009 tiene timestamp applied_at válido");
+
+// A4 & A5. production sigue con máximo migration 006 (007, 008 y 009 NO registradas)
+const prodDbFor009Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+const prodSchema009 = prodDbFor009Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
+const prodMaxVersion009 = prodDbFor009Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
+prodDbFor009Check.close();
+assert(prodSchema009.length === 0, "A4. DB de producción (data/presuvoz.db) NO tiene registradas las migraciones 007, 008 ni 009");
+assert(prodMaxVersion009 === 6, "A5. Versión máxima en DB de producción permanece inalterada en 6");
+
+// A6 & A7. migrations 007 y 008 siguen intactas en test
+const schemaRow007In39 = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 7").get();
+const schemaRow008In39 = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 8").get();
+assert(schemaRow007In39 && schemaRow007In39.name === '007_business_tax_profiles_company_id', "A6. Migración 007 permanece intacta en la base de datos de test");
+assert(schemaRow008In39 && schemaRow008In39.name === '008_fiscal_periods_company_id', "A7. Migración 008 permanece intacta en la base de datos de test");
+
+// ─── B. BACKFILL DETERMINISTA & CASOS FAIL-CLOSED ───
+// B1..B5. Memoria con datos existentes
+const memDb39B = new DatabaseSync(':memory:');
+initMigrationTable(memDb39B);
+runMigrations(memDb39B, { migrations: MIGRATIONS.slice(0, 8), authorized: true });
+
+// Insertar 2 empresas con 3 facturas de compra según esquema previo a 009
+memDb39B.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-pi-comp1', '34677110001', 'Empresa PI 1 S.L.'),
+    ('uuid-pi-comp2', '34677110002', 'Empresa PI 2 S.L.');
+  INSERT INTO purchase_invoices (
+    id, business_id, supplier_name, supplier_tax_id, invoice_number,
+    invoice_date, taxable_base, vat_rate, vat_amount, total_amount,
+    deductible_vat_amount, fiscal_period, data_json
+  ) VALUES
+    ('PINV-BF-01', '34677110001', 'Proveedor A', 'A11111111', 'FA-01', '2026-07-10', 100, 21, 21, 121, 21, '2026_Q3', '{"raw":"data1"}'),
+    ('PINV-BF-02', '34677110001', 'Proveedor B', 'B22222222', 'FB-02', '2026-08-15', 200, 21, 42, 242, 42, '2026_Q3', '{"raw":"data2"}'),
+    ('PINV-BF-03', '34677110002', 'Proveedor C', 'C33333333', 'FC-03', '2026-09-20', 300, 10, 30, 330, 30, '2026_Q3', '{"raw":"data3"}');
+`);
+
+const migRes39 = runMigrations(memDb39B, { migrations: [MIGRATIONS[8]], authorized: true });
+assert(migRes39.appliedCount === 1, "B1. Migración 009 se aplica con éxito sobre base de datos con datos");
+
+const piRows39 = memDb39B.prepare("SELECT id, company_id, business_id, supplier_name, total_amount, data_json FROM purchase_invoices ORDER BY id ASC").all();
+assert(piRows39.length === 3, "B2. Recuento de filas se preserva exactamente tras migración (3 filas)");
+assert(piRows39[0].company_id === 'uuid-pi-comp1' && piRows39[0].business_id === '34677110001', "B3. Fila 1 migrada con company_id correcto de Empresa 1");
+assert(piRows39[1].company_id === 'uuid-pi-comp1' && piRows39[1].business_id === '34677110001', "B4. Fila 2 migrada con company_id correcto de Empresa 1");
+assert(piRows39[2].company_id === 'uuid-pi-comp2' && piRows39[2].business_id === '34677110002', "B5. Fila 3 migrada con company_id correcto de Empresa 2");
+
+// B6..B10. Rollback atómico ante factura huérfana
+const memDb39Rollback = new DatabaseSync(':memory:');
+initMigrationTable(memDb39Rollback);
+runMigrations(memDb39Rollback, { migrations: MIGRATIONS.slice(0, 8), authorized: true });
+
+memDb39Rollback.exec(`
+  INSERT INTO companies (id, phone, name) VALUES ('uuid-pi-comp-ok', '34677110001', 'Empresa OK');
+  INSERT INTO purchase_invoices (
+    id, business_id, supplier_name, invoice_date, taxable_base, vat_rate,
+    vat_amount, total_amount, deductible_vat_amount, fiscal_period
+  ) VALUES
+    ('PINV-OK-01', '34677110001', 'Proveedor OK', '2026-07-10', 100, 21, 21, 121, 21, '2026_Q3'),
+    ('PINV-ORPHAN-01', '34699999999', 'Proveedor Fantasma', '2026-07-10', 50, 21, 10.5, 60.5, 10.5, '2026_Q3');
+`);
+
+let caughtOrphan009 = false;
+let orphanErrMsg009 = '';
+try {
+  runMigrations(memDb39Rollback, { migrations: [MIGRATIONS[8]], authorized: true });
+} catch (err) {
+  caughtOrphan009 = true;
+  orphanErrMsg009 = err.message;
+}
+assert(caughtOrphan009 === true, "B6. Migración 009 aborta inmediatamente ante factura recibida huérfana (fail-closed)");
+assert(orphanErrMsg009.includes('fail-closed') && orphanErrMsg009.includes('huérfana'), "B7. Error descriptivo fail-closed ante factura con business_id huérfano");
+
+// Verificar rollback atómico
+const schemaAfterFail009 = memDb39Rollback.prepare("SELECT * FROM schema_migrations WHERE version = 9").get();
+assert(!schemaAfterFail009, "B8. Rollback atómico: Versión 9 NO queda registrada en schema_migrations");
+
+const colsAfterFail009 = memDb39Rollback.prepare('PRAGMA table_info("purchase_invoices")').all();
+assert(!colsAfterFail009.some(c => c.name === 'company_id'), "B9. Rollback atómico: La tabla purchase_invoices queda exactamente como estaba");
+
+const tempTableCheck009 = memDb39Rollback.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='purchase_invoices_new'").get();
+assert(!tempTableCheck009, "B10. Rollback atómico: No quedan tablas temporales (purchase_invoices_new)");
+
+// B11. Fallo ante ambigüedad de companies con el mismo teléfono
+const memDb39Ambig = new DatabaseSync(':memory:');
+initMigrationTable(memDb39Ambig);
+runMigrations(memDb39Ambig, { migrations: MIGRATIONS.slice(0, 8), authorized: true });
+memDb39Ambig.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-pi-ambig-1', '34677000099', 'Empresa Ambigua 1'),
+    ('uuid-pi-ambig-2', '+34 677 00 00 99', 'Empresa Ambigua 2');
+  INSERT INTO purchase_invoices (
+    id, business_id, supplier_name, invoice_date, taxable_base, vat_rate,
+    vat_amount, total_amount, deductible_vat_amount, fiscal_period
+  ) VALUES
+    ('PINV-AMBIG-01', '34677000099', 'Proveedor X', '2026-07-10', 100, 21, 21, 121, 21, '2026_Q3');
+`);
+let caughtAmbig009 = false;
+try {
+  runMigrations(memDb39Ambig, { migrations: [MIGRATIONS[8]], authorized: true });
+} catch (err) {
+  caughtAmbig009 = true;
+  assert(err.message.includes('Ambigüedad crítica'), "B11. Fail-closed: Múltiples empresas ambiguas provocan aborto y rollback");
+}
+assert(caughtAmbig009 === true, "B12. Migración 009 aborta ante ambigüedad en companies");
+
+// ─── C. PRESERVACIÓN DE DATOS DOCUMENTALES Y NO CONFUSIÓN CON PROVEEDOR ───
+assert(piRows39[0].supplier_name === 'Proveedor A', "C1. supplier_name preservado intacto ('Proveedor A')");
+assert(piRows39[0].total_amount === 121, "C2. total_amount preservado intacto (121€)");
+assert(piRows39[0].data_json === '{"raw":"data1"}', "C3. data_json original preservado intacto");
+// BARRERA CRÍTICA: company_id no proviene del CIF del proveedor ni su nombre
+assert(piRows39[0].company_id !== 'A11111111' && piRows39[0].company_id === 'uuid-pi-comp1', "C4. Resolución de tenant NUNCA utiliza datos del proveedor (proveedor ≠ tenant)");
+
+// ─── D. AISLAMIENTO MULTI-TENANT EN TEST DB ───
+const phonePiTenantA = '34677112201';
+const phonePiTenantB = '34677112202';
+
+const cleanupTest39 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM expense_payments WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM purchase_invoices WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM investment_assets WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM business_tax_profiles WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_periods WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_incidents WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM audit_logs WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM invoices WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+
+cleanupTest39(phonePiTenantA);
+cleanupTest39(phonePiTenantB);
+
+const compPiA = createCompanyWithIdentity({
+  name: 'Empresa Alpha Obras S.L.',
+  phone: phonePiTenantA,
+  trade: 'Construcción'
+});
+const contextPiA = resolveAuthenticatedContext('whatsapp', phonePiTenantA);
+
+const compPiB = createCompanyWithIdentity({
+  name: 'Empresa Beta Electricidad S.L.',
+  phone: phonePiTenantB,
+  trade: 'Electricidad'
+});
+const contextPiB = resolveAuthenticatedContext('whatsapp', phonePiTenantB);
+
+// D1. Context A guarda factura REC-39-A01 y Context B guarda REC-39-B01
+const invA39 = savePurchaseInvoice(contextPiA, {
+  id: 'REC-39-A01',
+  supplierName: 'Materiales Alpha Proveedor',
+  supplierTaxId: 'B-99887711',
+  taxBase: 1000,
+  vatRate: 21,
+  totalAmount: 1210,
+  issueDate: '2026-08-10',
+  fiscalPeriod: '2026_Q3'
+});
+assert(invA39 && invA39.id === 'REC-39-A01', "D1. savePurchaseInvoice de Tenant A registra su factura");
+
+const invB39 = savePurchaseInvoice(contextPiB, {
+  id: 'REC-39-B01',
+  supplierName: 'Suministros Beta Proveedor',
+  supplierTaxId: 'B-99887722',
+  taxBase: 500,
+  vatRate: 21,
+  totalAmount: 605,
+  issueDate: '2026-08-11',
+  fiscalPeriod: '2026_Q3'
+});
+assert(invB39 && invB39.id === 'REC-39-B01', "D2. savePurchaseInvoice de Tenant B registra su factura");
+
+// D3. Cross-Tenant Read: getPurchaseInvoice(contextB, 'REC-39-A01') retorna null
+const crossReadAfromB_39 = getPurchaseInvoice(contextPiB, 'REC-39-A01');
+assert(crossReadAfromB_39 === null, "D3. Cross-Tenant Read: getPurchaseInvoice(tenantB, idA) devuelve null (Zero-Disclosure)");
+
+// D4. Cross-Tenant Read: getPurchaseInvoice(contextA, 'REC-39-B01') retorna null
+const crossReadBfromA_39 = getPurchaseInvoice(contextPiA, 'REC-39-B01');
+assert(crossReadBfromA_39 === null, "D4. Cross-Tenant Read: getPurchaseInvoice(tenantA, idB) devuelve null (Zero-Disclosure)");
+
+// D5. Lectura legítima de Tenant A
+const legitReadA_39 = getPurchaseInvoice(contextPiA, 'REC-39-A01');
+assert(legitReadA_39 !== null && legitReadA_39.id === 'REC-39-A01' && legitReadA_39.companyId === compPiA.companyId, "D5. Lectura legítima: getPurchaseInvoice(tenantA, idA) recupera su factura");
+
+// D6. Lectura legítima de Tenant B
+const legitReadB_39 = getPurchaseInvoice(contextPiB, 'REC-39-B01');
+assert(legitReadB_39 !== null && legitReadB_39.id === 'REC-39-B01' && legitReadB_39.companyId === compPiB.companyId, "D6. Lectura legítima: getPurchaseInvoice(tenantB, idB) recupera su factura");
+
+// D7. Cross-Tenant Delete: deletePurchaseInvoice(contextA, 'REC-39-B01') retorna false
+const crossDeleteBfromA_39 = deletePurchaseInvoice(contextPiA, 'REC-39-B01');
+assert(crossDeleteBfromA_39 === false, "D7. Cross-Tenant Delete: deletePurchaseInvoice(tenantA, idB) devuelve false");
+
+// D8. Factura de Tenant B permanece intacta en SQLite tras intento de borrado
+const verifyPinvBIntact_39 = currentDb.prepare("SELECT * FROM purchase_invoices WHERE id = ?").get('REC-39-B01');
+assert(verifyPinvBIntact_39 !== null && verifyPinvBIntact_39.company_id === compPiB.companyId, "D8. Factura de Tenant B permanece 100% intacta en SQLite");
+
+// D9. listPurchaseInvoices(contextA) solo retorna facturas de Tenant A
+const listPiA = listPurchaseInvoices(contextPiA);
+assert(listPiA.every(inv => inv.companyId === compPiA.companyId) && listPiA.some(inv => inv.id === 'REC-39-A01'), "D9. listPurchaseInvoices(contextA) solo retorna facturas del Tenant A");
+
+// D10. listPurchaseInvoices(contextB) solo retorna facturas de Tenant B
+const listPiB = listPurchaseInvoices(contextPiB);
+assert(listPiB.every(inv => inv.companyId === compPiB.companyId) && listPiB.some(inv => inv.id === 'REC-39-B01'), "D10. listPurchaseInvoices(contextB) solo retorna facturas del Tenant B");
+
+// ─── E. INYECCIÓN DE MODELO (DEFENSA FAIL-CLOSED) ───
+// E1. Gemini spoofing company_id / business_id en payload es ignorado y neutralizado
+const maliciousAiInvoice = {
+  id: 'REC-39-INJECT-01',
+  companyId: compPiB.companyId,
+  company_id: compPiB.companyId,
+  businessId: phonePiTenantB,
+  business_id: phonePiTenantB,
+  supplierName: 'Falso Proveedor Inyectado',
+  taxBase: 150,
+  vatRate: 21,
+  totalAmount: 181.5,
+  issueDate: '2026-08-15'
+};
+const savedInjected_39 = savePurchaseInvoice(contextPiA, maliciousAiInvoice);
+assert(savedInjected_39.companyId === compPiA.companyId, "E1. Modelo injection defendida: companyId de A se mantiene como autoridad");
+assert(savedInjected_39.businessId === phonePiTenantA, "E2. Modelo injection defendida: businessId de A se mantiene sincronizado con phoneA");
+
+const verifyInjectedInDb = currentDb.prepare("SELECT company_id, business_id FROM purchase_invoices WHERE id = ?").get('REC-39-INJECT-01');
+assert(verifyInjectedInDb.company_id === compPiA.companyId && verifyInjectedInDb.business_id === phonePiTenantA, "E3. En SQLite, la fila inyectada pertenece legítimamente a Tenant A");
+
+// E4. Tenant B jamás ve la factura inyectada
+const readInjectedFromB = getPurchaseInvoice(contextPiB, 'REC-39-INJECT-01');
+assert(readInjectedFromB === null, "E4. Tenant B permanece completamente protegido contra payload spoofed");
+
+// ─── F. ROBUSTEZ DE UUID v4 ───
+assert(isUuid(savedInjected_39.companyId), "F1. companyId retornado es un UUID v4 canónico");
+assert(savedInjected_39.companyId.length === 36 && savedInjected_39.companyId.includes('-'), "F2. companyId tiene formato UUID con guiones intactos (36 caracteres)");
+
+const sqliteRowPiA = currentDb.prepare("SELECT company_id FROM purchase_invoices WHERE id = ?").get('REC-39-A01');
+assert(sqliteRowPiA && sqliteRowPiA.company_id === compPiA.companyId, "F3. SQLite almacena el UUID con guiones intactos sin regex stripping");
+
+// ─── G. CLAVE FORÁNEA & ON DELETE RESTRICT ───
+// G1. Inserción con company_id inexistente lanza FK constraint violation
+let caughtFkInexistentePi = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO purchase_invoices (
+      id, company_id, business_id, supplier_name, invoice_date, taxable_base,
+      vat_rate, vat_amount, total_amount, deductible_vat_amount, fiscal_period
+    ) VALUES ('fake-id-pi', '00000000-0000-4000-8000-000000000099', '34600999999', 'P', '2026-08-01', 10, 21, 2.1, 12.1, 2.1, '2026_Q3');
+  `).run();
+} catch (err) {
+  caughtFkInexistentePi = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "G1. Violación de Foreign Key hacia companies(id) detectada");
+}
+assert(caughtFkInexistentePi === true, "G2. SQLite rechaza inserción en purchase_invoices con company inexistente");
+
+// G3. Inserción con company_id NULL es rechazada
+let caughtNullCidPi = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO purchase_invoices (
+      id, company_id, business_id, supplier_name, invoice_date, taxable_base,
+      vat_rate, vat_amount, total_amount, deductible_vat_amount, fiscal_period
+    ) VALUES ('fake-id-pi2', NULL, '34600999999', 'P', '2026-08-01', 10, 21, 2.1, 12.1, 2.1, '2026_Q3');
+  `).run();
+} catch (err) {
+  caughtNullCidPi = true;
+  assert(err.message.includes('NOT NULL constraint failed'), "G3. NOT NULL constraint en company_id detectada");
+}
+assert(caughtNullCidPi === true, "G4. Inserción con company_id NULL es rechazada");
+
+// G5. ON DELETE RESTRICT previene el borrado de empresa con historial de facturas
+let caughtRestrictDeletePi = false;
+try {
+  currentDb.prepare("DELETE FROM companies WHERE id = ?").run(compPiB.companyId);
+} catch (err) {
+  caughtRestrictDeletePi = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "G5. ON DELETE RESTRICT previene el borrado de empresa con facturas de compras");
+}
+assert(caughtRestrictDeletePi === true, "G6. La empresa no puede ser eliminada mientras tenga registros en purchase_invoices");
+
+// ─── H. COMPATIBILIDAD HACIA ATRÁS (LEGACY ADAPTER & DUAL-WRITE) ───
+// H1. getPurchaseInvoice(phone) funciona vía legacy adapter
+const legacyReadPiA = getPurchaseInvoice(phonePiTenantA, 'REC-39-A01');
+assert(legacyReadPiA !== null && legacyReadPiA.companyId === compPiA.companyId, "H1. getPurchaseInvoice(phone) funciona vía legacy adapter");
+
+// H2. listPurchaseInvoices(phone) funciona vía legacy adapter
+const legacyListPiA = listPurchaseInvoices(phonePiTenantA);
+assert(legacyListPiA.length >= 1 && legacyListPiA.some(inv => inv.id === 'REC-39-A01'), "H2. listPurchaseInvoices(phone) funciona vía legacy adapter");
+
+// H3. savePurchaseInvoice(phone) actualiza y mantiene dual-write sincronizado
+savePurchaseInvoice(phonePiTenantA, {
+  id: 'REC-39-A01',
+  description: 'Descripción actualizada vía legacy adapter'
+});
+const updatedLegacyPiA = getPurchaseInvoice(compPiA.companyId, 'REC-39-A01');
+assert(updatedLegacyPiA.description === 'Descripción actualizada vía legacy adapter', "H3. savePurchaseInvoice(phone) actualiza correctamente la fila");
+assert(updatedLegacyPiA.companyId === compPiA.companyId && updatedLegacyPiA.businessId === phonePiTenantA, "H4. Dual-write preservado: company_id y business_id sincronizados");
+
+// ─── I. COMPATIBILIDAD CON expense_payments ───
+// I1. Registrar un pago asociado a purchase_invoice_id
+const testExpensePayment = saveExpensePayment(contextPiA, {
+  id: 'EPAY-39-01',
+  purchaseInvoiceId: 'REC-39-A01',
+  amount: 1210,
+  paymentDate: '2026-08-10',
+  paymentMethod: 'Transferencia',
+  reference: 'Factura REC-39-A01 pagada'
+});
+assert(testExpensePayment && testExpensePayment.purchaseInvoiceId === 'REC-39-A01', "I1. Registro de gasto en expense_payments asociado a purchase_invoice_id correcto");
+
+// I2. Consulta relacional entre purchase_invoices y expense_payments
+const joinedRow = currentDb.prepare(`
+  SELECT pi.id as inv_id, pi.company_id, ep.id as pay_id, ep.amount
+  FROM purchase_invoices pi
+  JOIN expense_payments ep ON pi.id = ep.purchase_invoice_id
+  WHERE pi.id = ?
+`).get('REC-39-A01');
+assert(joinedRow !== null && joinedRow.pay_id === 'EPAY-39-01' && joinedRow.company_id === compPiA.companyId, "I2. Integridad relacional entre purchase_invoices y expense_payments preservada al 100%");
+
+// ─── J. INTEGRIDAD RELACIONAL FINAL ───
+const fkViolations39 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult39 = currentDb.prepare("PRAGMA integrity_check;").get();
+assert(fkViolations39.length === 0, "J1. PRAGMA foreign_key_check = 0 violaciones en base de datos de test");
+assert(integrityResult39 && (integrityResult39.integrity_check === 'ok' || integrityResult39.integrity_check === 'OK'), "J2. PRAGMA integrity_check = ok en base de datos de test");
+
+cleanupTest39(phonePiTenantA);
+cleanupTest39(phonePiTenantB);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
