@@ -1366,7 +1366,9 @@ import {
   saveExpensePayment,
   listExpensePayments,
   saveInvestmentAsset,
+  getInvestmentAsset,
   listInvestmentAssets,
+  deleteInvestmentAsset,
   getOrCreateFiscalPeriod,
   updateFiscalPeriodStatus,
   listFiscalIncidents,
@@ -6111,6 +6113,379 @@ assert(integrityResult40 && (integrityResult40.integrity_check === 'ok' || integ
 
 cleanupTest40(phoneEpTenantA);
 cleanupTest40(phoneEpTenantB);
+
+console.log("\nTEST 41: Migración Controlada de investment_assets a company_id (Fase 2E-5 — Backfill, Tenant Isolation & Relational Integrity)");
+
+// ─── A. MIGRATION 011: EJECUCIÓN Y REGISTRO ───
+// A1. migration 011 se registra correctamente en TEST con versión 11
+const schemaRow011 = currentDb.prepare("SELECT version, name, applied_at FROM schema_migrations WHERE version = 11").get();
+assert(schemaRow011 && schemaRow011.version === 11, "A1. Migración 011 registrada en schema_migrations con versión 11");
+assert(schemaRow011 && schemaRow011.name === '011_investment_assets_company_id', "A2. Nombre de migración 011 coincide exactamente");
+assert(schemaRow011 && typeof schemaRow011.applied_at === 'string' && schemaRow011.applied_at.length > 10, "A3. Migración 011 tiene timestamp applied_at válido");
+
+// A4 & A5. production sigue con máximo migration 006 (007, 008, 009, 010 y 011 NO registradas)
+const prodDbFor011Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+const prodSchema011 = prodDbFor011Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
+const prodMaxVersion011 = prodDbFor011Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
+prodDbFor011Check.close();
+assert(prodSchema011.length === 0, "A4. DB de producción (data/presuvoz.db) NO tiene registradas las migraciones 007, 008, 009, 010 ni 011");
+assert(prodMaxVersion011 === 6, "A5. Versión máxima en DB de producción permanece inalterada en 6");
+
+// A6 & A7. migrations 009 y 010 siguen intactas en test
+const schemaRow009In41 = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 9").get();
+const schemaRow010In41 = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 10").get();
+assert(schemaRow009In41 && schemaRow009In41.name === '009_purchase_invoices_company_id', "A6. Migración 009 permanece intacta en la base de datos de test");
+assert(schemaRow010In41 && schemaRow010In41.name === '010_expense_payments_company_id', "A7. Migración 010 permanece intacta en la base de datos de test");
+
+// ─── B. BACKFILL DETERMINISTA & CASOS FAIL-CLOSED ───
+// B1..B5. Memoria con datos existentes
+const memDb41B = new DatabaseSync(':memory:');
+initMigrationTable(memDb41B);
+runMigrations(memDb41B, { migrations: MIGRATIONS.slice(0, 10), authorized: true });
+
+// Insertar 2 empresas, sus facturas de compra y 3 bienes de inversión según esquema previo a 011
+memDb41B.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-ia-comp1', '34677440001', 'Empresa Maquinaria 1 S.L.'),
+    ('uuid-ia-comp2', '34677440002', 'Empresa Maquinaria 2 S.L.');
+  INSERT INTO purchase_invoices (
+    id, company_id, business_id, supplier_name, invoice_date,
+    taxable_base, vat_rate, vat_amount, total_amount, deductible_vat_amount, fiscal_period
+  ) VALUES
+    ('PINV-41-01', 'uuid-ia-comp1', '34677440001', 'Maquinaria Norte', '2026-07-01', 5000, 21, 1050, 6050, 1050, '2026_Q3'),
+    ('PINV-41-02', 'uuid-ia-comp2', '34677440002', 'Herramientas Sur', '2026-07-02', 3500, 21, 735, 4235, 735, '2026_Q3');
+  INSERT INTO investment_assets (
+    id, business_id, purchase_invoice_id, description, purchase_date,
+    supplier_name, purchase_base, vat_amount, total_amount,
+    business_use_percentage, depreciation_method, depreciation_status, notes, created_at
+  ) VALUES
+    ('AST-BF-01', '34677440001', 'PINV-41-01', 'Excavadora Mini', '2026-07-01', 'Maquinaria Norte', 5000, 1050, 6050, 100, 'TABLAS_OFICIALES', 'NEEDS_GESTOR_REVIEW', 'Nota 1', '2026-07-01T10:00:00Z'),
+    ('AST-BF-02', '34677440001', NULL, 'Generador Diésel', '2026-07-15', 'Generadores S.A.', 3200, 672, 3872, 80, 'TABLAS_OFICIALES', 'NEEDS_GESTOR_REVIEW', 'Nota 2', '2026-07-15T11:00:00Z'),
+    ('AST-BF-03', '34677440002', 'PINV-41-02', 'Compresor Industrial', '2026-07-02', 'Herramientas Sur', 3500, 735, 4235, 100, 'TABLAS_OFICIALES', 'NEEDS_GESTOR_REVIEW', 'Nota 3', '2026-07-02T12:00:00Z');
+`);
+
+const migRes41 = runMigrations(memDb41B, { migrations: [MIGRATIONS[10]], authorized: true });
+assert(migRes41.appliedCount === 1, "B1. Migración 011 se aplica con éxito sobre base de datos con datos");
+
+const iaRows41 = memDb41B.prepare("SELECT id, company_id, business_id, purchase_invoice_id, description, purchase_base, vat_amount, total_amount, business_use_percentage, depreciation_method, depreciation_status FROM investment_assets ORDER BY id ASC").all();
+assert(iaRows41.length === 3, "B2. Recuento de filas se preserva exactamente tras migración (3 filas)");
+assert(iaRows41[0].company_id === 'uuid-ia-comp1' && iaRows41[0].business_id === '34677440001', "B3. Fila 1 migrada con company_id correcto de Empresa 1");
+assert(iaRows41[1].company_id === 'uuid-ia-comp1' && iaRows41[1].business_id === '34677440001', "B4. Fila 2 migrada con company_id correcto de Empresa 1");
+assert(iaRows41[2].company_id === 'uuid-ia-comp2' && iaRows41[2].business_id === '34677440002', "B5. Fila 3 migrada con company_id correcto de Empresa 2");
+
+// B6..B10. Rollback atómico ante activo huérfano
+const memDb41Rollback = new DatabaseSync(':memory:');
+initMigrationTable(memDb41Rollback);
+runMigrations(memDb41Rollback, { migrations: MIGRATIONS.slice(0, 10), authorized: true });
+
+memDb41Rollback.exec(`
+  INSERT INTO companies (id, phone, name) VALUES ('uuid-ia-comp-ok', '34677440001', 'Empresa OK');
+  INSERT INTO investment_assets (
+    id, business_id, purchase_invoice_id, description, purchase_date, purchase_base, vat_amount, total_amount
+  ) VALUES
+    ('AST-OK-01', '34677440001', NULL, 'Herramienta OK', '2026-07-10', 3100, 651, 3751),
+    ('AST-ORPHAN-01', '34699999999', NULL, 'Herramienta Huérfana', '2026-07-10', 3200, 672, 3872);
+`);
+
+let caughtOrphan011 = false;
+let orphanErrMsg011 = '';
+try {
+  runMigrations(memDb41Rollback, { migrations: [MIGRATIONS[10]], authorized: true });
+} catch (err) {
+  caughtOrphan011 = true;
+  orphanErrMsg011 = err.message;
+}
+assert(caughtOrphan011 === true, "B6. Migración 011 aborta inmediatamente ante activo huérfano (fail-closed)");
+assert(orphanErrMsg011.includes('fail-closed') && orphanErrMsg011.includes('huérfano'), "B7. Error descriptivo fail-closed ante activo con business_id huérfano");
+
+// Verificar rollback atómico
+const schemaAfterFail011 = memDb41Rollback.prepare("SELECT * FROM schema_migrations WHERE version = 11").get();
+assert(!schemaAfterFail011, "B8. Rollback atómico: Versión 11 NO queda registrada en schema_migrations");
+
+const colsAfterFail011 = memDb41Rollback.prepare('PRAGMA table_info("investment_assets")').all();
+assert(!colsAfterFail011.some(c => c.name === 'company_id'), "B9. Rollback atómico: La tabla investment_assets queda exactamente como estaba");
+
+const tempTableCheck011 = memDb41Rollback.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='investment_assets_new'").get();
+assert(!tempTableCheck011, "B10. Rollback atómico: No quedan tablas temporales (investment_assets_new)");
+
+// B11..B12. Fallo ante ambigüedad de companies con el mismo teléfono
+const memDb41Ambig = new DatabaseSync(':memory:');
+initMigrationTable(memDb41Ambig);
+runMigrations(memDb41Ambig, { migrations: MIGRATIONS.slice(0, 10), authorized: true });
+memDb41Ambig.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-ia-ambig-1', '34677000099', 'Empresa Ambigua 1'),
+    ('uuid-ia-ambig-2', '+34 677 00 00 99', 'Empresa Ambigua 2');
+  INSERT INTO investment_assets (
+    id, business_id, purchase_invoice_id, description, purchase_date, purchase_base, vat_amount, total_amount
+  ) VALUES
+    ('AST-AMBIG-01', '34677000099', NULL, 'Activo Ambiguo', '2026-07-10', 3100, 651, 3751);
+`);
+let caughtAmbig011 = false;
+try {
+  runMigrations(memDb41Ambig, { migrations: [MIGRATIONS[10]], authorized: true });
+} catch (err) {
+  caughtAmbig011 = true;
+  assert(err.message.includes('Ambigüedad crítica'), "B11. Fail-closed: Múltiples empresas ambiguas provocan aborto y rollback");
+}
+assert(caughtAmbig011 === true, "B12. Migración 011 aborta ante ambigüedad en companies");
+
+// B13..B14. Fallo ante inconsistencia cross-tenant entre activo y factura de compra
+const memDb41CrossTenant = new DatabaseSync(':memory:');
+initMigrationTable(memDb41CrossTenant);
+runMigrations(memDb41CrossTenant, { migrations: MIGRATIONS.slice(0, 10), authorized: true });
+memDb41CrossTenant.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-ia-cross-1', '34677550001', 'Empresa Maquinaria Alpha'),
+    ('uuid-ia-cross-2', '34677550002', 'Empresa Maquinaria Beta');
+  INSERT INTO purchase_invoices (
+    id, company_id, business_id, supplier_name, invoice_date,
+    taxable_base, vat_rate, vat_amount, total_amount, deductible_vat_amount, fiscal_period
+  ) VALUES
+    ('PINV-BETA-41', 'uuid-ia-cross-2', '34677550002', 'Prov Beta', '2026-07-01', 4000, 21, 840, 4840, 840, '2026_Q3');
+  INSERT INTO investment_assets (
+    id, business_id, purchase_invoice_id, description, purchase_date, purchase_base, vat_amount, total_amount
+  ) VALUES
+    ('AST-CROSS-01', '34677550001', 'PINV-BETA-41', 'Torno Mecánico', '2026-07-02', 4000, 840, 4840);
+`);
+let caughtCrossTenant011 = false;
+try {
+  runMigrations(memDb41CrossTenant, { migrations: [MIGRATIONS[10]], authorized: true });
+} catch (err) {
+  caughtCrossTenant011 = true;
+  assert(err.message.includes('Inconsistencia cross-tenant'), "B13. Fail-closed: Inconsistencia cross-tenant entre activo y factura provoca aborto");
+}
+assert(caughtCrossTenant011 === true, "B14. Migración 011 aborta ante inconsistencia cross-tenant");
+
+// ─── C. PRESERVACIÓN DE DATOS DE BIENES DE INVERSIÓN ───
+assert(iaRows41[0].purchase_invoice_id === 'PINV-41-01', "C1. purchase_invoice_id preservado intacto ('PINV-41-01')");
+assert(iaRows41[0].description === 'Excavadora Mini', "C2. description preservado intacto ('Excavadora Mini')");
+assert(iaRows41[0].purchase_base === 5000 && iaRows41[0].vat_amount === 1050 && iaRows41[0].total_amount === 6050, "C3. purchase_base, vat_amount y total_amount preservados");
+assert(iaRows41[0].business_use_percentage === 100 && iaRows41[0].depreciation_method === 'TABLAS_OFICIALES' && iaRows41[0].depreciation_status === 'NEEDS_GESTOR_REVIEW', "C4. business_use_percentage, depreciation_method y depreciation_status preservados");
+
+// ─── D. AISLAMIENTO MULTI-TENANT EN TEST DB ───
+const phoneIaTenantA = '34677441101';
+const phoneIaTenantB = '34677441102';
+
+const cleanupTest41 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM investment_assets WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM expense_payments WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM purchase_invoices WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM business_tax_profiles WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_periods WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_incidents WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM audit_logs WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM invoices WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+
+cleanupTest41(phoneIaTenantA);
+cleanupTest41(phoneIaTenantB);
+
+const compIaA = createCompanyWithIdentity({
+  name: 'Empresa Alpha Excavaciones S.L.',
+  phone: phoneIaTenantA,
+  trade: 'Excavaciones'
+});
+const contextIaA = resolveAuthenticatedContext('whatsapp', phoneIaTenantA);
+
+const compIaB = createCompanyWithIdentity({
+  name: 'Empresa Beta Maquinaria S.L.',
+  phone: phoneIaTenantB,
+  trade: 'Maquinaria Pesada'
+});
+const contextIaB = resolveAuthenticatedContext('whatsapp', phoneIaTenantB);
+
+// Crear facturas de compra legítimas para cada tenant
+const invA41 = savePurchaseInvoice(contextIaA, {
+  id: 'REC-41-A01',
+  supplierName: 'Distribuidor Maquinaria A',
+  taxBase: 6000,
+  vatRate: 21,
+  totalAmount: 7260,
+  issueDate: '2026-08-10'
+});
+const invB41 = savePurchaseInvoice(contextIaB, {
+  id: 'REC-41-B01',
+  supplierName: 'Distribuidor Maquinaria B',
+  taxBase: 4500,
+  vatRate: 21,
+  totalAmount: 5445,
+  issueDate: '2026-08-11'
+});
+
+// D1 & D2. Cada tenant registra su bien de inversión
+const astA41 = saveInvestmentAsset(contextIaA, {
+  id: 'AST-41-A01',
+  purchaseInvoiceId: 'REC-41-A01',
+  description: 'Retroexcavadora Alpha',
+  purchaseDate: '2026-08-10',
+  supplierName: 'Distribuidor Maquinaria A',
+  purchaseBase: 6000,
+  vatAmount: 1260,
+  totalAmount: 7260,
+  businessUsePercentage: 100
+});
+assert(astA41 && astA41.id === 'AST-41-A01', "D1. saveInvestmentAsset de Tenant A registra su bien de inversión");
+
+const astB41 = saveInvestmentAsset(contextIaB, {
+  id: 'AST-41-B01',
+  purchaseInvoiceId: 'REC-41-B01',
+  description: 'Pala Cargadora Beta',
+  purchaseDate: '2026-08-11',
+  supplierName: 'Distribuidor Maquinaria B',
+  purchaseBase: 4500,
+  vatAmount: 945,
+  totalAmount: 5445,
+  businessUsePercentage: 100
+});
+assert(astB41 && astB41.id === 'AST-41-B01', "D2. saveInvestmentAsset de Tenant B registra su bien de inversión");
+
+// D3. Cross-Tenant Read: getInvestmentAsset(contextB, idA) devuelve null
+const crossReadAfromB_41 = getInvestmentAsset(contextIaB, 'AST-41-A01');
+assert(crossReadAfromB_41 === null, "D3. Cross-Tenant Read: getInvestmentAsset(tenantB, idA) devuelve null (Zero-Disclosure)");
+
+// D4. Cross-Tenant Read: getInvestmentAsset(contextA, idB) devuelve null
+const crossReadBfromA_41 = getInvestmentAsset(contextIaA, 'AST-41-B01');
+assert(crossReadBfromA_41 === null, "D4. Cross-Tenant Read: getInvestmentAsset(tenantA, idB) devuelve null (Zero-Disclosure)");
+
+// D5. Lectura legítima de Tenant A
+const legitReadA_41 = getInvestmentAsset(contextIaA, 'AST-41-A01');
+assert(legitReadA_41 !== null && legitReadA_41.id === 'AST-41-A01' && legitReadA_41.companyId === compIaA.companyId, "D5. Lectura legítima: getInvestmentAsset(tenantA, idA) recupera su activo");
+
+// D6. Lectura legítima de Tenant B
+const legitReadB_41 = getInvestmentAsset(contextIaB, 'AST-41-B01');
+assert(legitReadB_41 !== null && legitReadB_41.id === 'AST-41-B01' && legitReadB_41.companyId === compIaB.companyId, "D6. Lectura legítima: getInvestmentAsset(tenantB, idB) recupera su activo");
+
+// D7. Cross-Tenant Delete: deleteInvestmentAsset(tenantA, idB) devuelve false
+const crossDeleteBfromA_41 = deleteInvestmentAsset(contextIaA, 'AST-41-B01');
+assert(crossDeleteBfromA_41 === false, "D7. Cross-Tenant Delete: deleteInvestmentAsset(tenantA, idB) devuelve false");
+
+// D8. Activo de Tenant B permanece intacto tras intento cross-tenant
+const verifyAstBIntact_41 = currentDb.prepare("SELECT * FROM investment_assets WHERE id = ?").get('AST-41-B01');
+assert(verifyAstBIntact_41 !== null && verifyAstBIntact_41.company_id === compIaB.companyId, "D8. Activo de Tenant B permanece 100% intacto en SQLite");
+
+// D9. listInvestmentAssets(contextA) solo retorna activos de Tenant A
+const listIaA = listInvestmentAssets(contextIaA);
+assert(listIaA.every(a => a.companyId === compIaA.companyId) && listIaA.some(a => a.id === 'AST-41-A01'), "D9. listInvestmentAssets(contextA) solo retorna activos del Tenant A");
+
+// D10. listInvestmentAssets(contextB) solo retorna activos de Tenant B
+const listIaB = listInvestmentAssets(contextIaB);
+assert(listIaB.every(a => a.companyId === compIaB.companyId) && listIaB.some(a => a.id === 'AST-41-B01'), "D10. listInvestmentAssets(contextB) solo retorna activos del Tenant B");
+
+// D11. Intento de asociar activo a factura de compra de otro tenant es bloqueado
+const crossTenantAssetAttempt = saveInvestmentAsset(contextIaA, {
+  id: 'AST-CROSS-ATTEMPT',
+  purchaseInvoiceId: 'REC-41-B01', // Factura de Tenant B
+  description: 'Activo con factura ajena',
+  purchaseDate: '2026-08-12',
+  purchaseBase: 3500,
+  vatAmount: 735,
+  totalAmount: 4235
+});
+assert(crossTenantAssetAttempt === null, "D11. Intento de asociar activo a factura de compra de otro tenant es bloqueado (retorna null)");
+
+// ─── E. INYECCIÓN DE MODELO (DEFENSA FAIL-CLOSED) ───
+// E1..E4. Gemini spoofing company_id / business_id en payload es neutralizado
+const maliciousAiInvestmentAsset = {
+  id: 'AST-41-INJECT-01',
+  companyId: compIaB.companyId,
+  company_id: compIaB.companyId,
+  businessId: phoneIaTenantB,
+  business_id: phoneIaTenantB,
+  purchaseInvoiceId: 'REC-41-A01',
+  description: 'Inyección de maquinaria pesada',
+  purchaseDate: '2026-08-15',
+  purchaseBase: 8000,
+  vatAmount: 1680,
+  totalAmount: 9680
+};
+const savedInjected_41 = saveInvestmentAsset(contextIaA, maliciousAiInvestmentAsset);
+assert(savedInjected_41.companyId === compIaA.companyId, "E1. Modelo injection defendida: companyId de A se mantiene como autoridad");
+assert(savedInjected_41.businessId === phoneIaTenantA, "E2. Modelo injection defendida: businessId de A se mantiene sincronizado con phoneA");
+
+const verifyInjectedIaInDb = currentDb.prepare("SELECT company_id, business_id FROM investment_assets WHERE id = ?").get('AST-41-INJECT-01');
+assert(verifyInjectedIaInDb.company_id === compIaA.companyId && verifyInjectedIaInDb.business_id === phoneIaTenantA, "E3. En SQLite, el activo inyectado pertenece legítimamente a Tenant A");
+
+const readInjectedIaFromB = getInvestmentAsset(contextIaB, 'AST-41-INJECT-01');
+assert(readInjectedIaFromB === null, "E4. Tenant B permanece completamente protegido contra payload spoofed");
+
+// ─── F. ROBUSTEZ DE UUID v4 ───
+assert(isUuid(savedInjected_41.companyId), "F1. companyId retornado es un UUID v4 canónico");
+assert(savedInjected_41.companyId.length === 36 && savedInjected_41.companyId.includes('-'), "F2. companyId tiene formato UUID con guiones intactos (36 caracteres)");
+
+const sqliteRowIaA = currentDb.prepare("SELECT company_id FROM investment_assets WHERE id = ?").get('AST-41-A01');
+assert(sqliteRowIaA && sqliteRowIaA.company_id === compIaA.companyId, "F3. SQLite almacena el UUID con guiones intactos sin regex stripping");
+
+// ─── G. CLAVE FORÁNEA & ON DELETE RESTRICT ───
+// G1. Inserción con company_id inexistente lanza FK constraint violation
+let caughtFkInexistenteIa = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO investment_assets (id, company_id, business_id, description, purchase_date, purchase_base, vat_amount, total_amount)
+    VALUES ('fake-id-ia', '00000000-0000-4000-8000-000000000099', '34600999999', 'Falsa máquina', '2026-08-01', 3500, 735, 4235);
+  `).run();
+} catch (err) {
+  caughtFkInexistenteIa = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "G1. Violación de Foreign Key hacia companies(id) detectada");
+}
+assert(caughtFkInexistenteIa === true, "G2. SQLite rechaza inserción en investment_assets con company inexistente");
+
+// G3. Inserción con company_id NULL es rechazada
+let caughtNullCidIa = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO investment_assets (id, company_id, business_id, description, purchase_date, purchase_base, vat_amount, total_amount)
+    VALUES ('fake-id-ia2', NULL, '34600999999', 'Falsa máquina 2', '2026-08-01', 3500, 735, 4235);
+  `).run();
+} catch (err) {
+  caughtNullCidIa = true;
+  assert(err.message.includes('NOT NULL constraint failed'), "G3. NOT NULL constraint en company_id detectada");
+}
+assert(caughtNullCidIa === true, "G4. Inserción con company_id NULL es rechazada");
+
+// G5. ON DELETE RESTRICT previene el borrado de empresa con activos de inversión
+let caughtRestrictDeleteIa = false;
+try {
+  currentDb.prepare("DELETE FROM companies WHERE id = ?").run(compIaB.companyId);
+} catch (err) {
+  caughtRestrictDeleteIa = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "G5. ON DELETE RESTRICT previene el borrado de empresa con activos de inversión");
+}
+assert(caughtRestrictDeleteIa === true, "G6. La empresa no puede ser eliminada mientras tenga registros en investment_assets");
+
+// ─── H. COMPATIBILIDAD HACIA ATRÁS (LEGACY ADAPTER & DUAL-WRITE) ───
+// H1. getInvestmentAsset(phone) funciona vía legacy adapter
+const legacyReadIaA = getInvestmentAsset(phoneIaTenantA, 'AST-41-A01');
+assert(legacyReadIaA !== null && legacyReadIaA.companyId === compIaA.companyId, "H1. getInvestmentAsset(phone) funciona vía legacy adapter");
+
+// H2. listInvestmentAssets(phone) funciona vía legacy adapter
+const legacyListIaA = listInvestmentAssets(phoneIaTenantA);
+assert(legacyListIaA.length >= 1 && legacyListIaA.some(a => a.id === 'AST-41-A01'), "H2. listInvestmentAssets(phone) funciona vía legacy adapter");
+
+// H3. saveInvestmentAsset(phone) actualiza y mantiene dual-write sincronizado
+saveInvestmentAsset(phoneIaTenantA, {
+  id: 'AST-41-A01',
+  description: 'Descripción actualizada vía legacy adapter'
+});
+const updatedLegacyIaA = getInvestmentAsset(compIaA.companyId, 'AST-41-A01');
+assert(updatedLegacyIaA.description === 'Descripción actualizada vía legacy adapter', "H3. saveInvestmentAsset(phone) actualiza correctamente la fila");
+assert(updatedLegacyIaA.companyId === compIaA.companyId && updatedLegacyIaA.businessId === phoneIaTenantA, "H4. Dual-write preservado: company_id y business_id sincronizados");
+
+// ─── I. INTEGRIDAD RELACIONAL FINAL ───
+const fkViolations41 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult41 = currentDb.prepare("PRAGMA integrity_check;").get();
+assert(fkViolations41.length === 0, "I1. PRAGMA foreign_key_check = 0 violaciones en base de datos de test");
+assert(integrityResult41 && (integrityResult41.integrity_check === 'ok' || integrityResult41.integrity_check === 'OK'), "I2. PRAGMA integrity_check = ok en base de datos de test");
+
+cleanupTest41(phoneIaTenantA);
+cleanupTest41(phoneIaTenantB);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

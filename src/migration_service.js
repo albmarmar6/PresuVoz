@@ -19,6 +19,7 @@ import { migration as businessTaxProfilesMigration } from './migrations/007_busi
 import { migration as fiscalPeriodsMigration } from './migrations/008_fiscal_periods_company_id.js';
 import { migration as purchaseInvoicesMigration } from './migrations/009_purchase_invoices_company_id.js';
 import { migration as expensePaymentsMigration } from './migrations/010_expense_payments_company_id.js';
+import { migration as investmentAssetsMigration } from './migrations/011_investment_assets_company_id.js';
 
 export const MIGRATIONS = [
   baselineMigration,
@@ -30,7 +31,8 @@ export const MIGRATIONS = [
   businessTaxProfilesMigration,
   fiscalPeriodsMigration,
   purchaseInvoicesMigration,
-  expensePaymentsMigration
+  expensePaymentsMigration,
+  investmentAssetsMigration
 ];
 
 /**

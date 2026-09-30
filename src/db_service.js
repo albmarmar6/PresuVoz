@@ -3997,62 +3997,323 @@ export function deleteExpensePayment(companyContextOrId, id) {
 
 /**
  * Bienes de Inversión (Activos > 3.005,06 €)
+ * 
+ * Tenant Hardening & Dual-Write:
+ * - Requiere companyId (UUID) o authenticatedContext como autoridad canónica.
+ * - Soporta adapter transitorio por teléfono legacy para compañías existentes.
+ * - Inyección de modelo: cualquier company_id o business_id dentro de asset es ignorado.
+ * - Dual-write: escribe company_id como autoridad y mantiene business_id sincronizado.
+ * - Validación relacional: Si purchaseInvoiceId pertenece a otro tenant, bloquea en fail-closed.
+ * - Conserva intacta la lógica fiscal y montos existentes (no altera reglas de amortización ni deducción).
  */
 export function saveInvestmentAsset(companyContextOrId, asset = {}) {
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) {
+  if (!companyContextOrId) {
     throw new Error("❌ [Tenant Boundary] saveInvestmentAsset requiere un companyId o contexto autenticado obligatorio.");
   }
-  const id = asset.id || `AST-${new Date().getFullYear()}-${Date.now().toString().slice(-4)}`;
-  if (asset.id) {
-    const existing = db.prepare('SELECT business_id FROM investment_assets WHERE id = ?').get(asset.id);
-    if (existing && existing.business_id !== cleanId) {
-      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar bien de inversión ${asset.id} de otro tenant.`);
-      return null;
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
+    throw new Error("❌ [Tenant Boundary] saveInvestmentAsset: no se pudo resolver un tenant válido.");
+  }
+  const { companyId, phone: cleanPhone } = tenant;
+
+  // Defensa contra inyección: Ignorar company_id y business_id provistos en payload del modelo
+  const {
+    companyId: _ignoredCid,
+    company_id: _ignoredCid2,
+    businessId: _ignoredBid,
+    business_id: _ignoredBid2,
+    companyPhone: _ignoredPhone1,
+    company_phone: _ignoredPhone2,
+    phone: _ignoredPhone3,
+    ...safeAsset
+  } = asset;
+
+  const id = safeAsset.id || `AST-${new Date().getFullYear()}-${Date.now().toString().slice(-4)}`;
+  const purchaseInvoiceId = safeAsset.purchaseInvoiceId || safeAsset.purchase_invoice_id || null;
+
+  const cols = db.prepare('PRAGMA table_info("investment_assets")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  // Comprobar existencia y tenant en caso de actualización
+  if (safeAsset.id) {
+    if (hasCompanyIdCol) {
+      const existing = db.prepare('SELECT company_id, business_id FROM investment_assets WHERE id = ?').get(safeAsset.id);
+      if (existing && existing.company_id !== companyId) {
+        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar bien de inversión ${safeAsset.id} de otro tenant.`);
+        return null;
+      }
+    } else {
+      const existing = db.prepare('SELECT business_id FROM investment_assets WHERE id = ?').get(safeAsset.id);
+      if (existing && existing.business_id !== cleanPhone) {
+        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar bien de inversión ${safeAsset.id} de otro tenant.`);
+        return null;
+      }
     }
   }
+
+  // Validación relacional: Si la factura de compra asociada existe, asegurar que pertenece al mismo tenant
+  if (purchaseInvoiceId) {
+    const pinvCols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
+    const pinvHasCompanyId = pinvCols.some(c => c.name === 'company_id');
+    if (pinvHasCompanyId) {
+      const pinv = db.prepare('SELECT company_id FROM purchase_invoices WHERE id = ?').get(purchaseInvoiceId);
+      if (pinv && pinv.company_id !== companyId) {
+        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de asociar activo ${id} a factura ${purchaseInvoiceId} de otro tenant.`);
+        return null;
+      }
+    }
+  }
+
   const now = new Date().toISOString();
+  const purchaseDate = safeAsset.purchaseDate || safeAsset.purchase_date || now.split('T')[0];
+  const supplierName = safeAsset.supplierName || safeAsset.supplier_name || 'Proveedor Maquinaria';
+  const purchaseBase = Number(safeAsset.purchaseBase ?? safeAsset.purchase_base ?? 0);
+  const vatAmount = Number(safeAsset.vatAmount ?? safeAsset.vat_amount ?? 0);
+  const totalAmount = Number(safeAsset.totalAmount ?? safeAsset.total_amount ?? 0);
+  const businessUsePercentage = Number(safeAsset.businessUsePercentage ?? safeAsset.business_use_percentage ?? 100);
+  const depreciationMethod = safeAsset.depreciationMethod || safeAsset.depreciation_method || 'TABLAS_OFICIALES';
+  const depreciationStatus = safeAsset.depreciationStatus || safeAsset.depreciation_status || 'NEEDS_GESTOR_REVIEW';
+  const description = safeAsset.description || 'Bien de inversión / maquinaria';
+  const notes = safeAsset.notes || null;
 
-  const stmt = db.prepare(`
-    INSERT INTO investment_assets (
-      id, business_id, purchase_invoice_id, description, purchase_date,
-      supplier_name, purchase_base, vat_amount, total_amount, business_use_percentage,
-      depreciation_method, depreciation_status, notes, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      description = excluded.description,
-      purchase_base = excluded.purchase_base,
-      vat_amount = excluded.vat_amount,
-      total_amount = excluded.total_amount,
-      business_use_percentage = excluded.business_use_percentage,
-      notes = excluded.notes
-  `);
+  if (hasCompanyIdCol) {
+    const stmt = db.prepare(`
+      INSERT INTO investment_assets (
+        id, company_id, business_id, purchase_invoice_id, description,
+        purchase_date, supplier_name, purchase_base, vat_amount, total_amount,
+        business_use_percentage, depreciation_method, depreciation_status, notes, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        company_id = excluded.company_id,
+        business_id = excluded.business_id,
+        purchase_invoice_id = excluded.purchase_invoice_id,
+        description = excluded.description,
+        purchase_date = excluded.purchase_date,
+        supplier_name = excluded.supplier_name,
+        purchase_base = excluded.purchase_base,
+        vat_amount = excluded.vat_amount,
+        total_amount = excluded.total_amount,
+        business_use_percentage = excluded.business_use_percentage,
+        depreciation_method = excluded.depreciation_method,
+        depreciation_status = excluded.depreciation_status,
+        notes = excluded.notes
+    `);
 
-  stmt.run(
-    id,
-    cleanId,
-    asset.purchaseInvoiceId || null,
-    asset.description || 'Bien de inversión / maquinaria',
-    asset.purchaseDate || now.split('T')[0],
-    asset.supplierName || 'Proveedor Maquinaria',
-    Number(asset.purchaseBase || 0),
-    Number(asset.vatAmount || 0),
-    Number(asset.totalAmount || 0),
-    Number(asset.businessUsePercentage || 100),
-    asset.depreciationMethod || 'TABLAS_OFICIALES',
-    asset.depreciationStatus || 'NEEDS_GESTOR_REVIEW',
-    asset.notes || null,
-    now
-  );
+    stmt.run(
+      id,
+      companyId,
+      cleanPhone,
+      purchaseInvoiceId,
+      description,
+      purchaseDate,
+      supplierName,
+      purchaseBase,
+      vatAmount,
+      totalAmount,
+      businessUsePercentage,
+      depreciationMethod,
+      depreciationStatus,
+      notes,
+      now
+    );
+  } else {
+    // Compatibilidad pre-migración 011
+    const stmt = db.prepare(`
+      INSERT INTO investment_assets (
+        id, business_id, purchase_invoice_id, description, purchase_date,
+        supplier_name, purchase_base, vat_amount, total_amount,
+        business_use_percentage, depreciation_method, depreciation_status, notes, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        description = excluded.description,
+        purchase_base = excluded.purchase_base,
+        vat_amount = excluded.vat_amount,
+        total_amount = excluded.total_amount,
+        business_use_percentage = excluded.business_use_percentage,
+        notes = excluded.notes
+      `);
 
-  return { id, ...asset };
+    stmt.run(
+      id,
+      cleanPhone,
+      purchaseInvoiceId,
+      description,
+      purchaseDate,
+      supplierName,
+      purchaseBase,
+      vatAmount,
+      totalAmount,
+      businessUsePercentage,
+      depreciationMethod,
+      depreciationStatus,
+      notes,
+      now
+    );
+  }
+
+  return getInvestmentAsset(companyContextOrId, id);
 }
 
+/**
+ * Obtiene un bien de inversión por su ID (Tenant-Scoped)
+ */
+export function getInvestmentAsset(companyContextOrId, id) {
+  if (id === undefined) {
+    console.warn("🛑 [Seguridad Tenant] getInvestmentAsset invocado sin tenant context obligatorio. Retornando null.");
+    return null;
+  }
+  if (!companyContextOrId || !id) return null;
+
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
+    console.warn("🛑 [Seguridad Tenant] getInvestmentAsset: no se pudo resolver un tenant válido.");
+    return null;
+  }
+  const { companyId, phone: cleanPhone } = tenant;
+
+  const cols = db.prepare('PRAGMA table_info("investment_assets")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let row = null;
+  if (hasCompanyIdCol) {
+    row = db.prepare('SELECT * FROM investment_assets WHERE id = ? AND company_id = ?').get(id, companyId);
+    if (!row && cleanPhone) {
+      row = db.prepare('SELECT * FROM investment_assets WHERE id = ? AND business_id = ?').get(id, cleanPhone);
+    }
+  } else {
+    row = db.prepare('SELECT * FROM investment_assets WHERE id = ? AND business_id = ?').get(id, cleanPhone);
+  }
+  function mapInvestmentAssetRow(row, fallbackCompanyId, fallbackPhone) {
+    if (!row) return null;
+    const cid = row.company_id || fallbackCompanyId;
+    const bid = row.business_id || fallbackPhone;
+    const pBase = Number(row.purchase_base || 0);
+    const vAmount = Number(row.vat_amount || 0);
+    const tAmount = Number(row.total_amount || 0);
+    const usePct = Number(row.business_use_percentage != null ? row.business_use_percentage : 100);
+
+    return {
+      ...row,
+      id: row.id,
+      companyId: cid,
+      businessId: bid,
+      company_id: cid,
+      business_id: bid,
+      purchaseInvoiceId: row.purchase_invoice_id,
+      purchase_invoice_id: row.purchase_invoice_id,
+      description: row.description,
+      purchaseDate: row.purchase_date,
+      purchase_date: row.purchase_date,
+      supplierName: row.supplier_name,
+      supplier_name: row.supplier_name,
+      purchaseBase: pBase,
+      purchase_base: pBase,
+      vatAmount: vAmount,
+      vat_amount: vAmount,
+      totalAmount: tAmount,
+      total_amount: tAmount,
+      businessUsePercentage: usePct,
+      business_use_percentage: usePct,
+      depreciationMethod: row.depreciation_method,
+      depreciation_method: row.depreciation_method,
+      depreciationStatus: row.depreciation_status,
+      depreciation_status: row.depreciation_status,
+      notes: row.notes,
+      createdAt: row.created_at,
+      created_at: row.created_at
+    };
+  }
+
+  return mapInvestmentAssetRow(row, companyId, cleanPhone);
+}
+
+/**
+ * Lista bienes de inversión de un negocio (Tenant-Scoped)
+ */
 export function listInvestmentAssets(companyContextOrId) {
   if (!companyContextOrId) return [];
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) return [];
-  return db.prepare('SELECT * FROM investment_assets WHERE business_id = ? ORDER BY purchase_date ASC').all(cleanId);
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) return [];
+  const { companyId, phone: cleanPhone } = tenant;
+
+  const cols = db.prepare('PRAGMA table_info("investment_assets")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let rows = [];
+  if (hasCompanyIdCol) {
+    rows = db.prepare('SELECT * FROM investment_assets WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?)) ORDER BY purchase_date ASC').all(companyId, cleanPhone);
+  } else {
+    rows = db.prepare('SELECT * FROM investment_assets WHERE business_id = ? ORDER BY purchase_date ASC').all(cleanPhone);
+  }
+
+  return rows.map(row => {
+    const cid = row.company_id || companyId;
+    const bid = row.business_id || cleanPhone;
+    const pBase = Number(row.purchase_base || 0);
+    const vAmount = Number(row.vat_amount || 0);
+    const tAmount = Number(row.total_amount || 0);
+    const usePct = Number(row.business_use_percentage != null ? row.business_use_percentage : 100);
+
+    return {
+      ...row,
+      id: row.id,
+      companyId: cid,
+      businessId: bid,
+      company_id: cid,
+      business_id: bid,
+      purchaseInvoiceId: row.purchase_invoice_id,
+      purchase_invoice_id: row.purchase_invoice_id,
+      description: row.description,
+      purchaseDate: row.purchase_date,
+      purchase_date: row.purchase_date,
+      supplierName: row.supplier_name,
+      supplier_name: row.supplier_name,
+      purchaseBase: pBase,
+      purchase_base: pBase,
+      vatAmount: vAmount,
+      vat_amount: vAmount,
+      totalAmount: tAmount,
+      total_amount: tAmount,
+      businessUsePercentage: usePct,
+      business_use_percentage: usePct,
+      depreciationMethod: row.depreciation_method,
+      depreciation_method: row.depreciation_method,
+      depreciationStatus: row.depreciation_status,
+      depreciation_status: row.depreciation_status,
+      notes: row.notes,
+      createdAt: row.created_at,
+      created_at: row.created_at
+    };
+  });
+}
+
+/**
+ * Elimina un bien de inversión por su ID (Tenant-Scoped)
+ */
+export function deleteInvestmentAsset(companyContextOrId, id) {
+  if (id === undefined) {
+    console.warn("🛑 [Seguridad Tenant] deleteInvestmentAsset invocado sin tenant context obligatorio.");
+    return false;
+  }
+  if (!companyContextOrId || !id) return false;
+
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
+    console.warn("🛑 [Seguridad Tenant] deleteInvestmentAsset: no se pudo resolver un tenant válido.");
+    return false;
+  }
+  const { companyId, phone: cleanPhone } = tenant;
+
+  const cols = db.prepare('PRAGMA table_info("investment_assets")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let res;
+  if (hasCompanyIdCol) {
+    res = db.prepare('DELETE FROM investment_assets WHERE id = ? AND company_id = ?').run(id, companyId);
+  } else {
+    res = db.prepare('DELETE FROM investment_assets WHERE id = ? AND business_id = ?').run(id, cleanPhone);
+  }
+  return res.changes > 0;
 }
 
 /**
