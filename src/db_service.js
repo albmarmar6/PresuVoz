@@ -4563,56 +4563,197 @@ export function deleteFiscalPeriod(companyContextOrId, year, quarter) {
 }
 
 /**
- * Incidencias de Calidad Fiscal (Data Quality Checks)
+ * Incidencias de Calidad Fiscal (Data Quality Checks) — Tenant Scoped
  */
+function mapFiscalIncidentRow(row, fallbackCompanyId, fallbackPhone) {
+  if (!row) return null;
+  const cid = row.company_id || fallbackCompanyId;
+  const bid = row.business_id || fallbackPhone;
+  return {
+    ...row,
+    id: row.id,
+    companyId: cid,
+    company_id: cid,
+    businessId: bid,
+    business_id: bid,
+    fiscalPeriod: row.fiscal_period,
+    fiscal_period: row.fiscal_period,
+    entityType: row.entity_type,
+    entity_type: row.entity_type,
+    entityId: row.entity_id,
+    entity_id: row.entity_id,
+    severity: row.severity,
+    errorCode: row.error_code,
+    error_code: row.error_code,
+    message: row.message,
+    resolutionStatus: row.resolution_status,
+    resolution_status: row.resolution_status,
+    createdAt: row.created_at,
+    created_at: row.created_at
+  };
+}
+
 export function saveFiscalIncident(companyContextOrId, incident = {}) {
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) return null;
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
+    console.warn("🛑 [Seguridad Tenant] saveFiscalIncident: no se pudo resolver un tenant válido.");
+    return null;
+  }
+  const { companyId, phone: cleanPhone } = tenant;
   const id = incident.id || `INC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+  const cols = db.prepare('PRAGMA table_info("fiscal_incidents")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
   if (incident.id) {
-    const existing = db.prepare('SELECT business_id FROM fiscal_incidents WHERE id = ?').get(incident.id);
-    if (existing && existing.business_id !== cleanId) {
-      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar incidencia fiscal ${incident.id} de otro tenant.`);
-      return null;
+    if (hasCompanyIdCol) {
+      const existing = db.prepare('SELECT company_id, business_id FROM fiscal_incidents WHERE id = ?').get(incident.id);
+      if (existing && existing.company_id !== companyId && (!cleanPhone || existing.business_id !== cleanPhone)) {
+        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar incidencia fiscal ${incident.id} de otro tenant.`);
+        return null;
+      }
+    } else {
+      const existing = db.prepare('SELECT business_id FROM fiscal_incidents WHERE id = ?').get(incident.id);
+      if (existing && cleanPhone && existing.business_id !== cleanPhone) {
+        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar incidencia fiscal ${incident.id} de otro tenant.`);
+        return null;
+      }
     }
   }
+
+  // Prevención cross-tenant contra entidades referenciadas
+  if (incident.entityType === 'INVOICE' && incident.entityId) {
+    const invTableExists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='invoices'").get();
+    if (invTableExists) {
+      const invCols = db.prepare('PRAGMA table_info("invoices")').all();
+      if (invCols.some(c => c.name === 'company_id')) {
+        const inv = db.prepare('SELECT company_id FROM invoices WHERE id = ?').get(incident.entityId);
+        if (inv && inv.company_id && inv.company_id !== companyId) {
+          console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de asociar incidencia ${id} a factura emitida ${incident.entityId} de otro tenant.`);
+          return null;
+        }
+      }
+    }
+  }
+
+  if (incident.entityType === 'PURCHASE_INVOICE' && incident.entityId) {
+    const pinvTableExists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='purchase_invoices'").get();
+    if (pinvTableExists) {
+      const pinvCols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
+      if (pinvCols.some(c => c.name === 'company_id')) {
+        const pinv = db.prepare('SELECT company_id FROM purchase_invoices WHERE id = ?').get(incident.entityId);
+        if (pinv && pinv.company_id && pinv.company_id !== companyId) {
+          console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de asociar incidencia ${id} a factura recibida ${incident.entityId} de otro tenant.`);
+          return null;
+        }
+      }
+    }
+  }
+
   const now = new Date().toISOString();
+  const fiscalPeriod = incident.fiscalPeriod || incident.fiscal_period || 'GENERAL';
+  const entityType = incident.entityType || incident.entity_type || 'INVOICE';
+  const entityId = incident.entityId || incident.entity_id || '';
+  const severity = incident.severity || 'WARNING';
+  const errorCode = incident.errorCode || incident.error_code || 'UNKNOWN_ERROR';
+  const message = incident.message || 'Incidencia fiscal detectada';
+  const resolutionStatus = incident.resolutionStatus || incident.resolution_status || 'OPEN';
+  const createdAt = incident.createdAt || incident.created_at || now;
 
-  db.prepare(`
-    INSERT INTO fiscal_incidents (id, business_id, fiscal_period, entity_type, entity_id, severity, error_code, message, resolution_status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    id,
-    cleanId,
-    incident.fiscalPeriod || 'GENERAL',
-    incident.entityType || 'INVOICE',
-    incident.entityId || '',
-    incident.severity || 'WARNING',
-    incident.errorCode || 'UNKNOWN_ERROR',
-    incident.message || 'Incidencia fiscal detectada',
-    incident.resolutionStatus || 'OPEN',
-    now
-  );
+  if (hasCompanyIdCol) {
+    db.prepare(`
+      INSERT INTO fiscal_incidents (
+        id, company_id, business_id, fiscal_period, entity_type, entity_id,
+        severity, error_code, message, resolution_status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        company_id = excluded.company_id,
+        business_id = excluded.business_id,
+        fiscal_period = excluded.fiscal_period,
+        entity_type = excluded.entity_type,
+        entity_id = excluded.entity_id,
+        severity = excluded.severity,
+        error_code = excluded.error_code,
+        message = excluded.message,
+        resolution_status = excluded.resolution_status
+    `).run(
+      id,
+      companyId,
+      cleanPhone,
+      fiscalPeriod,
+      entityType,
+      entityId,
+      severity,
+      errorCode,
+      message,
+      resolutionStatus,
+      createdAt
+    );
+  } else {
+    db.prepare(`
+      INSERT INTO fiscal_incidents (
+        id, business_id, fiscal_period, entity_type, entity_id,
+        severity, error_code, message, resolution_status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        business_id = excluded.business_id,
+        fiscal_period = excluded.fiscal_period,
+        entity_type = excluded.entity_type,
+        entity_id = excluded.entity_id,
+        severity = excluded.severity,
+        error_code = excluded.error_code,
+        message = excluded.message,
+        resolution_status = excluded.resolution_status
+    `).run(
+      id,
+      cleanPhone,
+      fiscalPeriod,
+      entityType,
+      entityId,
+      severity,
+      errorCode,
+      message,
+      resolutionStatus,
+      createdAt
+    );
+  }
 
-  return { id, ...incident };
+  return getFiscalIncident(companyContextOrId, id);
 }
 
 export function listFiscalIncidents(companyContextOrId, fiscalPeriod = null, status = 'OPEN') {
   if (!companyContextOrId) return [];
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) return [];
-  let query = 'SELECT * FROM fiscal_incidents WHERE business_id = ?';
-  const params = [cleanId];
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) return [];
+  const { companyId, phone: cleanPhone } = tenant;
+
+  const cols = db.prepare('PRAGMA table_info("fiscal_incidents")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let query = '';
+  const params = [];
+
+  if (hasCompanyIdCol) {
+    query = 'SELECT * FROM fiscal_incidents WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?))';
+    params.push(companyId, cleanPhone);
+  } else {
+    query = 'SELECT * FROM fiscal_incidents WHERE business_id = ?';
+    params.push(cleanPhone);
+  }
+
   if (fiscalPeriod) {
-    query += ' AND fiscal_period = ?';
-    params.push(fiscalPeriod);
+    const altPeriod = fiscalPeriod.includes('_') ? fiscalPeriod.replace('_', '-') : fiscalPeriod.replace('-', '_');
+    query += ' AND (fiscal_period = ? OR fiscal_period = ?)';
+    params.push(fiscalPeriod, altPeriod);
   }
   if (status) {
     query += ' AND resolution_status = ?';
     params.push(status);
   }
   query += ' ORDER BY created_at DESC';
-  return db.prepare(query).all(...params);
+
+  const rows = db.prepare(query).all(...params);
+  return rows.map(r => mapFiscalIncidentRow(r, companyId, cleanPhone));
 }
 
 /**
@@ -4625,18 +4766,26 @@ export function resolveFiscalIncident(companyContextOrId, incidentId) {
   }
   if (!companyContextOrId || !incidentId) return false;
 
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) {
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
     console.warn("🛑 [Seguridad Tenant] resolveFiscalIncident: no se pudo resolver un tenant válido.");
     return false;
   }
+  const { companyId, phone: cleanPhone } = tenant;
 
-  const existing = db.prepare('SELECT id FROM fiscal_incidents WHERE id = ? AND business_id = ?').get(incidentId, cleanId);
-  if (!existing) {
-    return false;
+  const cols = db.prepare('PRAGMA table_info("fiscal_incidents")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let res;
+  if (hasCompanyIdCol) {
+    res = db.prepare(`
+      UPDATE fiscal_incidents 
+      SET resolution_status = 'RESOLVED' 
+      WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND business_id = ?))
+    `).run(incidentId, companyId, cleanPhone);
+  } else {
+    res = db.prepare("UPDATE fiscal_incidents SET resolution_status = 'RESOLVED' WHERE id = ? AND business_id = ?").run(incidentId, cleanPhone);
   }
-
-  const res = db.prepare("UPDATE fiscal_incidents SET resolution_status = 'RESOLVED' WHERE id = ? AND business_id = ?").run(incidentId, cleanId);
   return res.changes > 0;
 }
 
@@ -4650,14 +4799,26 @@ export function getFiscalIncident(companyContextOrId, incidentId) {
   }
   if (!companyContextOrId || !incidentId) return null;
 
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) {
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
     console.warn("🛑 [Seguridad Tenant] getFiscalIncident: no se pudo resolver un tenant válido.");
     return null;
   }
+  const { companyId, phone: cleanPhone } = tenant;
 
-  const row = db.prepare('SELECT * FROM fiscal_incidents WHERE id = ? AND business_id = ?').get(incidentId, cleanId);
-  return row || null;
+  const cols = db.prepare('PRAGMA table_info("fiscal_incidents")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let row = null;
+  if (hasCompanyIdCol) {
+    row = db.prepare('SELECT * FROM fiscal_incidents WHERE id = ? AND company_id = ?').get(incidentId, companyId);
+    if (!row && cleanPhone) {
+      row = db.prepare('SELECT * FROM fiscal_incidents WHERE id = ? AND business_id = ?').get(incidentId, cleanPhone);
+    }
+  } else {
+    row = db.prepare('SELECT * FROM fiscal_incidents WHERE id = ? AND business_id = ?').get(incidentId, cleanPhone);
+  }
+  return mapFiscalIncidentRow(row, companyId, cleanPhone);
 }
 
 /**
@@ -4670,13 +4831,22 @@ export function deleteFiscalIncident(companyContextOrId, incidentId) {
   }
   if (!companyContextOrId || !incidentId) return false;
 
-  const cleanId = resolveLegacyBusinessId(companyContextOrId);
-  if (!cleanId) {
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (!tenant || !tenant.companyId) {
     console.warn("🛑 [Seguridad Tenant] deleteFiscalIncident: no se pudo resolver un tenant válido.");
     return false;
   }
+  const { companyId, phone: cleanPhone } = tenant;
 
-  const res = db.prepare('DELETE FROM fiscal_incidents WHERE id = ? AND business_id = ?').run(incidentId, cleanId);
+  const cols = db.prepare('PRAGMA table_info("fiscal_incidents")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let res;
+  if (hasCompanyIdCol) {
+    res = db.prepare('DELETE FROM fiscal_incidents WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND business_id = ?))').run(incidentId, companyId, cleanPhone);
+  } else {
+    res = db.prepare('DELETE FROM fiscal_incidents WHERE id = ? AND business_id = ?').run(incidentId, cleanPhone);
+  }
   return res.changes > 0;
 }
 

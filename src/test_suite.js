@@ -6487,6 +6487,392 @@ assert(integrityResult41 && (integrityResult41.integrity_check === 'ok' || integ
 cleanupTest41(phoneIaTenantA);
 cleanupTest41(phoneIaTenantB);
 
+console.log("\nTEST 42: Migración Controlada de fiscal_incidents a company_id (Fase 2E-6 — Backfill, Tenant Isolation & Relational Integrity)");
+
+// ─── A. MIGRATION 012: EJECUCIÓN Y REGISTRO ───
+// A1. migration 012 se registra correctamente en TEST con versión 12
+const schemaRow012 = currentDb.prepare("SELECT version, name, applied_at FROM schema_migrations WHERE version = 12").get();
+assert(schemaRow012 && schemaRow012.version === 12, "A1. Migración 012 registrada en schema_migrations con versión 12");
+assert(schemaRow012 && schemaRow012.name === '012_fiscal_incidents_company_id', "A2. Nombre de migración 012 coincide exactamente");
+assert(schemaRow012 && typeof schemaRow012.applied_at === 'string' && schemaRow012.applied_at.length > 10, "A3. Migración 012 tiene timestamp applied_at válido");
+
+// A4 & A5. production sigue con máximo migration 006 (007, 008, 009, 010, 011 y 012 NO registradas)
+const prodDbFor012Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+const prodSchema012 = prodDbFor012Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
+const prodMaxVersion012 = prodDbFor012Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
+prodDbFor012Check.close();
+assert(prodSchema012.length === 0, "A4. DB de producción (data/presuvoz.db) NO tiene registradas las migraciones 007, 008, 009, 010, 011 ni 012");
+assert(prodMaxVersion012 === 6, "A5. Versión máxima en DB de producción permanece inalterada en 6");
+
+// A6 & A7. migrations 010 y 011 siguen intactas en test
+const schemaRow010In42 = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 10").get();
+const schemaRow011In42 = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 11").get();
+assert(schemaRow010In42 && schemaRow010In42.name === '010_expense_payments_company_id', "A6. Migración 010 permanece intacta en la base de datos de test");
+assert(schemaRow011In42 && schemaRow011In42.name === '011_investment_assets_company_id', "A7. Migración 011 permanece intacta en la base de datos de test");
+
+// ─── B. BACKFILL DETERMINISTA & CASOS FAIL-CLOSED ───
+// B1..B5. Memoria con datos existentes
+const memDb42B = new DatabaseSync(':memory:');
+initMigrationTable(memDb42B);
+runMigrations(memDb42B, { migrations: MIGRATIONS.slice(0, 11), authorized: true });
+
+// Insertar 2 empresas, facturas y 3 incidencias fiscales según esquema previo a 012
+memDb42B.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-inc-comp1', '34677550001', 'Empresa Auditoría 1 S.L.'),
+    ('uuid-inc-comp2', '34677550002', 'Empresa Auditoría 2 S.L.');
+  INSERT INTO invoices (id, company_id, company_phone, client_name, total_amount)
+  VALUES ('INV-42-01', 'uuid-inc-comp1', '34677550001', 'Cliente Uno', 1210);
+  INSERT INTO purchase_invoices (
+    id, company_id, business_id, supplier_name, invoice_date,
+    taxable_base, vat_rate, vat_amount, total_amount, deductible_vat_amount, fiscal_period
+  ) VALUES
+    ('PINV-42-01', 'uuid-inc-comp1', '34677550001', 'Proveedor Uno', '2026-07-01', 500, 21, 105, 605, 105, '2026_Q3');
+  INSERT INTO fiscal_incidents (
+    id, business_id, fiscal_period, entity_type, entity_id,
+    severity, error_code, message, resolution_status, created_at
+  ) VALUES
+    ('INC-BF-01', '34677550001', '2026_Q3', 'INVOICE', 'INV-42-01', 'CRITICAL', 'DUPLICATE_INVOICE_NUMBER', 'Factura duplicada', 'OPEN', '2026-07-01T10:00:00Z'),
+    ('INC-BF-02', '34677550001', '2026_Q3', 'PURCHASE_INVOICE', 'PINV-42-01', 'WARNING', 'DOUBTFUL_DEDUCTIBILITY', 'Gasto combustible', 'OPEN', '2026-07-15T11:00:00Z'),
+    ('INC-BF-03', '34677550002', '2026_Q3', 'GENERAL', '', 'WARNING', 'MISSING_PROFILE', 'Perfil fiscal incompleto', 'OPEN', '2026-07-02T12:00:00Z');
+`);
+
+const migRes42 = runMigrations(memDb42B, { migrations: [MIGRATIONS[11]], authorized: true });
+assert(migRes42.appliedCount === 1, "B1. Migración 012 se aplica con éxito sobre base de datos con datos");
+
+const incRows42 = memDb42B.prepare("SELECT id, company_id, business_id, fiscal_period, entity_type, entity_id, severity, error_code, message, resolution_status FROM fiscal_incidents ORDER BY id ASC").all();
+assert(incRows42.length === 3, "B2. Recuento de filas se preserva exactamente tras migración (3 filas)");
+assert(incRows42[0].company_id === 'uuid-inc-comp1' && incRows42[0].business_id === '34677550001', "B3. Fila 1 migrada con company_id correcto de Empresa 1");
+assert(incRows42[1].company_id === 'uuid-inc-comp1' && incRows42[1].business_id === '34677550001', "B4. Fila 2 migrada con company_id correcto de Empresa 1");
+assert(incRows42[2].company_id === 'uuid-inc-comp2' && incRows42[2].business_id === '34677550002', "B5. Fila 3 migrada con company_id correcto de Empresa 2");
+
+// B6..B10. Rollback atómico ante incidencia huérfana
+const memDb42Rollback = new DatabaseSync(':memory:');
+initMigrationTable(memDb42Rollback);
+runMigrations(memDb42Rollback, { migrations: MIGRATIONS.slice(0, 11), authorized: true });
+
+memDb42Rollback.exec(`
+  INSERT INTO companies (id, phone, name) VALUES ('uuid-inc-comp-ok', '34677550001', 'Empresa OK');
+  INSERT INTO fiscal_incidents (
+    id, business_id, fiscal_period, entity_type, entity_id, severity, error_code, message
+  ) VALUES
+    ('INC-OK-01', '34677550001', '2026_Q3', 'INVOICE', 'INV-1', 'WARNING', 'WARN_01', 'Incidencia OK'),
+    ('INC-ORPHAN-01', '34699999999', '2026_Q3', 'INVOICE', 'INV-2', 'CRITICAL', 'ERR_01', 'Incidencia Huérfana');
+`);
+
+let caughtOrphan012 = false;
+let orphanErrMsg012 = '';
+try {
+  runMigrations(memDb42Rollback, { migrations: [MIGRATIONS[11]], authorized: true });
+} catch (err) {
+  caughtOrphan012 = true;
+  orphanErrMsg012 = err.message;
+}
+assert(caughtOrphan012 === true, "B6. Migración 012 aborta inmediatamente ante incidencia huérfana (fail-closed)");
+assert(orphanErrMsg012.includes('fail-closed') && orphanErrMsg012.includes('huérfano'), "B7. Error descriptivo fail-closed ante incidencia con business_id huérfano");
+
+// Verificar rollback atómico
+const schemaAfterFail012 = memDb42Rollback.prepare("SELECT * FROM schema_migrations WHERE version = 12").get();
+assert(!schemaAfterFail012, "B8. Rollback atómico: Versión 12 NO queda registrada en schema_migrations");
+
+const colsAfterFail012 = memDb42Rollback.prepare('PRAGMA table_info("fiscal_incidents")').all();
+assert(!colsAfterFail012.some(c => c.name === 'company_id'), "B9. Rollback atómico: La tabla fiscal_incidents queda exactamente como estaba");
+
+const tempTableCheck012 = memDb42Rollback.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fiscal_incidents_new'").get();
+assert(!tempTableCheck012, "B10. Rollback atómico: No quedan tablas temporales (fiscal_incidents_new)");
+
+// B11..B12. Fallo ante ambigüedad de companies con el mismo teléfono
+const memDb42Ambig = new DatabaseSync(':memory:');
+initMigrationTable(memDb42Ambig);
+runMigrations(memDb42Ambig, { migrations: MIGRATIONS.slice(0, 11), authorized: true });
+memDb42Ambig.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-inc-ambig-1', '34677000099', 'Empresa Ambigua 1'),
+    ('uuid-inc-ambig-2', '+34 677 00 00 99', 'Empresa Ambigua 2');
+  INSERT INTO fiscal_incidents (
+    id, business_id, fiscal_period, entity_type, entity_id, severity, error_code, message
+  ) VALUES
+    ('INC-AMBIG-01', '34677000099', '2026_Q3', 'GENERAL', '', 'WARNING', 'AMBIG_ERR', 'Incidencia Ambigua');
+`);
+let caughtAmbig012 = false;
+try {
+  runMigrations(memDb42Ambig, { migrations: [MIGRATIONS[11]], authorized: true });
+} catch (err) {
+  caughtAmbig012 = true;
+  assert(err.message.includes('Ambigüedad crítica'), "B11. Fail-closed: Múltiples empresas ambiguas provocan aborto y rollback");
+}
+assert(caughtAmbig012 === true, "B12. Migración 012 aborta ante ambigüedad en companies");
+
+// B13..B14. Fallo ante inconsistencia cross-tenant entre incidencia y factura asociada
+const memDb42CrossTenant = new DatabaseSync(':memory:');
+initMigrationTable(memDb42CrossTenant);
+runMigrations(memDb42CrossTenant, { migrations: MIGRATIONS.slice(0, 11), authorized: true });
+memDb42CrossTenant.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-inc-cross-1', '34677660001', 'Empresa Alpha Fiscal'),
+    ('uuid-inc-cross-2', '34677660002', 'Empresa Beta Fiscal');
+  INSERT INTO invoices (id, company_id, company_phone, client_name, total_amount)
+  VALUES ('INV-BETA-42', 'uuid-inc-cross-2', '34677660002', 'Cliente Beta', 1000);
+  INSERT INTO fiscal_incidents (
+    id, business_id, fiscal_period, entity_type, entity_id, severity, error_code, message
+  ) VALUES
+    ('INC-CROSS-01', '34677660001', '2026_Q3', 'INVOICE', 'INV-BETA-42', 'CRITICAL', 'DUPLICATE_INVOICE_NUMBER', 'Factura ajena');
+`);
+let caughtCrossTenant012 = false;
+try {
+  runMigrations(memDb42CrossTenant, { migrations: [MIGRATIONS[11]], authorized: true });
+} catch (err) {
+  caughtCrossTenant012 = true;
+  assert(err.message.includes('Inconsistencia cross-tenant'), "B13. Fail-closed: Inconsistencia cross-tenant entre incidencia y factura provoca aborto");
+}
+assert(caughtCrossTenant012 === true, "B14. Migración 012 aborta ante inconsistencia cross-tenant");
+
+// ─── C. PRESERVACIÓN DE DATOS DE INCIDENCIAS ───
+assert(incRows42[0].fiscal_period === '2026_Q3', "C1. fiscal_period preservado intacto ('2026_Q3')");
+assert(incRows42[0].entity_type === 'INVOICE' && incRows42[0].entity_id === 'INV-42-01', "C2. entity_type y entity_id preservados intactos");
+assert(incRows42[0].severity === 'CRITICAL' && incRows42[0].error_code === 'DUPLICATE_INVOICE_NUMBER', "C3. severity y error_code preservados intactos");
+assert(incRows42[0].message === 'Factura duplicada' && incRows42[0].resolution_status === 'OPEN', "C4. message y resolution_status preservados intactos");
+
+// ─── D. AISLAMIENTO MULTI-TENANT EN TEST DB ───
+const phoneIncTenantA = '34677551101';
+const phoneIncTenantB = '34677551102';
+
+const cleanupTest42 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM fiscal_incidents WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM investment_assets WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM expense_payments WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM purchase_invoices WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM business_tax_profiles WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_periods WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM audit_logs WHERE business_id = ?").run(phone);
+    currentDb.prepare("DELETE FROM invoices WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+
+cleanupTest42(phoneIncTenantA);
+cleanupTest42(phoneIncTenantB);
+
+const compIncA = createCompanyWithIdentity({
+  name: 'Empresa Alpha Incidencias S.L.',
+  phone: phoneIncTenantA,
+  trade: 'Construcción'
+});
+const contextIncA = resolveAuthenticatedContext('whatsapp', phoneIncTenantA);
+
+const compIncB = createCompanyWithIdentity({
+  name: 'Empresa Beta Incidencias S.L.',
+  phone: phoneIncTenantB,
+  trade: 'Electricidad'
+});
+const contextIncB = resolveAuthenticatedContext('whatsapp', phoneIncTenantB);
+
+// Crear facturas recibidas legítimas para cada tenant
+const invA42 = savePurchaseInvoice(contextIncA, {
+  id: 'REC-42-A01',
+  supplierName: 'Materiales Alpha S.L.',
+  taxBase: 1500,
+  vatRate: 21,
+  totalAmount: 1815,
+  issueDate: '2026-08-10'
+});
+const invB42 = savePurchaseInvoice(contextIncB, {
+  id: 'REC-42-B01',
+  supplierName: 'Materiales Beta S.L.',
+  taxBase: 800,
+  vatRate: 21,
+  totalAmount: 968,
+  issueDate: '2026-08-11'
+});
+
+// D1 & D2. Cada tenant registra su incidencia fiscal
+const incA42 = saveFiscalIncident(contextIncA, {
+  id: 'INC-42-A01',
+  fiscalPeriod: '2026_Q3',
+  entityType: 'PURCHASE_INVOICE',
+  entityId: 'REC-42-A01',
+  severity: 'WARNING',
+  errorCode: 'DOUBTFUL_DEDUCTIBILITY',
+  message: 'Gasto con deducibilidad dudosa A',
+  resolutionStatus: 'OPEN'
+});
+assert(incA42 && incA42.id === 'INC-42-A01', "D1. saveFiscalIncident de Tenant A registra su incidencia");
+
+const incB42 = saveFiscalIncident(contextIncB, {
+  id: 'INC-42-B01',
+  fiscalPeriod: '2026_Q3',
+  entityType: 'PURCHASE_INVOICE',
+  entityId: 'REC-42-B01',
+  severity: 'CRITICAL',
+  errorCode: 'MISSING_CUSTOMER_NIF',
+  message: 'Factura sin NIF de proveedor B',
+  resolutionStatus: 'OPEN'
+});
+assert(incB42 && incB42.id === 'INC-42-B01', "D2. saveFiscalIncident de Tenant B registra su incidencia");
+
+// D3. Cross-Tenant Read: getFiscalIncident(contextB, idA) devuelve null
+const crossReadAfromB_42 = getFiscalIncident(contextIncB, 'INC-42-A01');
+assert(crossReadAfromB_42 === null, "D3. Cross-Tenant Read: getFiscalIncident(tenantB, idA) devuelve null (Zero-Disclosure)");
+
+// D4. Cross-Tenant Read: getFiscalIncident(contextA, idB) devuelve null
+const crossReadBfromA_42 = getFiscalIncident(contextIncA, 'INC-42-B01');
+assert(crossReadBfromA_42 === null, "D4. Cross-Tenant Read: getFiscalIncident(tenantA, idB) devuelve null (Zero-Disclosure)");
+
+// D5. Lectura legítima de Tenant A
+const legitReadA_42 = getFiscalIncident(contextIncA, 'INC-42-A01');
+assert(legitReadA_42 !== null && legitReadA_42.id === 'INC-42-A01' && legitReadA_42.companyId === compIncA.companyId, "D5. Lectura legítima: getFiscalIncident(tenantA, idA) recupera su incidencia");
+
+// D6. Lectura legítima de Tenant B
+const legitReadB_42 = getFiscalIncident(contextIncB, 'INC-42-B01');
+assert(legitReadB_42 !== null && legitReadB_42.id === 'INC-42-B01' && legitReadB_42.companyId === compIncB.companyId, "D6. Lectura legítima: getFiscalIncident(tenantB, idB) recupera su incidencia");
+
+// D7. Cross-Tenant Resolve: resolveFiscalIncident(tenantA, idB) devuelve false
+const crossResolveBfromA_42 = resolveFiscalIncident(contextIncA, 'INC-42-B01');
+assert(crossResolveBfromA_42 === false, "D7. Cross-Tenant Resolve: resolveFiscalIncident(tenantA, idB) devuelve false");
+
+// D8. Incidencia de Tenant B permanece OPEN
+const verifyIncBStillOpen_42 = currentDb.prepare("SELECT resolution_status FROM fiscal_incidents WHERE id = ?").get('INC-42-B01');
+assert(verifyIncBStillOpen_42 && verifyIncBStillOpen_42.resolution_status === 'OPEN', "D8. Incidencia de Tenant B permanece OPEN tras intento cross-tenant");
+
+// D9. Resolucin legtima por Tenant B
+const legitResolveIncB_42 = resolveFiscalIncident(contextIncB, 'INC-42-B01');
+assert(legitResolveIncB_42 === true, "D9. Resolucin legtima: resolveFiscalIncident(tenantB, idB) resuelve con xito");
+const verifyIncBResolved_42 = currentDb.prepare("SELECT resolution_status FROM fiscal_incidents WHERE id = ?").get('INC-42-B01');
+assert(verifyIncBResolved_42 && verifyIncBResolved_42.resolution_status === 'RESOLVED', "D9b. Estado pasa a RESOLVED para el tenant autorizado");
+
+// D10. Cross-Tenant Delete: deleteFiscalIncident(tenantA, idB) devuelve false
+const crossDeleteBfromA_42 = deleteFiscalIncident(contextIncA, 'INC-42-B01');
+assert(crossDeleteBfromA_42 === false, "D10. Cross-Tenant Delete: deleteFiscalIncident(tenantA, idB) devuelve false");
+
+// D11. Incidencia de Tenant B permanece intacta tras intento cross-tenant
+const verifyIncBIntact_42 = currentDb.prepare("SELECT * FROM fiscal_incidents WHERE id = ?").get('INC-42-B01');
+assert(verifyIncBIntact_42 !== null && verifyIncBIntact_42.company_id === compIncB.companyId, "D11. Incidencia de Tenant B permanece 100% intacta en SQLite");
+
+// D12. listFiscalIncidents(contextA) solo retorna incidencias del Tenant A
+const listIncA_42 = listFiscalIncidents(contextIncA);
+assert(listIncA_42.every(inc => inc.companyId === compIncA.companyId) && listIncA_42.some(inc => inc.id === 'INC-42-A01'), "D12. listFiscalIncidents(contextA) solo retorna incidencias del Tenant A");
+
+// D13. listFiscalIncidents(contextB) solo retorna incidencias del Tenant B
+const listIncB_42 = listFiscalIncidents(contextIncB, null, null);
+assert(listIncB_42.every(inc => inc.companyId === compIncB.companyId) && listIncB_42.some(inc => inc.id === 'INC-42-B01'), "D13. listFiscalIncidents(contextB) solo retorna incidencias del Tenant B");
+
+// D14. Intento de asociar incidencia a factura de otro tenant es bloqueado
+const crossTenantIncAttempt_42 = saveFiscalIncident(contextIncA, {
+  id: 'INC-CROSS-ATTEMPT',
+  fiscalPeriod: '2026_Q3',
+  entityType: 'PURCHASE_INVOICE',
+  entityId: 'REC-42-B01', // Factura de Tenant B
+  severity: 'WARNING',
+  errorCode: 'CROSS_ATTEMPT',
+  message: 'Incidencia con factura ajena'
+});
+assert(crossTenantIncAttempt_42 === null, "D14. Intento de asociar incidencia a factura de otro tenant es bloqueado (retorna null)");
+
+// ─── E. INYECCIÓN DE MODELO (DEFENSA FAIL-CLOSED) ───
+// E1..E4. Gemini spoofing company_id / business_id en payload es neutralizado
+const maliciousAiFiscalIncident_42 = {
+  id: 'INC-42-INJECT-01',
+  companyId: compIncB.companyId,
+  company_id: compIncB.companyId,
+  businessId: phoneIncTenantB,
+  business_id: phoneIncTenantB,
+  fiscalPeriod: '2026_Q3',
+  entityType: 'PURCHASE_INVOICE',
+  entityId: 'REC-42-A01',
+  severity: 'WARNING',
+  errorCode: 'INJECT_ATTEMPT',
+  message: 'Inyección de incidencia fiscal'
+};
+const savedInjected_42 = saveFiscalIncident(contextIncA, maliciousAiFiscalIncident_42);
+assert(savedInjected_42.companyId === compIncA.companyId, "E1. Modelo injection defendida: companyId de A se mantiene como autoridad");
+assert(savedInjected_42.businessId === phoneIncTenantA, "E2. Modelo injection defendida: businessId de A se mantiene sincronizado con phoneA");
+
+const verifyInjectedIncInDb_42 = currentDb.prepare("SELECT company_id, business_id FROM fiscal_incidents WHERE id = ?").get('INC-42-INJECT-01');
+assert(verifyInjectedIncInDb_42.company_id === compIncA.companyId && verifyInjectedIncInDb_42.business_id === phoneIncTenantA, "E3. En SQLite, la incidencia inyectada pertenece legítimamente a Tenant A");
+
+const readInjectedIncFromB_42 = getFiscalIncident(contextIncB, 'INC-42-INJECT-01');
+assert(readInjectedIncFromB_42 === null, "E4. Tenant B permanece completamente protegido contra payload spoofed");
+
+// ─── F. ROBUSTEZ DE UUID v4 ───
+assert(isUuid(savedInjected_42.companyId), "F1. companyId retornado es un UUID v4 canónico");
+assert(savedInjected_42.companyId.length === 36 && savedInjected_42.companyId.includes('-'), "F2. companyId tiene formato UUID con guiones intactos (36 caracteres)");
+
+const sqliteRowIncA_42 = currentDb.prepare("SELECT company_id FROM fiscal_incidents WHERE id = ?").get('INC-42-A01');
+assert(sqliteRowIncA_42 && sqliteRowIncA_42.company_id === compIncA.companyId, "F3. SQLite almacena el UUID con guiones intactos sin regex stripping");
+
+// ─── G. CLAVE FORÁNEA & ON DELETE RESTRICT ───
+// G1. Inserción con company_id inexistente lanza FK constraint violation
+let caughtFkInexistenteInc_42 = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO fiscal_incidents (id, company_id, business_id, fiscal_period, entity_type, entity_id, severity, error_code, message)
+    VALUES ('fake-id-inc', '00000000-0000-4000-8000-000000000099', '34600999999', '2026_Q3', 'GENERAL', '', 'WARNING', 'ERR_FAKE', 'Falsa');
+  `).run();
+} catch (err) {
+  caughtFkInexistenteInc_42 = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "G1. Violación de Foreign Key hacia companies(id) detectada");
+}
+assert(caughtFkInexistenteInc_42 === true, "G2. SQLite rechaza inserción en fiscal_incidents con company inexistente");
+
+// G3. Inserción con company_id NULL es rechazada
+let caughtNullCidInc_42 = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO fiscal_incidents (id, company_id, business_id, fiscal_period, entity_type, entity_id, severity, error_code, message)
+    VALUES ('fake-id-inc2', NULL, '34600999999', '2026_Q3', 'GENERAL', '', 'WARNING', 'ERR_FAKE', 'Falsa 2');
+  `).run();
+} catch (err) {
+  caughtNullCidInc_42 = true;
+  assert(err.message.includes('NOT NULL constraint failed'), "G3. NOT NULL constraint en company_id detectada");
+}
+assert(caughtNullCidInc_42 === true, "G4. Inserción con company_id NULL es rechazada");
+
+// G5. ON DELETE RESTRICT previene el borrado de empresa con incidencias registradas
+let caughtRestrictDeleteInc_42 = false;
+try {
+  currentDb.prepare("DELETE FROM companies WHERE id = ?").run(compIncB.companyId);
+} catch (err) {
+  caughtRestrictDeleteInc_42 = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "G5. ON DELETE RESTRICT previene el borrado de empresa con incidencias registradas");
+}
+assert(caughtRestrictDeleteInc_42 === true, "G6. La empresa no puede ser eliminada mientras tenga registros en fiscal_incidents");
+
+// ─── H. COMPATIBILIDAD HACIA ATRÁS (LEGACY ADAPTER & DUAL-WRITE) ───
+// H1. getFiscalIncident(phone) funciona vía legacy adapter
+const legacyReadIncA_42 = getFiscalIncident(phoneIncTenantA, 'INC-42-A01');
+assert(legacyReadIncA_42 !== null && legacyReadIncA_42.companyId === compIncA.companyId, "H1. getFiscalIncident(phone) funciona vía legacy adapter");
+
+// H2. listFiscalIncidents(phone) funciona vía legacy adapter
+const legacyListIncA_42 = listFiscalIncidents(phoneIncTenantA);
+assert(legacyListIncA_42.length >= 1 && legacyListIncA_42.some(inc => inc.id === 'INC-42-A01'), "H2. listFiscalIncidents(phone) funciona vía legacy adapter");
+
+// H3. resolveFiscalIncident(phone) resuelve vía legacy adapter
+const legacyResolveIncA_42 = resolveFiscalIncident(phoneIncTenantA, 'INC-42-A01');
+assert(legacyResolveIncA_42 === true, "H3. resolveFiscalIncident(phone) resuelve vía legacy adapter");
+
+// H4. saveFiscalIncident(phone) actualiza y mantiene dual-write sincronizado
+saveFiscalIncident(phoneIncTenantA, {
+  id: 'INC-42-A01',
+  message: 'Mensaje actualizado vía legacy adapter'
+});
+const updatedLegacyIncA_42 = getFiscalIncident(compIncA.companyId, 'INC-42-A01');
+assert(updatedLegacyIncA_42.message === 'Mensaje actualizado vía legacy adapter', "H4. saveFiscalIncident(phone) actualiza correctamente la fila");
+assert(updatedLegacyIncA_42.companyId === compIncA.companyId && updatedLegacyIncA_42.businessId === phoneIncTenantA, "H5. Dual-write preservado: company_id y business_id sincronizados");
+
+// ─── I. INTEGRIDAD RELACIONAL FINAL ───
+const fkViolations42 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult42 = currentDb.prepare("PRAGMA integrity_check;").get();
+assert(fkViolations42.length === 0, "I1. PRAGMA foreign_key_check = 0 violaciones en base de datos de test");
+assert(integrityResult42 && (integrityResult42.integrity_check === 'ok' || integrityResult42.integrity_check === 'OK'), "I2. PRAGMA integrity_check = ok en base de datos de test");
+
+cleanupTest42(phoneIncTenantA);
+cleanupTest42(phoneIncTenantB);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
