@@ -947,7 +947,8 @@ export function formatShoppingListForWhatsApp(items, clientFilter = null) {
 export async function checkDisambiguation(sock, remoteJid, session, clientQuery, actionType, originalPayload = {}) {
   if (!clientQuery) return false;
   const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-  const candidates = findClientsByName(cleanPhone, clientQuery);
+  const tenantContext = session.authContext || (session.companyId ? { companyId: session.companyId, phone: session.phone } : cleanPhone);
+  const candidates = findClientsByName(tenantContext, clientQuery);
 
   if (candidates && candidates.length > 1) {
     session.pendingDisambiguation = {
@@ -970,7 +971,8 @@ export async function checkDisambiguation(sock, remoteJid, session, clientQuery,
 export async function handleRenameClient(sock, remoteJid, session, targetQuery, newName) {
   try {
     const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-    const candidates = findClientsByName(cleanPhone, targetQuery);
+    const tenantContext = session.authContext || (session.companyId ? { companyId: session.companyId, phone: session.phone } : cleanPhone);
+    const candidates = findClientsByName(tenantContext, targetQuery);
 
     if (candidates.length > 1) {
       session.pendingDisambiguation = {
@@ -987,7 +989,7 @@ export async function handleRenameClient(sock, remoteJid, session, targetQuery, 
       return;
     }
 
-    const renamed = renameClientBudget(cleanPhone, targetQuery, newName);
+    const renamed = renameClientBudget(tenantContext, targetQuery, newName);
     if (!renamed) {
       if (sock?.sendMessage) {
         const sentErr = await sock.sendMessage(remoteJid, {
@@ -1717,11 +1719,17 @@ async function startWhatsAppGateway() {
               const sessPhone = String(sess.phone || '').replace(/\D/g, '');
               const activeUser = String(activeJid.split('@')[0]).replace(/\D/g, '');
 
-              // Coincidencia con el teléfono de la empresa o self-chat
+              // Coincidencia prioritaria por companyId si ambos lo tienen
+              const matchesCompanyId = Boolean(item.companyId && sess.companyId && item.companyId === sess.companyId);
+              // Coincidencia secundaria con el teléfono de la empresa o self-chat si no hay companyId
               const matchesCompany = (cleanPhone && (sessPhone === cleanPhone || activeUser === cleanPhone));
               const matchesSelf = (cleanPhone && cleanPhone === myNum && (activeUser === myNum || activeUser === myLid));
 
-              if (matchesCompany || matchesSelf) {
+              if (matchesCompanyId || (!item.companyId && (matchesCompany || matchesSelf))) {
+                // Si item.companyId existe y sess.companyId existe pero no coinciden, es cross-tenant -> rechazar
+                if (item.companyId && sess.companyId && item.companyId !== sess.companyId) {
+                  continue;
+                }
                 // Verificar que activeJid es un destinatario autorizado
                 const isAuth = isAuthorizedEgressRecipient(activeJid, { myNumber: myNum, myLid, allowedNumbers: ALLOWED_NUMBERS }).allowed;
                 if (isAuth) {
@@ -2431,6 +2439,7 @@ async function startWhatsAppGateway() {
   async function handleQueryWorkStatus(sock, remoteJid, session, clientQuery = null, onlyMissing = false) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const tenantContext = session.authContext || (session.companyId ? { companyId: session.companyId, phone: session.phone } : cleanPhone);
       const activeBudget = session.activeBudgetId ? session.budgets.get(session.activeBudgetId) : null;
       const targetQuery = clientQuery || (activeBudget?.client?.name !== 'Cliente Particular' ? activeBudget?.client?.name : null) || activeBudget?.id || null;
 
@@ -2439,7 +2448,7 @@ async function startWhatsAppGateway() {
         if (isDis) return;
       }
 
-      const workMem = getWorkMemory(cleanPhone, targetQuery);
+      const workMem = getWorkMemory(tenantContext, targetQuery);
       if (!workMem) {
         const sentNotFound = await sock.sendMessage(remoteJid, {
           text: `ℹ️ No he encontrado ninguna obra activa o presupuesto${targetQuery ? ` para *"${targetQuery}"*` : ''}.\n\nEscribe *"ver presupuestos"* para ver todas tus obras.`
@@ -2463,6 +2472,7 @@ async function startWhatsAppGateway() {
   async function handleUpdateWorkTask(sock, remoteJid, session, clientQuery = null, taskQuery = '', isDone = true) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const tenantContext = session.authContext || (session.companyId ? { companyId: session.companyId, phone: session.phone } : cleanPhone);
       const activeBudget = session.activeBudgetId ? session.budgets.get(session.activeBudgetId) : null;
       const targetQuery = clientQuery || (activeBudget?.client?.name !== 'Cliente Particular' ? activeBudget?.client?.name : null) || activeBudget?.id || null;
 
@@ -2471,7 +2481,7 @@ async function startWhatsAppGateway() {
         if (isDis) return;
       }
 
-      const res = updateWorkTaskStatus(cleanPhone, targetQuery, taskQuery, isDone);
+      const res = updateWorkTaskStatus(tenantContext, targetQuery, taskQuery, isDone);
       if (!res) {
         const sentNotFound = await sock.sendMessage(remoteJid, {
           text: `ℹ️ No se pudo actualizar la tarea *"${taskQuery}"*${targetQuery ? ` para la obra de ${targetQuery}` : ''}.\nComprueba que el nombre de la obra o presupuesto sea correcto.`
@@ -2520,10 +2530,11 @@ async function startWhatsAppGateway() {
   async function handleUpdateWorkDates(sock, remoteJid, session, clientQuery = null, startDate = null, estimatedEndDate = null) {
     try {
       const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+      const tenantContext = session.authContext || (session.companyId ? { companyId: session.companyId, phone: session.phone } : cleanPhone);
       const activeBudget = session.activeBudgetId ? session.budgets.get(session.activeBudgetId) : null;
       const targetQuery = clientQuery || (activeBudget?.client?.name !== 'Cliente Particular' ? activeBudget?.client?.name : null) || activeBudget?.id || null;
 
-      const res = updateWorkDates(cleanPhone, targetQuery, startDate, estimatedEndDate);
+      const res = updateWorkDates(tenantContext, targetQuery, startDate, estimatedEndDate);
       if (!res) {
         const sentNotFound = await sock.sendMessage(remoteJid, {
           text: `ℹ️ No se pudo actualizar los plazos${targetQuery ? ` para la obra de ${targetQuery}` : ''}.\nComprueba que el nombre de la obra sea correcto.`
@@ -3174,7 +3185,8 @@ async function startWhatsAppGateway() {
     // Detección preventiva de cliente homónimo / repetido al crear presupuesto nuevo
     let homonymWarningText = '';
     if (!isUpdate && aiResult.clientName && aiResult.clientName !== 'Cliente Particular') {
-      const existingSameName = findClientsByName(cleanPhone, aiResult.clientName);
+      const tenantContext = session.authContext || (session.companyId ? { companyId: session.companyId, phone: session.phone } : cleanPhone);
+      const existingSameName = findClientsByName(tenantContext, aiResult.clientName);
       const otherBudgets = existingSameName.filter(b => b.id !== engineResult.budget.id);
       if (otherBudgets.length > 0) {
         homonymWarningText = '\n\n' + formatDuplicateClientWarning(aiResult.clientName, aiResult.clientAddress, otherBudgets);
@@ -3331,13 +3343,17 @@ async function startWhatsAppGateway() {
               {},
               { logger, reuploadRequest: sock.updateMediaMessage }
             );
-            const logosDir = path.resolve('data', 'logos');
+            const authenticatedCompanyId = session.authContext?.companyId || session.companyId;
+            const tenantIdentifier = authenticatedCompanyId ? String(authenticatedCompanyId).trim() : senderNumber;
+            const safeFolder = tenantIdentifier.replace(/[^a-zA-Z0-9_-]/g, '');
+            const logosDir = path.resolve('data', 'logos', safeFolder);
             if (!fs.existsSync(logosDir)) fs.mkdirSync(logosDir, { recursive: true });
-            const logoPath = path.join(logosDir, `${senderNumber}.png`);
+            const logoPath = path.join(logosDir, 'logo.png');
             fs.writeFileSync(logoPath, buffer);
 
-            saveCompany(senderNumber, { logoPath });
-            session.company = getCompany(senderNumber);
+            const tenantContext = session.authContext || (authenticatedCompanyId ? { companyId: authenticatedCompanyId, phone: senderNumber } : senderNumber);
+            saveCompany(tenantContext, { logoPath });
+            session.company = getCompany(tenantContext);
 
             const sentLogo = await sock.sendMessage(remoteJid, {
               text: `✅ *¡Logotipo de empresa guardado con éxito!*\n\n🖼️ A partir de ahora aparecerá en la cabecera de todos tus nuevos presupuestos, facturas y recibos oficiales en PDF.`
@@ -3372,9 +3388,10 @@ async function startWhatsAppGateway() {
               return;
             }
 
-            // Guardar justificante en disco aislado por company_id
+            // Guardar justificante en disco aislado por company_id con sanitización path-traversal
             const tenantContext = session.authContext || { companyId: authenticatedCompanyId, phone: senderNumber };
-            const receiptsDir = path.resolve('data', 'purchase_receipts', authenticatedCompanyId);
+            const safeCompanyId = String(authenticatedCompanyId).replace(/[^a-zA-Z0-9_-]/g, '');
+            const receiptsDir = path.resolve('data', 'purchase_receipts', safeCompanyId);
             if (!fs.existsSync(receiptsDir)) fs.mkdirSync(receiptsDir, { recursive: true });
             const receiptPath = path.join(receiptsDir, `${Date.now()}.jpg`);
             fs.writeFileSync(receiptPath, buffer);
@@ -3502,7 +3519,8 @@ async function startWhatsAppGateway() {
 
           // Si el usuario pidió renombrar al elegir el candidato
           if (renameNewName) {
-            renameClientBudget(session.phone || remoteJid, selectedCandidate.id, renameNewName);
+            const tenantContext = session.authContext || (session.companyId ? { companyId: session.companyId, phone: session.phone } : (session.phone || remoteJid));
+            renameClientBudget(tenantContext, selectedCandidate.id, renameNewName);
             selectedCandidate.clientName = renameNewName;
             const sentRen = await sock.sendMessage(remoteJid, {
               text: `🏷️ *Cliente renombrado a "${renameNewName}"* para diferenciarlo.`

@@ -31,25 +31,6 @@ db.exec('PRAGMA foreign_keys = ON;');
 // Las migraciones NO se ejecutan automáticamente al importar db_service.js.
 // Para migrar, se debe usar explícitamente scripts/migrate.js o runMigrations(db, { authorized: true }).
 
-// Migración automática de datos creados accidentalmente bajo el LID de WhatsApp
-try {
-  const primaryAllowed = (process.env.ALLOWED_NUMBERS || '').split(',')[0]?.trim();
-  if (primaryAllowed && primaryAllowed.length >= 9) {
-    const oldLid = '82987509096647';
-    const oldComp = db.prepare('SELECT * FROM companies WHERE phone = ?').get(oldLid);
-    if (oldComp) {
-      db.prepare('DELETE FROM companies WHERE phone = ?').run(primaryAllowed);
-      db.prepare('UPDATE companies SET phone = ? WHERE phone = ?').run(primaryAllowed, oldLid);
-    }
-    db.prepare('UPDATE OR IGNORE budgets SET company_phone = ? WHERE company_phone = ?').run(primaryAllowed, oldLid);
-    db.prepare('UPDATE OR IGNORE invoices SET company_phone = ? WHERE company_phone = ?').run(primaryAllowed, oldLid);
-    db.prepare('UPDATE OR IGNORE appointments SET company_phone = ? WHERE company_phone = ?').run(primaryAllowed, oldLid);
-    db.prepare('UPDATE OR IGNORE shopping_items SET company_phone = ? WHERE company_phone = ?').run(primaryAllowed, oldLid);
-    db.prepare('UPDATE OR IGNORE payments SET company_phone = ? WHERE company_phone = ?').run(primaryAllowed, oldLid);
-  }
-} catch (e) {
-  // Ignorar errores en migración de LID
-}
 
 export const DEFAULT_COMPANY = {
   name: null,
@@ -431,10 +412,39 @@ export function deleteBudget(companyContextOrIdOrPhone, id) {
   return { deleted: result.changes > 0, id };
 }
 
-export async function syncPendingSignaturesFromCloud() {
+export async function syncPendingSignaturesFromCloud(companyContextOrId = null) {
   try {
-    const stmt = db.prepare("SELECT id, company_phone, data_json FROM budgets WHERE status != 'ACEPTADO' AND status != 'FIRMADO'");
-    const rows = stmt.all();
+    let rows;
+    let targetCompanyId = null;
+    let targetPhone = null;
+
+    if (companyContextOrId) {
+      const tenant = resolveCompanyTenant(companyContextOrId);
+      targetCompanyId = tenant?.companyId;
+      targetPhone = tenant?.phone;
+
+      if (targetCompanyId) {
+        rows = db.prepare(`
+          SELECT id, company_id, company_phone, data_json 
+          FROM budgets 
+          WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))
+            AND status != 'ACEPTADO' AND status != 'FIRMADO'
+        `).all(targetCompanyId, targetPhone || '');
+      } else if (targetPhone) {
+        rows = db.prepare(`
+          SELECT id, company_id, company_phone, data_json 
+          FROM budgets 
+          WHERE company_phone = ?
+            AND status != 'ACEPTADO' AND status != 'FIRMADO'
+        `).all(targetPhone);
+      } else {
+        return [];
+      }
+    } else {
+      const stmt = db.prepare("SELECT id, company_id, company_phone, data_json FROM budgets WHERE status != 'ACEPTADO' AND status != 'FIRMADO'");
+      rows = stmt.all();
+    }
+
     if (!rows || rows.length === 0) return [];
 
     const newlyAccepted = [];
@@ -475,6 +485,20 @@ export async function syncPendingSignaturesFromCloud() {
         }
 
         if (signInfo && (signInfo.signed || signInfo.signedAt)) {
+          // Verificación de integridad cross-tenant
+          if (signInfo.companyId && row.company_id && signInfo.companyId !== row.company_id) {
+            console.warn(`🛑 [Seguridad Tenant] Rechazada firma en la nube para ${budgetId}: companyId no coincide (${signInfo.companyId} !== ${row.company_id})`);
+            return;
+          }
+          if (signInfo.companyPhone && row.company_phone) {
+            const cleanInfoPhone = String(signInfo.companyPhone).replace(/\D/g, '');
+            const cleanRowPhone = String(row.company_phone).replace(/\D/g, '');
+            if (cleanInfoPhone && cleanRowPhone && cleanInfoPhone !== cleanRowPhone) {
+              console.warn(`🛑 [Seguridad Tenant] Rechazada firma en la nube para ${budgetId}: companyPhone no coincide (${cleanInfoPhone} !== ${cleanRowPhone})`);
+              return;
+            }
+          }
+
           let budgetObj = null;
           try { budgetObj = JSON.parse(row.data_json); } catch(e) {}
           if (budgetObj) {
@@ -484,21 +508,35 @@ export async function syncPendingSignaturesFromCloud() {
           }
 
           const now = new Date().toISOString();
-          db.prepare(`
-            UPDATE budgets
-            SET status = 'ACEPTADO',
-                updated_at = ?,
-                data_json = ?
-            WHERE id = ?
-          `).run(now, JSON.stringify(budgetObj || { id: budgetId, status: 'ACEPTADO' }), budgetId);
+          let result;
+          if (row.company_id) {
+            result = db.prepare(`
+              UPDATE budgets
+              SET status = 'ACEPTADO',
+                  updated_at = ?,
+                  data_json = ?
+              WHERE id = ? AND company_id = ?
+            `).run(now, JSON.stringify(budgetObj || { id: budgetId, status: 'ACEPTADO' }), budgetId, row.company_id);
+          } else {
+            result = db.prepare(`
+              UPDATE budgets
+              SET status = 'ACEPTADO',
+                  updated_at = ?,
+                  data_json = ?
+              WHERE id = ? AND company_id IS NULL AND company_phone = ?
+            `).run(now, JSON.stringify(budgetObj || { id: budgetId, status: 'ACEPTADO' }), budgetId, row.company_phone);
+          }
 
-          newlyAccepted.push({
-            budgetId,
-            clientName: signInfo.clientName || budgetObj?.client?.name || 'Cliente',
-            companyPhone: row.company_phone,
-            signedEmail: signInfo.clientEmail,
-            signedAt: signInfo.signedAt
-          });
+          if (result && result.changes > 0) {
+            newlyAccepted.push({
+              budgetId,
+              companyId: row.company_id,
+              clientName: signInfo.clientName || budgetObj?.client?.name || 'Cliente',
+              companyPhone: row.company_phone,
+              signedEmail: signInfo.clientEmail,
+              signedAt: signInfo.signedAt
+            });
+          }
         }
       } catch (err) {
         // Ignorar fallos de red en sondeos individuales
@@ -2574,13 +2612,15 @@ export function clearShoppingList(companyContextOrIdOrPhone) {
 export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
   const tenant = resolveCompanyTenant(phoneOrCompany);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone || String(phoneOrCompany || '').replace(/\D/g, '');
+  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' && !phoneOrCompany.includes('-') ? String(phoneOrCompany).replace(/\D/g, '') : null);
   
+  if (!companyId && !cleanPhone) return null;
+
   // 1. Buscar presupuesto correspondiente
   let query = companyId 
-    ? 'SELECT * FROM budgets WHERE (company_id = ? OR company_phone = ?)' 
+    ? 'SELECT * FROM budgets WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))' 
     : 'SELECT * FROM budgets WHERE company_phone = ?';
-  const params = companyId ? [companyId, cleanPhone] : [cleanPhone];
+  const params = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
 
   if (clientOrBudgetId) {
     const q = String(clientOrBudgetId).trim().toLowerCase();
@@ -2601,8 +2641,15 @@ export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
   const clientPhone = budgetRow.client_phone || parsed?.client?.phone || null;
   const totalAmount = budgetRow.total_amount || parsed?.financials?.totalAmount || 0;
 
-  // 2. Pagos acumulados
-  const paymentRows = db.prepare('SELECT amount FROM payments WHERE budget_id = ?').all(budgetId);
+  // 2. Pagos acumulados scoped por tenant
+  const payTenantFilter = budgetRow.company_id
+    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
+    : "company_phone = ?";
+  const payParams = budgetRow.company_id
+    ? [budgetRow.company_id, cleanPhone || budgetRow.company_phone || '', budgetId]
+    : [cleanPhone || budgetRow.company_phone, budgetId];
+
+  const paymentRows = db.prepare(`SELECT amount FROM payments WHERE ${payTenantFilter} AND budget_id = ?`).all(...payParams);
   const totalPaid = paymentRows.reduce((sum, p) => sum + (p.amount || 0), 0);
   const remainingBalance = Math.max(0, totalAmount - totalPaid);
 
@@ -2612,10 +2659,12 @@ export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
   const estimatedEndDate = workMemory.estimatedEndDate || null;
 
   // 4. Materiales asociados (por budgetId o por nombre de cliente)
-  const shopTenantFilter = companyId 
+  const shopTenantFilter = budgetRow.company_id 
     ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
     : "company_phone = ?";
-  const shopParams = companyId ? [companyId, cleanPhone || '', budgetId, clientName] : [cleanPhone, budgetId, clientName];
+  const shopParams = budgetRow.company_id 
+    ? [budgetRow.company_id, cleanPhone || budgetRow.company_phone || '', budgetId, clientName] 
+    : [cleanPhone || budgetRow.company_phone, budgetId, clientName];
 
   const materialsRows = db.prepare(`
     SELECT id, description, qty, unit, status, created_at, bought_at
@@ -2699,13 +2748,19 @@ export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
   };
 }
 
-export function updateWorkTaskStatus(phone, clientOrBudgetId, taskQuery, isDone = true) {
-  const cleanPhone = String(phone || '').replace(/\D/g, '');
+export function updateWorkTaskStatus(phoneOrCompany, clientOrBudgetId, taskQuery, isDone = true) {
   if (!taskQuery) return null;
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' && !phoneOrCompany.includes('-') ? String(phoneOrCompany).replace(/\D/g, '') : null);
+
+  if (!companyId && !cleanPhone) return null;
 
   // Buscar presupuesto
-  let query = 'SELECT * FROM budgets WHERE company_phone = ?';
-  const params = [cleanPhone];
+  let query = companyId 
+    ? 'SELECT * FROM budgets WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))' 
+    : 'SELECT * FROM budgets WHERE company_phone = ?';
+  const params = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
 
   if (clientOrBudgetId) {
     const q = String(clientOrBudgetId).trim().toLowerCase();
@@ -2761,25 +2816,41 @@ export function updateWorkTaskStatus(phone, clientOrBudgetId, taskQuery, isDone 
   }
 
   const now = new Date().toISOString();
-  db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ?').run(
-    JSON.stringify(parsed),
-    now,
-    budgetRow.id
-  );
+  if (budgetRow.company_id) {
+    db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ? AND company_id = ?').run(
+      JSON.stringify(parsed),
+      now,
+      budgetRow.id,
+      budgetRow.company_id
+    );
+  } else {
+    db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ? AND company_id IS NULL AND company_phone = ?').run(
+      JSON.stringify(parsed),
+      now,
+      budgetRow.id,
+      budgetRow.company_phone
+    );
+  }
 
   return {
     budgetId: budgetRow.id,
     clientName: budgetRow.client_name,
     task: matchedTask,
-    workMemory: getWorkMemory(cleanPhone, budgetRow.id)
+    workMemory: getWorkMemory(companyId || cleanPhone, budgetRow.id)
   };
 }
 
-export function updateWorkDates(phone, clientOrBudgetId, startDate, estimatedEndDate) {
-  const cleanPhone = String(phone || '').replace(/\D/g, '');
+export function updateWorkDates(phoneOrCompany, clientOrBudgetId, startDate, estimatedEndDate) {
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' && !phoneOrCompany.includes('-') ? String(phoneOrCompany).replace(/\D/g, '') : null);
 
-  let query = 'SELECT * FROM budgets WHERE company_phone = ?';
-  const params = [cleanPhone];
+  if (!companyId && !cleanPhone) return null;
+
+  let query = companyId 
+    ? 'SELECT * FROM budgets WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))' 
+    : 'SELECT * FROM budgets WHERE company_phone = ?';
+  const params = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
 
   if (clientOrBudgetId) {
     const q = String(clientOrBudgetId).trim().toLowerCase();
@@ -2800,11 +2871,21 @@ export function updateWorkDates(phone, clientOrBudgetId, startDate, estimatedEnd
   if (estimatedEndDate) parsed.workMemory.estimatedEndDate = estimatedEndDate;
 
   const now = new Date().toISOString();
-  db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ?').run(
-    JSON.stringify(parsed),
-    now,
-    budgetRow.id
-  );
+  if (budgetRow.company_id) {
+    db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ? AND company_id = ?').run(
+      JSON.stringify(parsed),
+      now,
+      budgetRow.id,
+      budgetRow.company_id
+    );
+  } else {
+    db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ? AND company_id IS NULL AND company_phone = ?').run(
+      JSON.stringify(parsed),
+      now,
+      budgetRow.id,
+      budgetRow.company_phone
+    );
+  }
 
   return {
     budgetId: budgetRow.id,
@@ -2820,22 +2901,32 @@ export function updateWorkDates(phone, clientOrBudgetId, startDate, estimatedEnd
  * Busca clientes/obras que coincidan con un nombre o término de búsqueda.
  * Permite detectar si existen múltiples personas con el mismo nombre y apellido.
  */
-export function findClientsByName(phone, clientNameQuery) {
+export function findClientsByName(phoneOrCompany, clientNameQuery) {
   if (!clientNameQuery) return [];
-  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' && !phoneOrCompany.includes('-') ? String(phoneOrCompany).replace(/\D/g, '') : null);
+
+  if (!companyId && !cleanPhone) return [];
+
   const q = String(clientNameQuery).trim().toLowerCase();
+
+  const tenantFilter = companyId
+    ? '(company_id = ? OR (company_id IS NULL AND company_phone = ?))'
+    : 'company_phone = ?';
+  const params = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
 
   const rows = db.prepare(`
     SELECT id, client_name, client_address, client_phone, total_amount, status, created_at, updated_at, data_json
     FROM budgets
-    WHERE company_phone = ? AND (
+    WHERE ${tenantFilter} AND (
       LOWER(client_name) = ? OR
       LOWER(client_name) LIKE ? OR
       LOWER(client_address) LIKE ? OR
       LOWER(id) = ?
     )
     ORDER BY updated_at DESC
-  `).all(cleanPhone, q, `%${q}%`, `%${q}%`, q);
+  `).all(...params, q, `%${q}%`, `%${q}%`, q);
 
   return rows.map(r => {
     let parsed = null;
@@ -2857,20 +2948,30 @@ export function findClientsByName(phone, clientNameQuery) {
  * Renombra o añade un distintivo a un cliente/obra existente en la base de datos.
  * Actualiza en cascada presupuestos, compras y facturas vinculadas.
  */
-export function renameClientBudget(phone, budgetIdOrQuery, newNameWithBadge) {
+export function renameClientBudget(phoneOrCompany, budgetIdOrQuery, newNameWithBadge) {
   if (!budgetIdOrQuery || !newNameWithBadge) return null;
-  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' && !phoneOrCompany.includes('-') ? String(phoneOrCompany).replace(/\D/g, '') : null);
+
+  if (!companyId && !cleanPhone) return null;
+
   const newName = String(newNameWithBadge).trim();
 
   // Localizar el presupuesto
-  let budgetRow = db.prepare('SELECT * FROM budgets WHERE company_phone = ? AND id = ?').get(cleanPhone, budgetIdOrQuery);
+  const tenantFilter = companyId
+    ? '(company_id = ? OR (company_id IS NULL AND company_phone = ?))'
+    : 'company_phone = ?';
+  const filterParams = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
+
+  let budgetRow = db.prepare(`SELECT * FROM budgets WHERE ${tenantFilter} AND id = ?`).get(...filterParams, budgetIdOrQuery);
   if (!budgetRow) {
     const q = String(budgetIdOrQuery).trim().toLowerCase();
     budgetRow = db.prepare(`
       SELECT * FROM budgets 
-      WHERE company_phone = ? AND (LOWER(client_name) = ? OR LOWER(client_name) LIKE ?)
+      WHERE ${tenantFilter} AND (LOWER(client_name) = ? OR LOWER(client_name) LIKE ?)
       ORDER BY updated_at DESC LIMIT 1
-    `).get(cleanPhone, q, `%${q}%`);
+    `).get(...filterParams, q, `%${q}%`);
   }
 
   if (!budgetRow) return null;
@@ -2884,20 +2985,28 @@ export function renameClientBudget(phone, budgetIdOrQuery, newNameWithBadge) {
 
   const now = new Date().toISOString();
 
-  // 1. Actualizar budget
-  db.prepare(`
-    UPDATE budgets 
-    SET client_name = ?, data_json = ?, updated_at = ?
-    WHERE id = ?
-  `).run(newName, parsed ? JSON.stringify(parsed) : budgetRow.data_json, now, budgetRow.id);
+  // 1. Actualizar budget scoped por tenant
+  if (budgetRow.company_id) {
+    db.prepare(`
+      UPDATE budgets 
+      SET client_name = ?, data_json = ?, updated_at = ?
+      WHERE id = ? AND company_id = ?
+    `).run(newName, parsed ? JSON.stringify(parsed) : budgetRow.data_json, now, budgetRow.id, budgetRow.company_id);
+  } else {
+    db.prepare(`
+      UPDATE budgets 
+      SET client_name = ?, data_json = ?, updated_at = ?
+      WHERE id = ? AND company_id IS NULL AND company_phone = ?
+    `).run(newName, parsed ? JSON.stringify(parsed) : budgetRow.data_json, now, budgetRow.id, budgetRow.company_phone);
+  }
 
   // 2. Actualizar compras vinculadas (por budget_id o por nombre anterior de cliente)
   const shopTenantFilter = budgetRow.company_id
     ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
     : "company_phone = ?";
   const shopParams = budgetRow.company_id
-    ? [newName, budgetRow.company_id, cleanPhone, budgetRow.id, oldName]
-    : [newName, cleanPhone, budgetRow.id, oldName];
+    ? [newName, budgetRow.company_id, cleanPhone || budgetRow.company_phone || '', budgetRow.id, oldName]
+    : [newName, cleanPhone || budgetRow.company_phone, budgetRow.id, oldName];
 
   db.prepare(`
     UPDATE shopping_items
@@ -2905,12 +3014,19 @@ export function renameClientBudget(phone, budgetIdOrQuery, newNameWithBadge) {
     WHERE ${shopTenantFilter} AND (budget_id = ? OR client_name = ?)
   `).run(...shopParams);
 
-  // 3. Actualizar facturas vinculadas
+  // 3. Actualizar facturas vinculadas scoped por tenant (company_id)
+  const invTenantFilter = budgetRow.company_id
+    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
+    : "company_phone = ?";
+  const invParams = budgetRow.company_id
+    ? [newName, budgetRow.company_id, cleanPhone || budgetRow.company_phone || '', budgetRow.id]
+    : [newName, cleanPhone || budgetRow.company_phone, budgetRow.id];
+
   db.prepare(`
     UPDATE invoices
     SET client_name = ?
-    WHERE company_phone = ? AND budget_id = ?
-  `).run(newName, cleanPhone, budgetRow.id);
+    WHERE ${invTenantFilter} AND budget_id = ?
+  `).run(...invParams);
 
   return {
     budgetId: budgetRow.id,

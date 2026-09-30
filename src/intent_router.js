@@ -736,10 +736,10 @@ export async function resolveIntent(intentResult, phone, session) {
 
       case 'WORK_STATUS': {
         const { clientName } = params;
-        const work = getWorkMemory(cleanPhone, clientName);
+        const work = getWorkMemory(tenantContext, clientName);
         if (!work) {
           // No encontrado → no resolver aquí, dejar que Gemini maneje o dar feedback claro
-          const suggestions = findClientsByName(cleanPhone, clientName);
+          const suggestions = findClientsByName(tenantContext, clientName);
           if (suggestions.length > 0) {
             return formatClientLookup(clientName, suggestions);
           }
@@ -750,27 +750,27 @@ export async function resolveIntent(intentResult, phone, session) {
 
       case 'CLIENT_LOOKUP': {
         const { clientName } = params;
-        const found = findClientsByName(cleanPhone, clientName);
+        const found = findClientsByName(tenantContext, clientName);
         if (found.length === 0) return null; // Dejar pasar a Gemini — quizás el usuario quiere crear algo
         return formatClientLookup(clientName, found);
       }
 
       case 'SET_BIZUM': {
         const { bizum } = params;
-        const updated = saveCompany(cleanPhone, { bizum });
+        const updated = saveCompany(tenantContext, { bizum });
         if (session) session.company = updated;
         return `✅ *¡Bizum actualizado con éxito!*\n\n📱 *Bizum configurado:* ${updated.bizum}\n\nTus clientes verán este número en las condiciones de pago de tus presupuestos y recibos.`;
       }
 
       case 'SET_IBAN': {
         const { iban } = params;
-        const updated = saveCompany(cleanPhone, { iban });
+        const updated = saveCompany(tenantContext, { iban });
         if (session) session.company = updated;
         return `✅ *¡IBAN bancario actualizado con éxito!*\n\n🏦 *IBAN configurado:* ${updated.iban}\n\nTus facturas y presupuestos oficiales incluirán esta cuenta bancaria.`;
       }
 
       case 'SHOW_COMPANY': {
-        const comp = getCompany(cleanPhone);
+        const comp = getCompany(tenantContext);
         return [
           '🏢 *DATOS DE TU EMPRESA / PERFIL:*',
           '━━━━━━━━━━━━━━━━━━━━━━━━━',

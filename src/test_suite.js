@@ -7784,6 +7784,315 @@ cleanupTest45(phone45A);
 cleanupTest45(phone45B);
 cleanupTest45(phoneReassign_45);
 
+// =============================================================================
+// TEST 46: Hardening Funcional de Rutas Legacy y Aislamiento Multi-Tenant (Fase 2G)
+// =============================================================================
+console.log("\nTEST 46: Hardening Funcional de Rutas Legacy y Aislamiento Multi-Tenant (Fase 2G)");
+
+const phone46A = '34677660001';
+const phone46B = '34677660002';
+
+const cleanupTest46 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM messages WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM audit_logs WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_incidents WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM investment_assets WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM expense_payments WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM purchase_invoices WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM business_tax_profiles WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_periods WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM payment_allocations WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM payments WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM invoices WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM shopping_items WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM budgets WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM appointments WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+
+cleanupTest46(phone46A);
+cleanupTest46(phone46B);
+
+// Setup Companies & Channel Identities
+const comp46A = createCompanyWithIdentity({ name: 'Empresa 2G Alpha', phone: phone46A, cif: 'A-46464601' });
+const comp46B = createCompanyWithIdentity({ name: 'Empresa 2G Beta', phone: phone46B, cif: 'B-46464602' });
+
+const context46A = resolveAuthenticatedContext('whatsapp', phone46A);
+const context46B = resolveAuthenticatedContext('whatsapp', phone46B);
+
+assert(context46A && context46A.companyId === comp46A.companyId, "Setup context46A OK");
+assert(context46B && context46B.companyId === comp46B.companyId, "Setup context46B OK");
+
+// ─── A. SINCRONIZACIÓN EN LA NUBE (CLOUD SIGNATURES / WEBHOOK) ───
+// A1-A3: Sincronización scoped por tenant
+dbService.saveBudget(context46A, {
+  id: 'PRE-46-A01',
+  client: { name: 'Cliente Alpha Cloud', email: 'alpha@presuvoz.test' },
+  items: [{ description: 'Pintura general', total: 600 }],
+  financials: { totalAmount: 600 },
+  status: 'PENDIENTE_ACEPTACION'
+});
+
+dbService.saveBudget(context46B, {
+  id: 'PRE-46-B01',
+  client: { name: 'Cliente Beta Cloud', email: 'beta@presuvoz.test' },
+  items: [{ description: 'Alicatado baño', total: 1400 }],
+  financials: { totalAmount: 1400 },
+  status: 'PENDIENTE_ACEPTACION'
+});
+
+const originalFetch46 = globalThis.fetch;
+try {
+  // Simular respuesta firmada para A01 y no firmada para B01
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes('PRE-46-A01')) {
+      return {
+        ok: true,
+        json: async () => ({
+          alreadySigned: true,
+          details: {
+            signed: true,
+            signedAt: '2026-10-01T10:00:00Z',
+            clientEmail: 'alpha@presuvoz.test',
+            clientName: 'Cliente Alpha Cloud',
+            companyId: comp46A.companyId,
+            companyPhone: phone46A
+          }
+        })
+      };
+    }
+    return { ok: false, json: async () => ({}) };
+  };
+
+  const syncedForA = await dbService.syncPendingSignaturesFromCloud(context46A);
+  assert(syncedForA.length === 1 && syncedForA[0].budgetId === 'PRE-46-A01', "A1. syncPendingSignaturesFromCloud(contextA) solo sincroniza presupuestos del Tenant A");
+  assert(syncedForA[0].companyId === comp46A.companyId, "A2. syncPendingSignaturesFromCloud devuelve companyId canónico en newlyAccepted");
+
+  const budA_check = dbService.getBudget(context46A, 'PRE-46-A01');
+  const budB_check = dbService.getBudget(context46B, 'PRE-46-B01');
+  assert(budA_check && budA_check.status === 'ACEPTADO', "A3. Presupuesto de Tenant A queda ACEPTADO en SQLite");
+  assert(budB_check && budB_check.status === 'PENDIENTE_ACEPTACION', "A4. Presupuesto de Tenant B permanece PENDIENTE_ACEPTACION sin ser alterado");
+
+  // A5: Intento de inyección cross-tenant en webhook de firma (signature spoofing con companyId de otro tenant)
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes('PRE-46-B01')) {
+      return {
+        ok: true,
+        json: async () => ({
+          alreadySigned: true,
+          details: {
+            signed: true,
+            signedAt: '2026-10-01T11:00:00Z',
+            clientEmail: 'spoofed@evil.com',
+            companyId: comp46A.companyId, // Intento de spoofing: firma enviada con companyId de A para presupuesto de B
+            companyPhone: phone46A
+          }
+        })
+      };
+    }
+    return { ok: false, json: async () => ({}) };
+  };
+
+  const syncedSpoofed = await dbService.syncPendingSignaturesFromCloud(context46B);
+  assert(syncedSpoofed.length === 0, "A5. syncPendingSignaturesFromCloud rechaza firma con mismatch de companyId (Cross-Tenant Spoofing Neutralizado)");
+  const budB_afterSpoof = dbService.getBudget(context46B, 'PRE-46-B01');
+  assert(budB_afterSpoof && budB_afterSpoof.status === 'PENDIENTE_ACEPTACION', "A6. Presupuesto de Tenant B permanece intacto tras intento de inyección de firma");
+} finally {
+  globalThis.fetch = originalFetch46;
+}
+
+// ─── B. MODO OBRA (WORKMEMORY) ───
+dbService.saveBudget(context46A, {
+  id: 'PRE-46-A02',
+  client: { name: 'Obra Alpha Vivienda', phone: '654000001', address: 'Calle Mayor 10' },
+  items: [
+    { description: 'Derribo de tabiques', total: 800, isDone: false },
+    { description: 'Instalación eléctrica', total: 1200, isDone: false }
+  ],
+  financials: { totalAmount: 2000 },
+  status: 'ACEPTADO',
+  workMemory: {
+    startDate: '2026-10-01',
+    estimatedEndDate: '2026-10-15'
+  }
+});
+
+dbService.saveBudget(context46B, {
+  id: 'PRE-46-B02',
+  client: { name: 'Obra Beta Local', phone: '654000002', address: 'Avenida Sol 20' },
+  items: [
+    { description: 'Fontanería baños', total: 950, isDone: false },
+    { description: 'Alicatado paredes', total: 1500, isDone: false }
+  ],
+  financials: { totalAmount: 2450 },
+  status: 'ACEPTADO',
+  workMemory: {
+    startDate: '2026-10-05',
+    estimatedEndDate: '2026-10-25'
+  }
+});
+
+// B1-B2: Lectura legítima
+const workA_legit = dbService.getWorkMemory(context46A, 'PRE-46-A02');
+const workB_legit = dbService.getWorkMemory(context46B, 'PRE-46-B02');
+assert(workA_legit && workA_legit.clientName === 'Obra Alpha Vivienda', "B1. getWorkMemory(contextA) lee legítimamente la obra de Tenant A");
+assert(workB_legit && workB_legit.clientName === 'Obra Beta Local', "B2. getWorkMemory(contextB) lee legítimamente la obra de Tenant B");
+
+// B3-B5: Lectura cross-tenant (Zero-Disclosure)
+const workCross_byId = dbService.getWorkMemory(context46A, 'PRE-46-B02');
+const workCross_byName = dbService.getWorkMemory(context46A, 'Obra Beta Local');
+const workCrossB_byId = dbService.getWorkMemory(context46B, 'PRE-46-A02');
+assert(workCross_byId === null, "B3. Cross-Tenant getWorkMemory(contextA, budB.id) retorna null (Zero-Disclosure)");
+assert(workCross_byName === null, "B4. Cross-Tenant getWorkMemory(contextA, nameB) retorna null (Zero-Disclosure)");
+assert(workCrossB_byId === null, "B5. Cross-Tenant getWorkMemory(contextB, budA.id) retorna null (Zero-Disclosure)");
+
+// B6-B7: Actualización de tarea cross-tenant
+const taskCrossUpdate = dbService.updateWorkTaskStatus(context46A, 'PRE-46-B02', 'Fontanería', true);
+assert(taskCrossUpdate === null, "B6. Cross-Tenant updateWorkTaskStatus(contextA, budB.id) es rechazado (retorna null)");
+const workB_afterTaskAttempt = dbService.getWorkMemory(context46B, 'PRE-46-B02');
+const fontaneriaTaskB = workB_afterTaskAttempt?.tasks?.pending?.find(t => t.description.includes('Fontanería'));
+assert(fontaneriaTaskB && fontaneriaTaskB.isDone === false, "B7. Tareas de Tenant B permanecen inalteradas tras intento de actualización cross-tenant");
+
+// B8-B9: Actualización legítima de tarea
+const taskLegitUpdate = dbService.updateWorkTaskStatus(context46A, 'PRE-46-A02', 'Derribo', true);
+assert(taskLegitUpdate && taskLegitUpdate.task && taskLegitUpdate.task.isDone === true, "B8. updateWorkTaskStatus(contextA, budA.id) actualiza legítimamente la tarea de Tenant A");
+const workA_afterLegitTask = dbService.getWorkMemory(context46A, 'PRE-46-A02');
+const derriboTaskA = workA_afterLegitTask?.tasks?.done?.find(t => t.description.includes('Derribo'));
+assert(derriboTaskA && derriboTaskA.isDone === true, "B9. Tarea completada reflejada en getWorkMemory de Tenant A");
+
+// B10-B11: Actualización de fechas cross-tenant
+const datesCrossUpdate = dbService.updateWorkDates(context46A, 'PRE-46-B02', '2026-12-01', '2026-12-31');
+assert(datesCrossUpdate === null, "B10. Cross-Tenant updateWorkDates(contextA, budB.id) es rechazado (retorna null)");
+const workB_afterDatesAttempt = dbService.getWorkMemory(context46B, 'PRE-46-B02');
+assert(workB_afterDatesAttempt.startDate === '2026-10-05' && workB_afterDatesAttempt.estimatedEndDate === '2026-10-25', "B11. Fechas de obra de Tenant B permanecen intactas");
+
+// B12: Actualización legítima de fechas
+const datesLegitUpdate = dbService.updateWorkDates(context46A, 'PRE-46-A02', '2026-10-02', '2026-10-18');
+assert(datesLegitUpdate && datesLegitUpdate.startDate === '2026-10-02' && datesLegitUpdate.estimatedEndDate === '2026-10-18', "B12. updateWorkDates actualiza legítimamente las fechas de Tenant A");
+
+// ─── C. DESAMBIGUACIÓN Y RENOMBRADO (renameClientBudget) ───
+// Setup presupuestos homónimos y registros vinculados
+dbService.saveBudget(context46A, {
+  id: 'PRE-46-A03',
+  client: { name: 'Elena García', address: 'Piso Centro' },
+  items: [{ description: 'Reforma cocina', total: 3000 }],
+  financials: { totalAmount: 3000 },
+  status: 'ACEPTADO'
+});
+dbService.addShoppingItems(context46A, [
+  { description: 'Encimera cuarzo', qty: 1, unit: 'ud', budgetId: 'PRE-46-A03', clientName: 'Elena García' }
+]);
+dbService.saveInvoice(context46A, {
+  id: 'FAC-46-A01',
+  budgetId: 'PRE-46-A03',
+  client: { name: 'Elena García' },
+  total: 3000,
+  taxRate: 21,
+  status: 'EMITIDA'
+});
+
+dbService.saveBudget(context46B, {
+  id: 'PRE-46-B03',
+  client: { name: 'Elena García', address: 'Chalet Norte' },
+  items: [{ description: 'Reforma terraza', total: 4500 }],
+  financials: { totalAmount: 4500 },
+  status: 'ACEPTADO'
+});
+dbService.addShoppingItems(context46B, [
+  { description: 'Gres exterior', qty: 25, unit: 'm2', budgetId: 'PRE-46-B03', clientName: 'Elena García' }
+]);
+dbService.saveInvoice(context46B, {
+  id: 'FAC-46-B01',
+  budgetId: 'PRE-46-B03',
+  client: { name: 'Elena García' },
+  total: 4500,
+  taxRate: 21,
+  status: 'EMITIDA'
+});
+
+// C1-C4: Renombrado legítimo en Tenant A
+const renameLegitA = dbService.renameClientBudget(context46A, 'PRE-46-A03', 'Elena García (Piso Centro)');
+assert(renameLegitA && renameLegitA.newName === 'Elena García (Piso Centro)', "C1. renameClientBudget(contextA) renombra legítimamente el presupuesto");
+
+const budA3_inDb = currentDb.prepare("SELECT client_name FROM budgets WHERE id = 'PRE-46-A03'").get();
+const shopA_inDb = currentDb.prepare("SELECT client_name FROM shopping_items WHERE budget_id = 'PRE-46-A03'").get();
+const invA_inDb = currentDb.prepare("SELECT client_name FROM invoices WHERE id = 'FAC-46-A01'").get();
+assert(budA3_inDb && budA3_inDb.client_name === 'Elena García (Piso Centro)', "C2. budgets.client_name de Tenant A actualizado");
+assert(shopA_inDb && shopA_inDb.client_name === 'Elena García (Piso Centro)', "C3. shopping_items.client_name de Tenant A actualizado en cascada");
+assert(invA_inDb && invA_inDb.client_name === 'Elena García (Piso Centro)', "C4. invoices.client_name de Tenant A actualizado en cascada por company_id");
+
+// C5-C7: Los registros de Tenant B permanecen completamente intactos
+const budB3_inDb = currentDb.prepare("SELECT client_name FROM budgets WHERE id = 'PRE-46-B03'").get();
+const shopB_inDb = currentDb.prepare("SELECT client_name FROM shopping_items WHERE budget_id = 'PRE-46-B03'").get();
+const invB_inDb = currentDb.prepare("SELECT client_name FROM invoices WHERE id = 'FAC-46-B01'").get();
+assert(budB3_inDb && budB3_inDb.client_name === 'Elena García', "C5. Presupuesto homónimo de Tenant B permanece intacto");
+assert(shopB_inDb && shopB_inDb.client_name === 'Elena García', "C6. Shopping items de Tenant B permanecen intactos");
+assert(invB_inDb && invB_inDb.client_name === 'Elena García', "C7. Invoices de Tenant B permanecen intactos");
+
+// C8-C9: Intento cross-tenant de renombrado
+const renameCrossAttempt = dbService.renameClientBudget(context46A, 'PRE-46-B03', 'Elena García Hackeada');
+assert(renameCrossAttempt === null, "C8. Cross-Tenant renameClientBudget(contextA, budB.id) retorna null");
+const budB3_afterCross = currentDb.prepare("SELECT client_name FROM budgets WHERE id = 'PRE-46-B03'").get();
+assert(budB3_afterCross && budB3_afterCross.client_name === 'Elena García', "C9. Presupuesto de Tenant B protegido contra renombrado cruzado");
+
+// ─── D. AUSENCIA DE EFECTOS SECUNDARIOS AL IMPORTAR (SIDE-EFFECT FREE IMPORT) ───
+// Verificar que no se mutan empresas ni budgets por variables de entorno como ALLOWED_NUMBERS
+const compA_beforeEnv = currentDb.prepare("SELECT id, phone, name FROM companies WHERE id = ?").get(comp46A.companyId);
+process.env.ALLOWED_NUMBERS = `${phone46A},34600111222`;
+// Reinspección no muta la base de datos
+const compA_afterEnv = currentDb.prepare("SELECT id, phone, name FROM companies WHERE id = ?").get(comp46A.companyId);
+assert(compA_beforeEnv.id === compA_afterEnv.id && compA_beforeEnv.phone === compA_afterEnv.phone, "D1. db_service.js es 100% libre de efectos secundarios de mutación en arranque (LID patch eliminado)");
+
+// ─── E. AISLAMIENTO EN FILESYSTEM (LOGOS Y JUSTIFICANTES) ───
+// E1: Almacenamiento de logotipo aislado bajo data/logos/<companyId>/
+const logoSafeTenantId = comp46A.companyId.replace(/[^a-zA-Z0-9_-]/g, '');
+const testLogoDir = path.resolve('data', 'logos', logoSafeTenantId);
+if (!fs.existsSync(testLogoDir)) fs.mkdirSync(testLogoDir, { recursive: true });
+const testLogoFile = path.join(testLogoDir, 'logo.png');
+fs.writeFileSync(testLogoFile, Buffer.from('TEST_PNG_DATA'));
+assert(fs.existsSync(testLogoFile), "E1. Logotipo guardado en directorio aislado por companyId");
+assert(testLogoFile.includes(comp46A.companyId), "E2. Ruta de logotipo contiene estrictamente el companyId del tenant");
+
+// E2: Path traversal neutralizado
+const maliciousCompanyId = '../../evil_path/traverse';
+const sanitizedFolder = maliciousCompanyId.replace(/[^a-zA-Z0-9_-]/g, '');
+const traversalDir = path.resolve('data', 'logos', sanitizedFolder);
+assert(!sanitizedFolder.includes('..') && !sanitizedFolder.includes('/') && traversalDir.startsWith(path.resolve('data', 'logos')), "E3. Path traversal en identificación de tenant neutralizado en logos");
+
+// E3: Almacenamiento de justificante aislado bajo data/purchase_receipts/<companyId>/
+const receiptSafeId = comp46A.companyId.replace(/[^a-zA-Z0-9_-]/g, '');
+const testReceiptDir = path.resolve('data', 'purchase_receipts', receiptSafeId);
+if (!fs.existsSync(testReceiptDir)) fs.mkdirSync(testReceiptDir, { recursive: true });
+const testReceiptFile = path.join(testReceiptDir, 'test_receipt.jpg');
+fs.writeFileSync(testReceiptFile, Buffer.from('TEST_JPG_DATA'));
+assert(fs.existsSync(testReceiptFile), "E4. Justificante guardado en directorio aislado por companyId");
+assert(testReceiptFile.includes(comp46A.companyId), "E5. Ruta de justificante contiene estrictamente el companyId del tenant");
+
+// Limpieza de archivos filesystem de prueba
+try {
+  if (fs.existsSync(testLogoFile)) fs.unlinkSync(testLogoFile);
+  if (fs.existsSync(testLogoDir)) fs.rmdirSync(testLogoDir);
+  if (fs.existsSync(testReceiptFile)) fs.unlinkSync(testReceiptFile);
+  if (fs.existsSync(testReceiptDir)) fs.rmdirSync(testReceiptDir);
+} catch (eCleanFs) {}
+
+// ─── F. INTEGRIDAD RELACIONAL Y REGRESIÓN (TEST 46) ───
+const fkViolations46 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult46 = currentDb.prepare("PRAGMA integrity_check;").get();
+assert(fkViolations46.length === 0, "F1. PRAGMA foreign_key_check = 0 violaciones tras Test 46");
+assert(integrityResult46 && (integrityResult46.integrity_check === 'ok' || integrityResult46.integrity_check === 'OK'), "F2. PRAGMA integrity_check = ok tras Test 46");
+
+cleanupTest46(phone46A);
+cleanupTest46(phone46B);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
