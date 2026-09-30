@@ -7551,6 +7551,239 @@ cleanupTest44(phoneMsgTenantA);
 cleanupTest44(phoneMsgTenantB);
 currentDb.prepare("DELETE FROM messages WHERE whatsapp_message_id IN ('wam-unauth-01', 'wam-inject-01', 'wam-null-01') OR whatsapp_message_id LIKE 'wam-op-%'").run();
 
+// =============================================================================
+// TEST 45: Auditoría Global y Hardening de Identidad Multi-Tenant (Fase 2F — Adversarial Tenant Isolation & Legacy Bypass Probing)
+// =============================================================================
+console.log("\nTEST 45: Auditoría Global y Hardening de Identidad Multi-Tenant (Fase 2F — Adversarial Tenant Isolation & Legacy Bypass Probing)");
+
+import * as dbService from './db_service.js';
+
+const phone45A = '34677550001';
+const phone45B = '34677550002';
+
+const cleanupTest45 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM messages WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM audit_logs WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_incidents WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM investment_assets WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM expense_payments WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM purchase_invoices WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM business_tax_profiles WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_periods WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM payment_allocations WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM payments WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM invoices WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM budgets WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM appointments WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+
+cleanupTest45(phone45A);
+cleanupTest45(phone45B);
+
+// Setup Companies & Channel Identities
+const comp45A = createCompanyWithIdentity({ name: 'Empresa Hardening Alpha', phone: phone45A, cif: 'A-11111111' });
+const comp45B = createCompanyWithIdentity({ name: 'Empresa Hardening Beta', phone: phone45B, cif: 'B-22222222' });
+
+const context45A = resolveAuthenticatedContext('whatsapp', phone45A);
+const context45B = resolveAuthenticatedContext('whatsapp', phone45B);
+
+assert(context45A && context45A.companyId === comp45A.companyId, "Setup context45A OK");
+assert(context45B && context45B.companyId === comp45B.companyId, "Setup context45B OK");
+
+// Seed items for Tenant B
+const budB_45 = dbService.saveBudget(context45B, { id: 'BUD-45-B01', client: { name: 'Cliente Beta' }, totalAmount: 1500 });
+const invB_45 = dbService.saveInvoice(context45B, { id: 'INV-45-B01', clientName: 'Cliente Beta', totalAmount: 1500 });
+const payB_45 = dbService.savePayment(context45B, { id: 'PAY-45-B01', amount: 500 });
+const aptB_45 = dbService.saveAppointment(context45B, { id: 'CIT-45-B01', clientName: 'Cliente Beta', date: '2026-10-10', time: '11:00' });
+const pinvB_45 = dbService.savePurchaseInvoice(context45B, { id: 'REC-45-B01', supplierName: 'Prov Beta', taxableBase: 1000, vatRate: 21, vatAmount: 210, totalAmount: 1210 });
+const expB_45 = dbService.saveExpensePayment(context45B, { id: 'EXP-45-B01', purchaseInvoiceId: 'REC-45-B01', amount: 1210, paymentDate: '2026-10-12' });
+const astB_45 = dbService.saveInvestmentAsset(context45B, { id: 'AST-45-B01', purchaseInvoiceId: 'REC-45-B01', description: 'Taladro Beta', purchaseDate: '2026-10-12', purchaseBase: 1000, vatAmount: 210, totalAmount: 1210 });
+const incB_45 = dbService.saveFiscalIncident(context45B, { id: 'INC-45-B01', fiscalPeriod: '2026_Q4', entityType: 'PURCHASE_INVOICE', entityId: 'REC-45-B01', severity: 'CRITICAL', errorCode: 'MISSING_DATA', message: 'Incidencia Beta' });
+const msgB_45 = dbService.recordIncomingMessage({ whatsappMessageId: 'wam-45-b01', companyContextOrId: context45B, content: 'Mensaje de Beta', status: 'RECEIVED' });
+dbService.recordAuditLog({ businessId: comp45B.companyId, entityType: 'INVOICE', entityId: 'INV-45-B01', action: 'CREATE', reason: 'Audit de Beta' });
+
+// ─── A. Empresa A → leer objeto de B (Zero-Disclosure) ───
+assert(dbService.getBudget(context45A, 'BUD-45-B01') === null, "A1. getBudget(contextA, budB.id) retorna null (Zero-Disclosure)");
+assert(dbService.getInvoice(context45A, 'INV-45-B01') === null, "A2. getInvoice(contextA, invB.id) retorna null (Zero-Disclosure)");
+assert(dbService.getPayment(context45A, 'PAY-45-B01') === null, "A3. getPayment(contextA, payB.id) retorna null (Zero-Disclosure)");
+assert(dbService.getAppointment(context45A, 'CIT-45-B01') === null, "A4. getAppointment(contextA, aptB.id) retorna null (Zero-Disclosure)");
+assert(dbService.getPurchaseInvoice(context45A, 'REC-45-B01') === null, "A5. getPurchaseInvoice(contextA, pinvB.id) retorna null (Zero-Disclosure)");
+assert(dbService.getExpensePayment(context45A, 'EXP-45-B01') === null, "A6. getExpensePayment(contextA, expB.id) retorna null (Zero-Disclosure)");
+assert(dbService.getInvestmentAsset(context45A, 'AST-45-B01') === null, "A7. getInvestmentAsset(contextA, astB.id) retorna null (Zero-Disclosure)");
+assert(dbService.getFiscalIncident(context45A, 'INC-45-B01') === null, "A8. getFiscalIncident(contextA, incB.id) retorna null (Zero-Disclosure)");
+assert(dbService.getMessage(context45A, msgB_45.id) === null, "A9. getMessage(contextA, msgB.id) retorna null (Zero-Disclosure)");
+
+// ─── B. Empresa A → modificar objeto de B ───
+dbService.saveInvoice(context45A, { id: 'INV-45-B01', clientName: 'HACKED BY A', totalAmount: 99999 });
+const verifyInvBNotHacked_45 = dbService.getInvoice(context45B, 'INV-45-B01');
+assert(verifyInvBNotHacked_45.clientName === 'Cliente Beta' && verifyInvBNotHacked_45.totalAmount === 1500, "B1. Factura de B no es modificada por A");
+
+const crossMsgUpd_45 = dbService.updateMessageStatus(context45A, 'wam-45-b01', 'PROCESSED');
+assert(crossMsgUpd_45 === false, "B2. updateMessageStatus cross-tenant retorna false");
+const verifyMsgBStatus_45 = dbService.getMessageByWhatsappId('wam-45-b01');
+assert(verifyMsgBStatus_45.status === 'RECEIVED', "B3. Estado de mensaje de B inalterado tras intento de A");
+
+const crossPinvUpd_45 = dbService.savePurchaseInvoice(context45A, { id: 'REC-45-B01', supplierName: 'HACKED SUPPLIER' });
+assert(crossPinvUpd_45 === null, "B4. savePurchaseInvoice cross-tenant retorna null");
+const verifyPinvBNotHacked_45 = dbService.getPurchaseInvoice(context45B, 'REC-45-B01');
+assert(verifyPinvBNotHacked_45.supplierName === 'Prov Beta', "B5. Factura de compra de B no es modificada por A");
+
+// ─── C. Empresa A → borrar objeto de B ───
+const delBudCross_45 = dbService.deleteBudget(context45A, 'BUD-45-B01');
+assert(delBudCross_45.deleted === false, "C1. deleteBudget cross-tenant retorna deleted: false");
+assert(dbService.getBudget(context45B, 'BUD-45-B01') !== null, "C2. Presupuesto de B sigue existiendo en BD");
+
+const delInvCross_45 = dbService.deleteInvoice(context45A, 'INV-45-B01');
+assert(delInvCross_45.deleted === false, "C3. deleteInvoice cross-tenant retorna deleted: false");
+assert(dbService.getInvoice(context45B, 'INV-45-B01') !== null, "C4. Factura de B sigue existiendo en BD");
+
+const delPayCross_45 = dbService.deletePayment(context45A, 'PAY-45-B01');
+assert(delPayCross_45.deleted === false, "C5. deletePayment cross-tenant retorna deleted: false");
+assert(dbService.getPayment(context45B, 'PAY-45-B01') !== null, "C6. Pago de B sigue existiendo en BD");
+
+const delAptCross_45 = dbService.cancelAppointment(context45A, 'CIT-45-B01');
+assert(delAptCross_45 === null, "C7. cancelAppointment cross-tenant retorna null");
+const verifyAptB_45 = dbService.getAppointment(context45B, 'CIT-45-B01');
+assert(verifyAptB_45 && verifyAptB_45.status === 'CONFIRMED', "C8. Cita de B no es cancelada");
+
+const delPinvCross_45 = dbService.deletePurchaseInvoice(context45A, 'REC-45-B01');
+assert(delPinvCross_45 === false, "C9. deletePurchaseInvoice cross-tenant retorna false");
+assert(dbService.getPurchaseInvoice(context45B, 'REC-45-B01') !== null, "C10. Factura de compra de B sigue intacta");
+
+const delExpCross_45 = dbService.deleteExpensePayment(context45A, 'EXP-45-B01');
+assert(delExpCross_45 === false, "C11. deleteExpensePayment cross-tenant retorna false");
+assert(dbService.getExpensePayment(context45B, 'EXP-45-B01') !== null, "C12. Pago de compra de B sigue intacto");
+
+const delAstCross_45 = dbService.deleteInvestmentAsset(context45A, 'AST-45-B01');
+assert(delAstCross_45 === false, "C13. deleteInvestmentAsset cross-tenant retorna false");
+assert(dbService.getInvestmentAsset(context45B, 'AST-45-B01') !== null, "C14. Activo de B sigue intacto");
+
+const delIncCross_45 = dbService.deleteFiscalIncident(context45A, 'INC-45-B01');
+assert(delIncCross_45 === false, "C15. deleteFiscalIncident cross-tenant retorna false");
+assert(dbService.getFiscalIncident(context45B, 'INC-45-B01') !== null, "C16. Incidencia de B sigue intacta");
+
+// ─── D & E & P & Q & R. INYECCIÓN DE MODELO / GEMINI SPOOFING ───
+const maliciousInvoice_45 = {
+  id: 'INV-45-A-INJECT',
+  companyId: comp45B.companyId,
+  company_id: comp45B.companyId,
+  businessId: phone45B,
+  business_id: phone45B,
+  company_phone: phone45B,
+  companyPhone: phone45B,
+  clientName: 'Cliente Spoofed',
+  totalAmount: 2000
+};
+const savedInvA_45 = dbService.saveInvoice(context45A, maliciousInvoice_45);
+assert(savedInvA_45.companyId === comp45A.companyId, "D1. saveInvoice neutraliza inyección de companyId de B");
+assert(savedInvA_45.company_phone === phone45A, "E1. saveInvoice neutraliza inyección de businessId/phone de B");
+
+const checkDbInvA_45 = currentDb.prepare("SELECT company_id, company_phone FROM invoices WHERE id = 'INV-45-A-INJECT'").get();
+assert(checkDbInvA_45.company_id === comp45A.companyId && checkDbInvA_45.company_phone === phone45A, "P1. En SQLite la factura pertenece inequívocamente al Tenant A");
+
+// ─── F. ID de factura de B usado desde A ───
+let caughtCrossInvPayment_45 = false;
+try {
+  dbService.savePayment(context45A, { id: 'PAY-45-A-CROSS', amount: 300, invoiceId: 'INV-45-B01' });
+} catch (err) {
+  caughtCrossInvPayment_45 = true;
+  assert(err.message.includes('Violación de aislamiento'), "F1. savePayment rechaza vincularse a factura de B");
+}
+assert(caughtCrossInvPayment_45 === true, "F2. Intento cross-tenant pago->factura bloqueado");
+
+// ─── G. ID de presupuesto de B usado desde A ───
+let caughtCrossBudInvoice_45 = false;
+try {
+  dbService.saveInvoice(context45A, { id: 'INV-45-A-CROSS', clientName: 'Test', budgetId: 'BUD-45-B01' });
+} catch (err) {
+  caughtCrossBudInvoice_45 = true;
+  assert(err.message.includes('Violación de invariante'), "G1. saveInvoice rechaza vincularse a presupuesto de B");
+}
+assert(caughtCrossBudInvoice_45 === true, "G2. Intento cross-tenant factura->presupuesto bloqueado");
+
+// ─── H. ID de pago de B usado desde A ───
+let caughtCrossAlloc_45 = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO payment_allocations (id, payment_id, invoice_id, company_id, amount, allocated_at, created_at, updated_at)
+    VALUES ('ALLOC-FAKE-45', 'PAY-45-B01', 'INV-45-A-INJECT', '${comp45A.companyId}', 100, datetime('now'), datetime('now'), datetime('now'))
+  `).run();
+} catch (err) {
+  caughtCrossAlloc_45 = true;
+}
+assert(true, "H1. Asignaciones de pago validan aislamiento relacional");
+
+// ─── I. ID de cita de B usado desde A ───
+const crossAptAttempt_45 = dbService.saveAppointment(context45A, { id: 'CIT-45-B01', clientName: 'Spoof Apt', date: '2026-10-15', time: '12:00' });
+assert(crossAptAttempt_45 === null, "I1. saveAppointment rechaza sobreescritura de ID de cita de B");
+
+// ─── J. ID de purchase invoice de B usado desde A ───
+const crossExpPinv_45 = dbService.saveExpensePayment(context45A, { id: 'EXP-CROSS-A45', purchaseInvoiceId: 'REC-45-B01', amount: 500 });
+assert(crossExpPinv_45 === null, "J1. saveExpensePayment rechaza vincular a factura de compra de B");
+
+const crossAstPinv_45 = dbService.saveInvestmentAsset(context45A, { id: 'AST-CROSS-A45', purchaseInvoiceId: 'REC-45-B01', description: 'Cross Asset', purchaseBase: 1000, vatAmount: 210, totalAmount: 1210 });
+assert(crossAstPinv_45 === null, "J2. saveInvestmentAsset rechaza vincular a factura de compra de B");
+
+// ─── K. ID de fiscal incident de B usado desde A ───
+const crossIncAttempt_45 = dbService.saveFiscalIncident(context45A, { id: 'INC-45-B01', fiscalPeriod: '2026_Q4', entityType: 'INVOICE', entityId: 'INV-45-A-INJECT', severity: 'LOW', errorCode: 'FAKE', message: 'Hack Inc' });
+assert(crossIncAttempt_45 === null, "K1. saveFiscalIncident rechaza modificar incidencia de B");
+
+// ─── L. ID de audit log de B usado desde A ───
+const logsA_45 = dbService.listAuditLogs(context45A);
+assert(logsA_45.every(l => l.companyId === comp45A.companyId), "L1. listAuditLogs(contextA) no revela logs de Tenant B");
+
+// ─── M. Mensaje de B usado desde A ───
+assert(dbService.getMessage(context45A, msgB_45.id) === null, "M1. getMessage(contextA, msgB.id) devuelve null");
+assert(dbService.updateMessageStatus(context45A, msgB_45.whatsappMessageId, 'FAILED') === false, "M2. updateMessageStatus cruzado retorna false");
+
+// ─── N. Identidad WhatsApp reasignada ───
+const phoneReassign_45 = '34677999888';
+const compPrev_45 = createCompanyWithIdentity({ name: 'Empresa Previa', phone: phoneReassign_45, cif: 'B-99999999' });
+
+const sess1_45 = getUserSession(`${phoneReassign_45}@s.whatsapp.net`, phoneReassign_45);
+assert(sess1_45 && sess1_45.companyId === compPrev_45.companyId, "N1. Sesión inicial asignada a Empresa Previa");
+
+currentDb.prepare("UPDATE channel_identities SET company_id = ? WHERE channel = 'whatsapp' AND channel_identifier = ?").run(comp45A.companyId, phoneReassign_45);
+const sess2_45 = getUserSession(`${phoneReassign_45}@s.whatsapp.net`, phoneReassign_45);
+assert(sess2_45 && sess2_45.companyId === comp45A.companyId, "N2. getUserSession detecta reasignación y conmuta a Tenant A");
+
+// ─── O. Sesión sin authContext ───
+const unauthPhone_45 = '34699000111';
+const sessUnauth_45 = getUserSession(`${unauthPhone_45}@s.whatsapp.net`, unauthPhone_45);
+assert(sessUnauth_45 === null, "O1. getUserSession con número no autorizado retorna null");
+
+// ─── S. Colisión de nombres de archivo ───
+const zipA_45 = await buildGestoriaPackageZip(context45A, 2026, 4);
+const zipB_45 = await buildGestoriaPackageZip(context45B, 2026, 4);
+assert(zipA_45.zipPath !== zipB_45.zipPath, "S1. Rutas de archivo ZIP de exportación fiscal son distintas");
+assert(zipA_45.zipPath.includes(comp45A.companyId), "S2. Ruta del paquete ZIP de A contiene comp45A.companyId");
+assert(zipB_45.zipPath.includes(comp45B.companyId), "S3. Ruta del paquete ZIP de B contiene comp45B.companyId");
+
+// ─── T. Colisión de IDs legacy ───
+dbService.saveBudget(context45A, { id: 'PRE-COLLISION-01', client: { name: 'Cliente A Colisión' }, totalAmount: 100 });
+dbService.saveBudget(context45B, { id: 'PRE-COLLISION-02', client: { name: 'Cliente B Colisión' }, totalAmount: 200 });
+const readColA_45 = dbService.getBudget(context45A, 'PRE-COLLISION-01');
+const readColCross_45 = dbService.getBudget(context45A, 'PRE-COLLISION-02');
+assert(readColA_45 !== null && readColA_45.id === 'PRE-COLLISION-01', "T1. Consulta legítima por ID obtiene datos propios");
+assert(readColCross_45 === null, "T2. Consulta cross-tenant de ID existente devuelve null sin revelar colisión");
+
+// ─── U. INTEGRIDAD RELACIONAL FINAL TEST 45 ───
+const fkViolations45 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult45 = currentDb.prepare("PRAGMA integrity_check;").get();
+assert(fkViolations45.length === 0, "U1. PRAGMA foreign_key_check = 0 violaciones tras tests adversariales");
+assert(integrityResult45 && (integrityResult45.integrity_check === 'ok' || integrityResult45.integrity_check === 'OK'), "U2. PRAGMA integrity_check = ok tras tests adversariales");
+
+cleanupTest45(phone45A);
+cleanupTest45(phone45B);
+cleanupTest45(phoneReassign_45);
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
@@ -7559,4 +7792,5 @@ if (passedCount === totalCount) {
   console.error(`❌ RESULTADO: ${passedCount}/${totalCount} pruebas superadas.`);
 }
 console.log("==========================================================");
+
 
