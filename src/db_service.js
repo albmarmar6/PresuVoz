@@ -262,6 +262,26 @@ export function resolveCompanyTenant(companyContextOrIdOrPhone) {
 }
 
 /**
+ * Asegura que una operación de escritura disponga de un tenant válido registrado.
+ * Si recibe un teléfono legacy de una empresa no aprovisionada, auto-aprovisiona la empresa
+ * para garantizar que ningún registro nuevo quede con company_id = NULL.
+ */
+export function ensureCompanyTenant(companyContextOrIdOrPhone) {
+  let tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  if ((!tenant || !tenant.companyId) && typeof companyContextOrIdOrPhone === 'string') {
+    const trimmed = companyContextOrIdOrPhone.trim();
+    if (!isUuid(trimmed)) {
+      const cleanPhone = trimmed.replace(/\D/g, '');
+      if (cleanPhone) {
+        saveCompany(cleanPhone);
+        tenant = resolveCompanyTenant(cleanPhone);
+      }
+    }
+  }
+  return tenant;
+}
+
+/**
  * Resuelve el business_id legacy (normalizado a dígitos) a partir del tenant canónico:
  * - Recibe companyId (UUID) o companyContext.
  * - Comprueba que la compañía existe en la tabla companies.
@@ -318,7 +338,7 @@ export function saveBudget(companyContextOrIdOrPhone, budget) {
     throw new Error("❌ [Tenant Boundary] saveBudget requiere un companyId o contexto autenticado obligatorio.");
   }
 
-  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const tenant = ensureCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId || null;
   const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
 
@@ -400,15 +420,9 @@ export function deleteBudget(companyContextOrIdOrPhone, id) {
   if (!companyContextOrIdOrPhone || !id) return { deleted: false };
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const phone = tenant?.phone;
+  if (!companyId) return { deleted: false };
 
-  let result = { changes: 0 };
-  if (companyId) {
-    result = db.prepare('DELETE FROM budgets WHERE id = ? AND company_id = ?').run(id, companyId);
-  } else if (phone) {
-    result = db.prepare('DELETE FROM budgets WHERE id = ? AND company_phone = ?').run(id, phone);
-  }
-
+  const result = db.prepare('DELETE FROM budgets WHERE id = ? AND company_id = ?').run(id, companyId);
   return { deleted: result.changes > 0, id };
 }
 
@@ -416,32 +430,23 @@ export async function syncPendingSignaturesFromCloud(companyContextOrId = null) 
   try {
     let rows;
     let targetCompanyId = null;
-    let targetPhone = null;
 
     if (companyContextOrId) {
       const tenant = resolveCompanyTenant(companyContextOrId);
       targetCompanyId = tenant?.companyId;
-      targetPhone = tenant?.phone;
 
-      if (targetCompanyId) {
-        rows = db.prepare(`
-          SELECT id, company_id, company_phone, data_json 
-          FROM budgets 
-          WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))
-            AND status != 'ACEPTADO' AND status != 'FIRMADO'
-        `).all(targetCompanyId, targetPhone || '');
-      } else if (targetPhone) {
-        rows = db.prepare(`
-          SELECT id, company_id, company_phone, data_json 
-          FROM budgets 
-          WHERE company_phone = ?
-            AND status != 'ACEPTADO' AND status != 'FIRMADO'
-        `).all(targetPhone);
-      } else {
+      if (!targetCompanyId) {
         return [];
       }
+
+      rows = db.prepare(`
+        SELECT id, company_id, company_phone, data_json 
+        FROM budgets 
+        WHERE company_id = ?
+          AND status != 'ACEPTADO' AND status != 'FIRMADO'
+      `).all(targetCompanyId);
     } else {
-      const stmt = db.prepare("SELECT id, company_id, company_phone, data_json FROM budgets WHERE status != 'ACEPTADO' AND status != 'FIRMADO'");
+      const stmt = db.prepare("SELECT id, company_id, company_phone, data_json FROM budgets WHERE company_id IS NOT NULL AND status != 'ACEPTADO' AND status != 'FIRMADO'");
       rows = stmt.all();
     }
 
@@ -508,24 +513,17 @@ export async function syncPendingSignaturesFromCloud(companyContextOrId = null) 
           }
 
           const now = new Date().toISOString();
-          let result;
-          if (row.company_id) {
-            result = db.prepare(`
-              UPDATE budgets
-              SET status = 'ACEPTADO',
-                  updated_at = ?,
-                  data_json = ?
-              WHERE id = ? AND company_id = ?
-            `).run(now, JSON.stringify(budgetObj || { id: budgetId, status: 'ACEPTADO' }), budgetId, row.company_id);
-          } else {
-            result = db.prepare(`
-              UPDATE budgets
-              SET status = 'ACEPTADO',
-                  updated_at = ?,
-                  data_json = ?
-              WHERE id = ? AND company_id IS NULL AND company_phone = ?
-            `).run(now, JSON.stringify(budgetObj || { id: budgetId, status: 'ACEPTADO' }), budgetId, row.company_phone);
+          if (!row.company_id) {
+            console.warn(`🛑 [Seguridad Tenant] Omitida sincronización de firma para ${budgetId}: no posee company_id canónico.`);
+            return;
           }
+          const result = db.prepare(`
+            UPDATE budgets
+            SET status = 'ACEPTADO',
+                updated_at = ?,
+                data_json = ?
+            WHERE id = ? AND company_id = ?
+          `).run(now, JSON.stringify(budgetObj || { id: budgetId, status: 'ACEPTADO' }), budgetId, row.company_id);
 
           if (result && result.changes > 0) {
             newlyAccepted.push({
@@ -555,23 +553,10 @@ export function getBudget(companyContextOrIdOrPhone, id) {
     if (!companyContextOrIdOrPhone || !id) return null;
     const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
     const companyId = tenant?.companyId;
-    const phone = tenant?.phone;
+    if (!companyId) return null;
 
-    let row = null;
-    if (companyId) {
-      // Búsqueda canónica estricta por company_id
-      const stmt = db.prepare('SELECT data_json, company_id FROM budgets WHERE id = ? AND company_id = ?');
-      row = stmt.get(id, companyId);
-      // Fallback transitorio si el registro aún no ha sido migrado a company_id
-      if (!row && phone) {
-        const stmtLegacy = db.prepare('SELECT data_json, company_id FROM budgets WHERE id = ? AND company_phone = ? AND company_id IS NULL');
-        row = stmtLegacy.get(id, phone);
-      }
-    } else if (phone) {
-      // Búsqueda legacy por company_phone cuando no existe company_id
-      const stmt = db.prepare('SELECT data_json, company_id FROM budgets WHERE id = ? AND company_phone = ?');
-      row = stmt.get(id, phone);
-    }
+    const stmt = db.prepare('SELECT data_json, company_id FROM budgets WHERE id = ? AND company_id = ?');
+    const row = stmt.get(id, companyId);
 
     if (!row) return null;
     try { return JSON.parse(row.data_json); } catch(e) { return null; }
@@ -587,16 +572,10 @@ export function listBudgets(companyContextOrIdOrPhone, limit = 20) {
   if (!companyContextOrIdOrPhone) return [];
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const phone = tenant?.phone;
+  if (!companyId) return [];
 
-  let rows = [];
-  if (companyId) {
-    const stmt = db.prepare('SELECT data_json FROM budgets WHERE company_id = ? ORDER BY updated_at DESC LIMIT ?');
-    rows = stmt.all(companyId, limit);
-  } else if (phone) {
-    const stmt = db.prepare('SELECT data_json FROM budgets WHERE company_phone = ? ORDER BY updated_at DESC LIMIT ?');
-    rows = stmt.all(phone, limit);
-  }
+  const stmt = db.prepare('SELECT data_json FROM budgets WHERE company_id = ? ORDER BY updated_at DESC LIMIT ?');
+  const rows = stmt.all(companyId, limit);
 
   const results = [];
   for (const r of rows) {
@@ -613,7 +592,7 @@ export function saveInvoice(companyContextOrIdOrPhone, invoice) {
     throw new Error("❌ [Tenant Boundary] saveInvoice requiere un companyId o contexto autenticado obligatorio.");
   }
 
-  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const tenant = ensureCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId || null;
   const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
 
@@ -712,15 +691,9 @@ export function deleteInvoice(companyContextOrIdOrPhone, id) {
   if (!companyContextOrIdOrPhone || !id) return { deleted: false };
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const phone = tenant?.phone;
+  if (!companyId) return { deleted: false };
 
-  let result = { changes: 0 };
-  if (companyId) {
-    result = db.prepare('DELETE FROM invoices WHERE id = ? AND company_id = ?').run(id, companyId);
-  } else if (phone) {
-    result = db.prepare('DELETE FROM invoices WHERE id = ? AND company_phone = ?').run(id, phone);
-  }
-
+  const result = db.prepare('DELETE FROM invoices WHERE id = ? AND company_id = ?').run(id, companyId);
   return { deleted: result.changes > 0, id };
 }
 
@@ -730,23 +703,10 @@ export function getInvoice(companyContextOrIdOrPhone, id) {
     if (!companyContextOrIdOrPhone || !id) return null;
     const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
     const companyId = tenant?.companyId;
-    const phone = tenant?.phone;
+    if (!companyId) return null;
 
-    let row = null;
-    if (companyId) {
-      // Búsqueda canónica estricta por company_id
-      const stmt = db.prepare('SELECT data_json, company_id FROM invoices WHERE id = ? AND company_id = ?');
-      row = stmt.get(id, companyId);
-      // Fallback transitorio si el registro aún no ha sido migrado a company_id
-      if (!row && phone) {
-        const stmtLegacy = db.prepare('SELECT data_json, company_id FROM invoices WHERE id = ? AND company_phone = ? AND company_id IS NULL');
-        row = stmtLegacy.get(id, phone);
-      }
-    } else if (phone) {
-      // Búsqueda legacy por company_phone cuando no existe company_id
-      const stmt = db.prepare('SELECT data_json, company_id FROM invoices WHERE id = ? AND company_phone = ?');
-      row = stmt.get(id, phone);
-    }
+    const stmt = db.prepare('SELECT data_json, company_id FROM invoices WHERE id = ? AND company_id = ?');
+    const row = stmt.get(id, companyId);
 
     if (!row) return null;
     try { return JSON.parse(row.data_json); } catch(e) { return null; }
@@ -762,16 +722,10 @@ export function listInvoices(companyContextOrIdOrPhone, limit = 20) {
   if (!companyContextOrIdOrPhone) return [];
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const phone = tenant?.phone;
+  if (!companyId) return [];
 
-  let rows = [];
-  if (companyId) {
-    const stmt = db.prepare('SELECT data_json FROM invoices WHERE company_id = ? ORDER BY created_at DESC LIMIT ?');
-    rows = stmt.all(companyId, limit);
-  } else if (phone) {
-    const stmt = db.prepare('SELECT data_json FROM invoices WHERE company_phone = ? ORDER BY created_at DESC LIMIT ?');
-    rows = stmt.all(phone, limit);
-  }
+  const stmt = db.prepare('SELECT data_json FROM invoices WHERE company_id = ? ORDER BY created_at DESC LIMIT ?');
+  const rows = stmt.all(companyId, limit);
 
   const results = [];
   for (const r of rows) {
@@ -852,7 +806,7 @@ export function savePayment(companyContextOrIdOrPhone, paymentOrBudgetId, maybeP
     throw new Error("❌ [Tenant Boundary] savePayment requiere un companyId o contexto autenticado obligatorio.");
   }
 
-  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const tenant = ensureCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId || null;
   const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
 
@@ -984,18 +938,9 @@ export function getPayment(companyContextOrIdOrPhone, id) {
     if (!companyContextOrIdOrPhone || !id) return null;
     const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
     const companyId = tenant?.companyId;
-    const phone = tenant?.phone;
+    if (!companyId) return null;
 
-    let row = null;
-    if (companyId) {
-      row = db.prepare('SELECT data_json, company_id FROM payments WHERE id = ? AND company_id = ?').get(id, companyId);
-      if (!row && phone) {
-        row = db.prepare('SELECT data_json, company_id FROM payments WHERE id = ? AND company_phone = ? AND company_id IS NULL').get(id, phone);
-      }
-    } else if (phone) {
-      row = db.prepare('SELECT data_json, company_id FROM payments WHERE id = ? AND company_phone = ?').get(id, phone);
-    }
-
+    const row = db.prepare('SELECT data_json, company_id FROM payments WHERE id = ? AND company_id = ?').get(id, companyId);
     if (!row) return null;
     try { return JSON.parse(row.data_json); } catch(e) { return null; }
   }
@@ -1008,15 +953,9 @@ export function listPayments(companyContextOrIdOrPhone, limit = 50) {
   if (!companyContextOrIdOrPhone) return [];
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const phone = tenant?.phone;
+  if (!companyId) return [];
 
-  let rows = [];
-  if (companyId) {
-    rows = db.prepare('SELECT data_json FROM payments WHERE company_id = ? ORDER BY created_at DESC LIMIT ?').all(companyId, limit);
-  } else if (phone) {
-    rows = db.prepare('SELECT data_json FROM payments WHERE company_phone = ? ORDER BY created_at DESC LIMIT ?').all(phone, limit);
-  }
-
+  const rows = db.prepare('SELECT data_json FROM payments WHERE company_id = ? ORDER BY created_at DESC LIMIT ?').all(companyId, limit);
   const results = [];
   for (const r of rows) {
     try { results.push(JSON.parse(r.data_json)); } catch(e) {}
@@ -1035,15 +974,9 @@ export function deletePayment(companyContextOrIdOrPhone, id) {
   if (!companyContextOrIdOrPhone || !id) return { deleted: false };
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const phone = tenant?.phone;
+  if (!companyId) return { deleted: false };
 
-  let result = { changes: 0 };
-  if (companyId) {
-    result = db.prepare('DELETE FROM payments WHERE id = ? AND company_id = ?').run(id, companyId);
-  } else if (phone) {
-    result = db.prepare('DELETE FROM payments WHERE id = ? AND company_phone = ?').run(id, phone);
-  }
-
+  const result = db.prepare('DELETE FROM payments WHERE id = ? AND company_id = ?').run(id, companyId);
   return { deleted: result.changes > 0, id };
 }
 
@@ -1065,13 +998,8 @@ export function getPayments(companyContextOrIdOrPhone, maybeBudgetId) {
     }
   }
 
-  const stmt = db.prepare('SELECT data_json FROM payments WHERE budget_id = ? ORDER BY created_at ASC');
-  const rows = stmt.all(budgetId);
-  const results = [];
-  for (const r of rows) {
-    try { results.push(JSON.parse(r.data_json)); } catch(e) {}
-  }
-  return results;
+  console.warn("🛑 [Seguridad Tenant] getPayments invocado sin tenant context obligatorio. Retornando [].");
+  return [];
 }
 
 // ─── Métodos de Payment Allocations (Aplicación de Cobros a Facturas) ────────
@@ -1314,8 +1242,6 @@ export function getQuarterInvoices(phoneOrCompany, quarterInput = null, yearInpu
   let rows = [];
   if (companyId) {
     rows = db.prepare('SELECT data_json, created_at FROM invoices WHERE company_id = ? ORDER BY created_at ASC').all(companyId);
-  } else if (cleanPhone) {
-    rows = db.prepare('SELECT data_json, created_at FROM invoices WHERE company_phone = ? ORDER BY created_at ASC').all(cleanPhone);
   }
 
   const quarterInvoices = [];
@@ -1515,7 +1441,7 @@ export function saveAppointment(companyContextOrIdOrPhone, appointment = {}) {
   if (!companyContextOrIdOrPhone) {
     throw new Error("❌ [Tenant Boundary] saveAppointment requiere un companyId o contexto autenticado obligatorio.");
   }
-  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const tenant = ensureCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId || null;
   const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
   const now = new Date().toISOString();
@@ -1624,23 +1550,10 @@ export function getAppointment(companyContextOrIdOrPhone, id) {
     if (!companyContextOrIdOrPhone || !id) return null;
     const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
     const companyId = tenant?.companyId;
-    const phone = tenant?.phone;
+    if (!companyId) return null;
 
-    let row = null;
-    if (companyId) {
-      // Búsqueda canónica estricta por company_id
-      const stmt = db.prepare('SELECT * FROM appointments WHERE id = ? AND company_id = ?');
-      row = stmt.get(id, companyId);
-      // Fallback transitorio si el registro aún no ha sido migrado a company_id
-      if (!row && phone) {
-        const stmtLegacy = db.prepare('SELECT * FROM appointments WHERE id = ? AND company_phone = ? AND company_id IS NULL');
-        row = stmtLegacy.get(id, phone);
-      }
-    } else if (phone) {
-      // Búsqueda legacy por company_phone cuando no existe company_id
-      const stmt = db.prepare('SELECT * FROM appointments WHERE id = ? AND company_phone = ?');
-      row = stmt.get(id, phone);
-    }
+    const stmt = db.prepare('SELECT * FROM appointments WHERE id = ? AND company_id = ?');
+    const row = stmt.get(id, companyId);
 
     if (!row) return null;
     return {
@@ -1686,31 +1599,19 @@ export function findAppointments(companyContextOrIdOrPhone, query, options = {})
   if (!companyContextOrIdOrPhone) return [];
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone;
+  if (!companyId) return [];
 
   const q = `%${(query || '').trim().toLowerCase()}%`;
   const statusFilter = options.includeCancelled ? '' : "AND status != 'CANCELLED'";
 
-  let rows = [];
-  if (companyId) {
-    const stmt = db.prepare(`
-      SELECT * FROM appointments
-      WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))
-        ${statusFilter}
-        AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ? OR LOWER(client_address) LIKE ?)
-      ORDER BY date ASC, time ASC
-    `);
-    rows = stmt.all(companyId, cleanPhone || '', q, q, q, q);
-  } else if (cleanPhone) {
-    const stmt = db.prepare(`
-      SELECT * FROM appointments
-      WHERE company_phone = ?
-        ${statusFilter}
-        AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ? OR LOWER(client_address) LIKE ?)
-      ORDER BY date ASC, time ASC
-    `);
-    rows = stmt.all(cleanPhone, q, q, q, q);
-  }
+  const stmt = db.prepare(`
+    SELECT * FROM appointments
+    WHERE company_id = ?
+      ${statusFilter}
+      AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ? OR LOWER(client_address) LIKE ?)
+    ORDER BY date ASC, time ASC
+  `);
+  const rows = stmt.all(companyId, q, q, q, q);
 
   return rows.map(r => ({
     id: r.id,
@@ -1734,30 +1635,17 @@ export function findConflictingAppointments(companyContextOrIdOrPhone, dateStr, 
   if (!companyContextOrIdOrPhone || !dateStr || !timeStr) return [];
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone;
+  if (!companyId) return [];
 
-  let rows = [];
-  if (companyId) {
-    const stmt = db.prepare(`
-      SELECT * FROM appointments
-      WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))
-        AND date = ?
-        AND time = ?
-        AND status = 'CONFIRMED'
-        AND (? IS NULL OR id != ?)
-    `);
-    rows = stmt.all(companyId, cleanPhone || '', dateStr, timeStr, excludeId, excludeId);
-  } else if (cleanPhone) {
-    const stmt = db.prepare(`
-      SELECT * FROM appointments
-      WHERE company_phone = ?
-        AND date = ?
-        AND time = ?
-        AND status = 'CONFIRMED'
-        AND (? IS NULL OR id != ?)
-    `);
-    rows = stmt.all(cleanPhone, dateStr, timeStr, excludeId, excludeId);
-  }
+  const stmt = db.prepare(`
+    SELECT * FROM appointments
+    WHERE company_id = ?
+      AND date = ?
+      AND time = ?
+      AND status = 'CONFIRMED'
+      AND (? IS NULL OR id != ?)
+  `);
+  const rows = stmt.all(companyId, dateStr, timeStr, excludeId, excludeId);
 
   return rows.map(r => ({
     id: r.id,
@@ -1799,45 +1687,26 @@ export function rescheduleAppointment(companyContextOrIdOrPhone, queryOrId, newD
   const oldDisplay = `${oldRow.date} ${oldRow.time} h`;
   const newDisplay = `${finalDate} ${finalTime} h`;
 
-  if (companyId) {
-    const stmt = db.prepare(`
-      UPDATE appointments
-      SET date = ?,
-          time = ?,
-          scheduled_start = ?,
-          scheduled_end = ?,
-          status = 'CONFIRMED',
-          outcome = 'NONE',
-          needs_outcome_confirmation = 0,
-          reschedule_count = reschedule_count + 1,
-          rescheduled_at = ?,
-          reminder_day_sent_at = NULL,
-          reminder_morning_sent_at = NULL,
-          end_of_day_review_sent_at = NULL,
-          updated_at = ?
-      WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND company_phone = ?))
-    `);
-    stmt.run(finalDate, finalTime, finalStart, finalEnd, now, now, target.id, companyId, cleanPhone || '');
-  } else {
-    const stmt = db.prepare(`
-      UPDATE appointments
-      SET date = ?,
-          time = ?,
-          scheduled_start = ?,
-          scheduled_end = ?,
-          status = 'CONFIRMED',
-          outcome = 'NONE',
-          needs_outcome_confirmation = 0,
-          reschedule_count = reschedule_count + 1,
-          rescheduled_at = ?,
-          reminder_day_sent_at = NULL,
-          reminder_morning_sent_at = NULL,
-          end_of_day_review_sent_at = NULL,
-          updated_at = ?
-      WHERE id = ? AND company_phone = ?
-    `);
-    stmt.run(finalDate, finalTime, finalStart, finalEnd, now, now, target.id, cleanPhone);
-  }
+  if (!companyId) return { success: false, error: 'TENANT_REQUIRED' };
+
+  const stmt = db.prepare(`
+    UPDATE appointments
+    SET date = ?,
+        time = ?,
+        scheduled_start = ?,
+        scheduled_end = ?,
+        status = 'CONFIRMED',
+        outcome = 'NONE',
+        needs_outcome_confirmation = 0,
+        reschedule_count = reschedule_count + 1,
+        rescheduled_at = ?,
+        reminder_day_sent_at = NULL,
+        reminder_morning_sent_at = NULL,
+        end_of_day_review_sent_at = NULL,
+        updated_at = ?
+    WHERE id = ? AND company_id = ?
+  `);
+  stmt.run(finalDate, finalTime, finalStart, finalEnd, now, now, target.id, companyId);
 
   recordAuditLog({
     businessId: companyId || cleanPhone,
@@ -1862,6 +1731,8 @@ export function completeAppointments(companyContextOrIdOrPhone, queriesOrIds = [
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
   const cleanPhone = tenant?.phone;
+  if (!companyId) return { completed: [], notFound: queriesOrIds };
+
   const completed = [];
   const notFound = [];
   const now = new Date().toISOString();
@@ -1870,27 +1741,15 @@ export function completeAppointments(companyContextOrIdOrPhone, queriesOrIds = [
     const matches = findAppointments(companyContextOrIdOrPhone, q);
     if (matches.length === 1) {
       const apt = matches[0];
-      if (companyId) {
-        db.prepare(`
-          UPDATE appointments
-          SET status = 'COMPLETED',
-              outcome = ?,
-              completed_at = ?,
-              needs_outcome_confirmation = 0,
-              updated_at = ?
-          WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND company_phone = ?))
-        `).run(outcome, now, now, apt.id, companyId, cleanPhone || '');
-      } else {
-        db.prepare(`
-          UPDATE appointments
-          SET status = 'COMPLETED',
-              outcome = ?,
-              completed_at = ?,
-              needs_outcome_confirmation = 0,
-              updated_at = ?
-          WHERE id = ? AND company_phone = ?
-        `).run(outcome, now, now, apt.id, cleanPhone);
-      }
+      db.prepare(`
+        UPDATE appointments
+        SET status = 'COMPLETED',
+            outcome = ?,
+            completed_at = ?,
+            needs_outcome_confirmation = 0,
+            updated_at = ?
+        WHERE id = ? AND company_id = ?
+      `).run(outcome, now, now, apt.id, companyId);
 
       recordAuditLog({
         businessId: companyId || cleanPhone,
@@ -1940,25 +1799,15 @@ export function updateAppointment(companyContextOrIdOrPhone, query, changes = {}
   const newEnd = calculateDefaultEndTime(newDate, newTime, 60);
 
   // Model injection defense: solo actualizar campos permitidos
-  if (companyId) {
-    const updateStmt = db.prepare(`
-      UPDATE appointments
-      SET date = ?, time = ?, scheduled_start = ?, scheduled_end = ?,
-          client_address = ?, notes = ?, client_name = ?, client_phone = ?,
-          updated_at = ?
-      WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND company_phone = ?))
-    `);
-    updateStmt.run(newDate, newTime, newStart, newEnd, newAddress, newNotes, newClientName, newClientPhone, now, row.id, companyId, cleanPhone || '');
-  } else {
-    const updateStmt = db.prepare(`
-      UPDATE appointments
-      SET date = ?, time = ?, scheduled_start = ?, scheduled_end = ?,
-          client_address = ?, notes = ?, client_name = ?, client_phone = ?,
-          updated_at = ?
-      WHERE id = ? AND company_phone = ?
-    `);
-    updateStmt.run(newDate, newTime, newStart, newEnd, newAddress, newNotes, newClientName, newClientPhone, now, row.id, cleanPhone);
-  }
+  if (!companyId) return null;
+  const updateStmt = db.prepare(`
+    UPDATE appointments
+    SET date = ?, time = ?, scheduled_start = ?, scheduled_end = ?,
+        client_address = ?, notes = ?, client_name = ?, client_phone = ?,
+        updated_at = ?
+    WHERE id = ? AND company_id = ?
+  `);
+  updateStmt.run(newDate, newTime, newStart, newEnd, newAddress, newNotes, newClientName, newClientPhone, now, row.id, companyId);
 
   recordAuditLog({
     businessId: companyId || cleanPhone,
@@ -1983,6 +1832,7 @@ export function cancelAppointment(companyContextOrIdOrPhone, query, reason = 'Ca
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
   const cleanPhone = tenant?.phone;
+  if (!companyId) return null;
 
   const matches = findAppointments(companyContextOrIdOrPhone, query);
   if (matches.length === 0) return null;
@@ -1991,25 +1841,14 @@ export function cancelAppointment(companyContextOrIdOrPhone, query, reason = 'Ca
   const row = matches[0];
   const now = new Date().toISOString();
 
-  if (companyId) {
-    db.prepare(`
-      UPDATE appointments
-      SET status = 'CANCELLED',
-          cancelled_at = ?,
-          needs_outcome_confirmation = 0,
-          updated_at = ?
-      WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND company_phone = ?))
-    `).run(now, now, row.id, companyId, cleanPhone || '');
-  } else {
-    db.prepare(`
-      UPDATE appointments
-      SET status = 'CANCELLED',
-          cancelled_at = ?,
-          needs_outcome_confirmation = 0,
-          updated_at = ?
-      WHERE id = ? AND company_phone = ?
-    `).run(now, now, row.id, cleanPhone);
-  }
+  db.prepare(`
+    UPDATE appointments
+    SET status = 'CANCELLED',
+        cancelled_at = ?,
+        needs_outcome_confirmation = 0,
+        updated_at = ?
+    WHERE id = ? AND company_id = ?
+  `).run(now, now, row.id, companyId);
 
   recordAuditLog({
     businessId: companyId || cleanPhone,
@@ -2030,7 +1869,7 @@ export function listAppointments(companyContextOrIdOrPhone, filter = 'all') {
   if (!companyContextOrIdOrPhone) return [];
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone;
+  if (!companyId) return [];
 
   const now = new Date();
   const todayStr = now.toISOString().split('T')[0];
@@ -2039,10 +1878,8 @@ export function listAppointments(companyContextOrIdOrPhone, filter = 'all') {
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowStr = tomorrow.toISOString().split('T')[0];
 
-  const tenantFilter = companyId 
-    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
-    : "company_phone = ?";
-  const tenantParams = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
+  const tenantFilter = "company_id = ?";
+  const tenantParams = [companyId];
 
   let rows = [];
   if (filter === 'today') {
@@ -2106,48 +1943,43 @@ export function updateAppointmentStatus(companyContextOrIdOrPhone, id, status) {
   }
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone;
+  if (!companyId) return;
   const now = new Date().toISOString();
 
-  if (companyId) {
-    const stmt = db.prepare(`
-      UPDATE appointments 
-      SET status = ?, updated_at = ? 
-      WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND company_phone = ?))
-    `);
-    stmt.run(status, now, id, companyId, cleanPhone || '');
-  } else if (cleanPhone) {
-    const stmt = db.prepare('UPDATE appointments SET status = ?, updated_at = ? WHERE id = ? AND company_phone = ?');
-    stmt.run(status, now, id, cleanPhone);
-  }
+  const stmt = db.prepare(`
+    UPDATE appointments 
+    SET status = ?, updated_at = ? 
+    WHERE id = ? AND company_id = ?
+  `);
+  stmt.run(status, now, id, companyId);
 }
 
 export function getAppointmentHistory(companyContextOrIdOrPhone, appointmentId) {
   if (!companyContextOrIdOrPhone || !appointmentId) return [];
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone;
+  if (!companyId) return [];
 
   const cols = db.prepare('PRAGMA table_info("audit_logs")').all();
   const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
 
   let rows = [];
-  if (hasCompanyIdCol && companyId) {
+  if (hasCompanyIdCol) {
     rows = db.prepare(`
       SELECT * FROM audit_logs
-      WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?))
+      WHERE company_id = ?
         AND entity_type = 'APPOINTMENT'
         AND entity_id = ?
       ORDER BY timestamp ASC
-    `).all(companyId, cleanPhone || '', appointmentId);
+    `).all(companyId, appointmentId);
   } else {
     rows = db.prepare(`
       SELECT * FROM audit_logs
-      WHERE (business_id = ? OR business_id = ?)
+      WHERE business_id = ?
         AND entity_type = 'APPOINTMENT'
         AND entity_id = ?
       ORDER BY timestamp ASC
-    `).all(companyId || cleanPhone, cleanPhone, appointmentId);
+    `).all(companyId, appointmentId);
   }
 
   return rows.map(r => ({
@@ -2172,13 +2004,8 @@ export function getAppointmentHistory(companyContextOrIdOrPhone, appointmentId) 
 export function getUnpaidInvoices(phoneOrCompany) {
   const tenant = resolveCompanyTenant(phoneOrCompany);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' ? phoneOrCompany.replace(/\D/g, '') : '');
-  let rows = [];
-  if (companyId) {
-    rows = db.prepare("SELECT id, budget_id, client_name, total_amount, status, created_at, data_json FROM invoices WHERE company_id = ? AND status != 'PAGADA' ORDER BY created_at ASC").all(companyId);
-  } else if (cleanPhone) {
-    rows = db.prepare("SELECT id, budget_id, client_name, total_amount, status, created_at, data_json FROM invoices WHERE company_phone = ? AND status != 'PAGADA' ORDER BY created_at ASC").all(cleanPhone);
-  }
+  if (!companyId) return [];
+  const rows = db.prepare("SELECT id, budget_id, client_name, total_amount, status, created_at, data_json FROM invoices WHERE company_id = ? AND status != 'PAGADA' ORDER BY created_at ASC").all(companyId);
   const now = Date.now();
   return rows.map(r => {
     let parsed = null;
@@ -2202,14 +2029,9 @@ export function getUnpaidInvoices(phoneOrCompany) {
 export function getBudgetsPendingFollowUp(phoneOrCompany) {
   const tenant = resolveCompanyTenant(phoneOrCompany);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone;
+  if (!companyId) return [];
 
-  let rows = [];
-  if (companyId) {
-    rows = db.prepare("SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets WHERE company_id = ? AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO') ORDER BY created_at ASC").all(companyId);
-  } else if (cleanPhone) {
-    rows = db.prepare("SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets WHERE company_phone = ? AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO') ORDER BY created_at ASC").all(cleanPhone);
-  }
+  const rows = db.prepare("SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets WHERE company_id = ? AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO') ORDER BY created_at ASC").all(companyId);
   const now = Date.now();
   return rows.map(r => {
     let parsed = null;
@@ -2243,25 +2065,16 @@ export function getBudgetsPendingFollowUp(phoneOrCompany) {
 export function getMonthlyRevenue(phoneOrCompany, year, month) {
   const tenant = resolveCompanyTenant(phoneOrCompany);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' ? phoneOrCompany.replace(/\D/g, '') : '');
+  if (!companyId) return { invoiceCount: 0, budgetCount: 0, totalInvoiced: 0, totalCollected: 0, totalPending: 0 };
   const startISO = new Date(year, month - 1, 1, 0, 0, 0).toISOString();
   const endISO   = new Date(year, month, 0, 23, 59, 59, 999).toISOString();
 
   // Facturas del mes
-  let invoiceRows = [];
-  if (companyId) {
-    invoiceRows = db.prepare(`
-      SELECT total_amount, status, data_json
-      FROM invoices
-      WHERE company_id = ? AND created_at >= ? AND created_at <= ?
-    `).all(companyId, startISO, endISO);
-  } else if (cleanPhone) {
-    invoiceRows = db.prepare(`
-      SELECT total_amount, status, data_json
-      FROM invoices
-      WHERE company_phone = ? AND created_at >= ? AND created_at <= ?
-    `).all(cleanPhone, startISO, endISO);
-  }
+  const invoiceRows = db.prepare(`
+    SELECT total_amount, status, data_json
+    FROM invoices
+    WHERE company_id = ? AND created_at >= ? AND created_at <= ?
+  `).all(companyId, startISO, endISO);
 
   let totalInvoiced  = 0;
   let totalCollected = 0;
@@ -2280,18 +2093,10 @@ export function getMonthlyRevenue(phoneOrCompany, year, month) {
   }
 
   // Presupuestos del mes
-  let budgetCount = 0;
-  if (companyId) {
-    budgetCount = db.prepare(`
-      SELECT COUNT(*) as c FROM budgets
-      WHERE company_id = ? AND created_at >= ? AND created_at <= ?
-    `).get(companyId, startISO, endISO)?.c || 0;
-  } else if (cleanPhone) {
-    budgetCount = db.prepare(`
-      SELECT COUNT(*) as c FROM budgets
-      WHERE company_phone = ? AND created_at >= ? AND created_at <= ?
-    `).get(cleanPhone, startISO, endISO)?.c || 0;
-  }
+  const budgetCount = db.prepare(`
+    SELECT COUNT(*) as c FROM budgets
+    WHERE company_id = ? AND created_at >= ? AND created_at <= ?
+  `).get(companyId, startISO, endISO)?.c || 0;
 
   return {
     invoiceCount:  invoiceRows.length,
@@ -2312,25 +2117,21 @@ export function listAppointmentsWeek(companyContextOrIdOrPhone) {
   if (!companyContextOrIdOrPhone) return [];
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone;
+  if (!companyId) return [];
+
   const now    = new Date();
   const todayStr  = now.toISOString().split('T')[0];
   const weekEnd   = new Date(now);
   weekEnd.setDate(weekEnd.getDate() + 7);
   const weekEndStr = weekEnd.toISOString().split('T')[0];
 
-  const tenantFilter = companyId 
-    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
-    : "company_phone = ?";
-  const tenantParams = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
-
   const rows = db.prepare(`
     SELECT * FROM appointments
-    WHERE ${tenantFilter}
+    WHERE company_id = ?
       AND date >= ?
       AND date <= ?
     ORDER BY date ASC, time ASC
-  `).all(...tenantParams, todayStr, weekEndStr);
+  `).all(companyId, todayStr, weekEndStr);
 
   return rows.map(r => ({
     id:            r.id,
@@ -2355,25 +2156,26 @@ export function listAppointmentsWeek(companyContextOrIdOrPhone) {
 export function getDashboard(phoneOrCompany) {
   const tenant = resolveCompanyTenant(phoneOrCompany);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' ? phoneOrCompany.replace(/\D/g, '') : '');
+  if (!companyId) {
+    return {
+      totalDebt: 0,
+      debtCount: 0,
+      todayAppointments: [],
+      pendingBudgets: 0,
+      monthlyStats: { invoiceCount: 0, budgetCount: 0, totalInvoiced: 0, totalCollected: 0, totalPending: 0 }
+    };
+  }
+
   const now     = new Date();
   const todayStr   = now.toISOString().split('T')[0];
   const month   = now.getMonth() + 1;
   const year    = now.getFullYear();
 
   // 1. Deudas totales
-  let unpaidRows = [];
-  if (companyId) {
-    unpaidRows = db.prepare(`
-      SELECT total_amount, data_json FROM invoices
-      WHERE company_id = ? AND status != 'PAGADA'
-    `).all(companyId);
-  } else if (cleanPhone) {
-    unpaidRows = db.prepare(`
-      SELECT total_amount, data_json FROM invoices
-      WHERE company_phone = ? AND status != 'PAGADA'
-    `).all(cleanPhone);
-  }
+  const unpaidRows = db.prepare(`
+    SELECT total_amount, data_json FROM invoices
+    WHERE company_id = ? AND status != 'PAGADA'
+  `).all(companyId);
 
   let totalDebt  = 0;
   for (const r of unpaidRows) {
@@ -2386,36 +2188,22 @@ export function getDashboard(phoneOrCompany) {
   }
 
   // 2. Citas de hoy (tenant-scoped)
-  const aptTenantFilter = companyId 
-    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))" 
-    : "company_phone = ?";
-  const aptParams = companyId ? [companyId, cleanPhone || '', todayStr] : [cleanPhone, todayStr];
-
   const todayAppointments = db.prepare(`
     SELECT client_name, client_address, time FROM appointments
-    WHERE ${aptTenantFilter} AND date = ?
+    WHERE company_id = ? AND date = ?
     ORDER BY time ASC
-  `).all(...aptParams).map(r => ({
+  `).all(companyId, todayStr).map(r => ({
     clientName:    r.client_name,
     clientAddress: r.client_address,
     time:          r.time
   }));
 
   // 3. Presupuestos pendientes de firma
-  let pendingBudgets = 0;
-  if (companyId) {
-    pendingBudgets = db.prepare(`
-      SELECT COUNT(*) as c FROM budgets
-      WHERE company_id = ?
-        AND status IN ('PENDIENTE_ACEPTACION', 'ENVIADO')
-    `).get(companyId)?.c || 0;
-  } else if (cleanPhone) {
-    pendingBudgets = db.prepare(`
-      SELECT COUNT(*) as c FROM budgets
-      WHERE company_phone = ?
-        AND status IN ('PENDIENTE_ACEPTACION', 'ENVIADO')
-    `).get(cleanPhone)?.c || 0;
-  }
+  const pendingBudgets = db.prepare(`
+    SELECT COUNT(*) as c FROM budgets
+    WHERE company_id = ?
+      AND status IN ('PENDIENTE_ACEPTACION', 'ENVIADO')
+  `).get(companyId)?.c || 0;
 
   // 4. Resumen del mes actual
   const monthlyStats = getMonthlyRevenue(phoneOrCompany, year, month);
@@ -2433,7 +2221,7 @@ export function getDashboard(phoneOrCompany) {
 
 export function addShoppingItems(companyContextOrIdOrPhone, items, defaultClientContext = {}) {
   if (!companyContextOrIdOrPhone || !items) return [];
-  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const tenant = ensureCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId || null;
   const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
   const itemsList = Array.isArray(items) ? items : [items];
@@ -2500,12 +2288,10 @@ export function listShoppingItems(companyContextOrIdOrPhone, filter = 'pending',
   if (!companyContextOrIdOrPhone) return [];
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone;
+  if (!companyId) return [];
 
-  const tenantFilter = companyId 
-    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
-    : "company_phone = ?";
-  const params = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
+  const tenantFilter = "company_id = ?";
+  const params = [companyId];
 
   let query = `SELECT * FROM shopping_items WHERE ${tenantFilter}`;
 
@@ -2543,21 +2329,16 @@ export function markShoppingItemBought(companyContextOrIdOrPhone, queryOrId, cli
   if (!companyContextOrIdOrPhone || !queryOrId) return [];
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone;
+  if (!companyId) return [];
   const cleanQuery = String(queryOrId).trim().toLowerCase();
   const now = new Date().toISOString();
 
-  const tenantFilter = companyId 
-    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
-    : "company_phone = ?";
-  const params = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
-
   let sql = `
     SELECT * FROM shopping_items
-    WHERE ${tenantFilter} AND status = 'PENDING'
+    WHERE company_id = ? AND status = 'PENDING'
       AND (id = ? OR LOWER(description) LIKE ?)
   `;
-  params.push(queryOrId, `%${cleanQuery}%`);
+  const params = [companyId, queryOrId, `%${cleanQuery}%`];
 
   if (clientQuery && typeof clientQuery === 'string' && clientQuery.trim() !== '') {
     sql += " AND LOWER(client_name) LIKE ?";
@@ -2570,12 +2351,12 @@ export function markShoppingItemBought(companyContextOrIdOrPhone, queryOrId, cli
   const updateStmt = db.prepare(`
     UPDATE shopping_items
     SET status = 'BOUGHT', bought_at = ?
-    WHERE id = ?
+    WHERE id = ? AND company_id = ?
   `);
 
   const updated = [];
   for (const r of rows) {
-    updateStmt.run(now, r.id);
+    updateStmt.run(now, r.id, companyId);
     updated.push({
       id: r.id,
       companyId: r.company_id,
@@ -2596,14 +2377,9 @@ export function clearShoppingList(companyContextOrIdOrPhone) {
   if (!companyContextOrIdOrPhone) return { deletedCount: 0 };
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone;
+  if (!companyId) return { deletedCount: 0 };
 
-  let result = { changes: 0 };
-  if (companyId) {
-    result = db.prepare("DELETE FROM shopping_items WHERE company_id = ? OR (company_id IS NULL AND company_phone = ?)").run(companyId, cleanPhone || '');
-  } else if (cleanPhone) {
-    result = db.prepare("DELETE FROM shopping_items WHERE company_phone = ?").run(cleanPhone);
-  }
+  const result = db.prepare("DELETE FROM shopping_items WHERE company_id = ?").run(companyId);
   return { deletedCount: result.changes || 0 };
 }
 
@@ -2612,15 +2388,11 @@ export function clearShoppingList(companyContextOrIdOrPhone) {
 export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
   const tenant = resolveCompanyTenant(phoneOrCompany);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' && !phoneOrCompany.includes('-') ? String(phoneOrCompany).replace(/\D/g, '') : null);
-  
-  if (!companyId && !cleanPhone) return null;
+  if (!companyId) return null;
 
   // 1. Buscar presupuesto correspondiente
-  let query = companyId 
-    ? 'SELECT * FROM budgets WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))' 
-    : 'SELECT * FROM budgets WHERE company_phone = ?';
-  const params = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
+  let query = 'SELECT * FROM budgets WHERE company_id = ?';
+  const params = [companyId];
 
   if (clientOrBudgetId) {
     const q = String(clientOrBudgetId).trim().toLowerCase();
@@ -2642,14 +2414,7 @@ export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
   const totalAmount = budgetRow.total_amount || parsed?.financials?.totalAmount || 0;
 
   // 2. Pagos acumulados scoped por tenant
-  const payTenantFilter = budgetRow.company_id
-    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
-    : "company_phone = ?";
-  const payParams = budgetRow.company_id
-    ? [budgetRow.company_id, cleanPhone || budgetRow.company_phone || '', budgetId]
-    : [cleanPhone || budgetRow.company_phone, budgetId];
-
-  const paymentRows = db.prepare(`SELECT amount FROM payments WHERE ${payTenantFilter} AND budget_id = ?`).all(...payParams);
+  const paymentRows = db.prepare('SELECT amount FROM payments WHERE company_id = ? AND budget_id = ?').all(companyId, budgetId);
   const totalPaid = paymentRows.reduce((sum, p) => sum + (p.amount || 0), 0);
   const remainingBalance = Math.max(0, totalAmount - totalPaid);
 
@@ -2659,19 +2424,12 @@ export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
   const estimatedEndDate = workMemory.estimatedEndDate || null;
 
   // 4. Materiales asociados (por budgetId o por nombre de cliente)
-  const shopTenantFilter = budgetRow.company_id 
-    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
-    : "company_phone = ?";
-  const shopParams = budgetRow.company_id 
-    ? [budgetRow.company_id, cleanPhone || budgetRow.company_phone || '', budgetId, clientName] 
-    : [cleanPhone || budgetRow.company_phone, budgetId, clientName];
-
   const materialsRows = db.prepare(`
     SELECT id, description, qty, unit, status, created_at, bought_at
     FROM shopping_items
-    WHERE ${shopTenantFilter} AND (budget_id = ? OR LOWER(client_name) = LOWER(?))
+    WHERE company_id = ? AND (budget_id = ? OR LOWER(client_name) = LOWER(?))
     ORDER BY created_at ASC
-  `).all(...shopParams);
+  `).all(companyId, budgetId, clientName);
 
   const materialsBought = [];
   const materialsPending = [];
@@ -2752,15 +2510,11 @@ export function updateWorkTaskStatus(phoneOrCompany, clientOrBudgetId, taskQuery
   if (!taskQuery) return null;
   const tenant = resolveCompanyTenant(phoneOrCompany);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' && !phoneOrCompany.includes('-') ? String(phoneOrCompany).replace(/\D/g, '') : null);
-
-  if (!companyId && !cleanPhone) return null;
+  if (!companyId) return null;
 
   // Buscar presupuesto
-  let query = companyId 
-    ? 'SELECT * FROM budgets WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))' 
-    : 'SELECT * FROM budgets WHERE company_phone = ?';
-  const params = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
+  let query = 'SELECT * FROM budgets WHERE company_id = ?';
+  const params = [companyId];
 
   if (clientOrBudgetId) {
     const q = String(clientOrBudgetId).trim().toLowerCase();
@@ -2816,41 +2570,28 @@ export function updateWorkTaskStatus(phoneOrCompany, clientOrBudgetId, taskQuery
   }
 
   const now = new Date().toISOString();
-  if (budgetRow.company_id) {
-    db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ? AND company_id = ?').run(
-      JSON.stringify(parsed),
-      now,
-      budgetRow.id,
-      budgetRow.company_id
-    );
-  } else {
-    db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ? AND company_id IS NULL AND company_phone = ?').run(
-      JSON.stringify(parsed),
-      now,
-      budgetRow.id,
-      budgetRow.company_phone
-    );
-  }
+  db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ? AND company_id = ?').run(
+    JSON.stringify(parsed),
+    now,
+    budgetRow.id,
+    companyId
+  );
 
   return {
     budgetId: budgetRow.id,
     clientName: budgetRow.client_name,
     task: matchedTask,
-    workMemory: getWorkMemory(companyId || cleanPhone, budgetRow.id)
+    workMemory: getWorkMemory(companyId, budgetRow.id)
   };
 }
 
 export function updateWorkDates(phoneOrCompany, clientOrBudgetId, startDate, estimatedEndDate) {
   const tenant = resolveCompanyTenant(phoneOrCompany);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' && !phoneOrCompany.includes('-') ? String(phoneOrCompany).replace(/\D/g, '') : null);
+  if (!companyId) return null;
 
-  if (!companyId && !cleanPhone) return null;
-
-  let query = companyId 
-    ? 'SELECT * FROM budgets WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))' 
-    : 'SELECT * FROM budgets WHERE company_phone = ?';
-  const params = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
+  let query = 'SELECT * FROM budgets WHERE company_id = ?';
+  const params = [companyId];
 
   if (clientOrBudgetId) {
     const q = String(clientOrBudgetId).trim().toLowerCase();
@@ -2871,21 +2612,12 @@ export function updateWorkDates(phoneOrCompany, clientOrBudgetId, startDate, est
   if (estimatedEndDate) parsed.workMemory.estimatedEndDate = estimatedEndDate;
 
   const now = new Date().toISOString();
-  if (budgetRow.company_id) {
-    db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ? AND company_id = ?').run(
-      JSON.stringify(parsed),
-      now,
-      budgetRow.id,
-      budgetRow.company_id
-    );
-  } else {
-    db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ? AND company_id IS NULL AND company_phone = ?').run(
-      JSON.stringify(parsed),
-      now,
-      budgetRow.id,
-      budgetRow.company_phone
-    );
-  }
+  db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ? AND company_id = ?').run(
+    JSON.stringify(parsed),
+    now,
+    budgetRow.id,
+    companyId
+  );
 
   return {
     budgetId: budgetRow.id,
@@ -2905,28 +2637,21 @@ export function findClientsByName(phoneOrCompany, clientNameQuery) {
   if (!clientNameQuery) return [];
   const tenant = resolveCompanyTenant(phoneOrCompany);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' && !phoneOrCompany.includes('-') ? String(phoneOrCompany).replace(/\D/g, '') : null);
-
-  if (!companyId && !cleanPhone) return [];
+  if (!companyId) return [];
 
   const q = String(clientNameQuery).trim().toLowerCase();
-
-  const tenantFilter = companyId
-    ? '(company_id = ? OR (company_id IS NULL AND company_phone = ?))'
-    : 'company_phone = ?';
-  const params = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
 
   const rows = db.prepare(`
     SELECT id, client_name, client_address, client_phone, total_amount, status, created_at, updated_at, data_json
     FROM budgets
-    WHERE ${tenantFilter} AND (
+    WHERE company_id = ? AND (
       LOWER(client_name) = ? OR
       LOWER(client_name) LIKE ? OR
       LOWER(client_address) LIKE ? OR
       LOWER(id) = ?
     )
     ORDER BY updated_at DESC
-  `).all(...params, q, `%${q}%`, `%${q}%`, q);
+  `).all(companyId, q, `%${q}%`, `%${q}%`, q);
 
   return rows.map(r => {
     let parsed = null;
@@ -2952,26 +2677,19 @@ export function renameClientBudget(phoneOrCompany, budgetIdOrQuery, newNameWithB
   if (!budgetIdOrQuery || !newNameWithBadge) return null;
   const tenant = resolveCompanyTenant(phoneOrCompany);
   const companyId = tenant?.companyId;
-  const cleanPhone = tenant?.phone || (typeof phoneOrCompany === 'string' && !phoneOrCompany.includes('-') ? String(phoneOrCompany).replace(/\D/g, '') : null);
-
-  if (!companyId && !cleanPhone) return null;
+  if (!companyId) return null;
 
   const newName = String(newNameWithBadge).trim();
 
   // Localizar el presupuesto
-  const tenantFilter = companyId
-    ? '(company_id = ? OR (company_id IS NULL AND company_phone = ?))'
-    : 'company_phone = ?';
-  const filterParams = companyId ? [companyId, cleanPhone || ''] : [cleanPhone];
-
-  let budgetRow = db.prepare(`SELECT * FROM budgets WHERE ${tenantFilter} AND id = ?`).get(...filterParams, budgetIdOrQuery);
+  let budgetRow = db.prepare(`SELECT * FROM budgets WHERE company_id = ? AND id = ?`).get(companyId, budgetIdOrQuery);
   if (!budgetRow) {
     const q = String(budgetIdOrQuery).trim().toLowerCase();
     budgetRow = db.prepare(`
       SELECT * FROM budgets 
-      WHERE ${tenantFilter} AND (LOWER(client_name) = ? OR LOWER(client_name) LIKE ?)
+      WHERE company_id = ? AND (LOWER(client_name) = ? OR LOWER(client_name) LIKE ?)
       ORDER BY updated_at DESC LIMIT 1
-    `).get(...filterParams, q, `%${q}%`);
+    `).get(companyId, q, `%${q}%`);
   }
 
   if (!budgetRow) return null;
@@ -2986,47 +2704,25 @@ export function renameClientBudget(phoneOrCompany, budgetIdOrQuery, newNameWithB
   const now = new Date().toISOString();
 
   // 1. Actualizar budget scoped por tenant
-  if (budgetRow.company_id) {
-    db.prepare(`
-      UPDATE budgets 
-      SET client_name = ?, data_json = ?, updated_at = ?
-      WHERE id = ? AND company_id = ?
-    `).run(newName, parsed ? JSON.stringify(parsed) : budgetRow.data_json, now, budgetRow.id, budgetRow.company_id);
-  } else {
-    db.prepare(`
-      UPDATE budgets 
-      SET client_name = ?, data_json = ?, updated_at = ?
-      WHERE id = ? AND company_id IS NULL AND company_phone = ?
-    `).run(newName, parsed ? JSON.stringify(parsed) : budgetRow.data_json, now, budgetRow.id, budgetRow.company_phone);
-  }
+  db.prepare(`
+    UPDATE budgets 
+    SET client_name = ?, data_json = ?, updated_at = ?
+    WHERE id = ? AND company_id = ?
+  `).run(newName, parsed ? JSON.stringify(parsed) : budgetRow.data_json, now, budgetRow.id, companyId);
 
   // 2. Actualizar compras vinculadas (por budget_id o por nombre anterior de cliente)
-  const shopTenantFilter = budgetRow.company_id
-    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
-    : "company_phone = ?";
-  const shopParams = budgetRow.company_id
-    ? [newName, budgetRow.company_id, cleanPhone || budgetRow.company_phone || '', budgetRow.id, oldName]
-    : [newName, cleanPhone || budgetRow.company_phone, budgetRow.id, oldName];
-
   db.prepare(`
     UPDATE shopping_items
     SET client_name = ?
-    WHERE ${shopTenantFilter} AND (budget_id = ? OR client_name = ?)
-  `).run(...shopParams);
+    WHERE company_id = ? AND (budget_id = ? OR client_name = ?)
+  `).run(newName, companyId, budgetRow.id, oldName);
 
   // 3. Actualizar facturas vinculadas scoped por tenant (company_id)
-  const invTenantFilter = budgetRow.company_id
-    ? "(company_id = ? OR (company_id IS NULL AND company_phone = ?))"
-    : "company_phone = ?";
-  const invParams = budgetRow.company_id
-    ? [newName, budgetRow.company_id, cleanPhone || budgetRow.company_phone || '', budgetRow.id]
-    : [newName, cleanPhone || budgetRow.company_phone, budgetRow.id];
-
   db.prepare(`
     UPDATE invoices
     SET client_name = ?
-    WHERE ${invTenantFilter} AND budget_id = ?
-  `).run(...invParams);
+    WHERE company_id = ? AND budget_id = ?
+  `).run(newName, companyId, budgetRow.id);
 
   return {
     budgetId: budgetRow.id,
@@ -3378,9 +3074,7 @@ export function getTaxProfile(companyContextOrId) {
   let row = null;
   if (hasCompanyIdCol && canonicalCompanyId) {
     row = db.prepare('SELECT * FROM business_tax_profiles WHERE company_id = ?').get(canonicalCompanyId);
-  }
-  // Fallback de compatibilidad por business_id si no se encontró por company_id o no existe la columna
-  if (!row && legacyPhone) {
+  } else if (!hasCompanyIdCol && legacyPhone) {
     row = db.prepare('SELECT * FROM business_tax_profiles WHERE business_id = ?').get(legacyPhone);
   }
 
@@ -3928,9 +3622,6 @@ export function getPurchaseInvoice(companyContextOrId, id) {
   let row = null;
   if (hasCompanyIdCol) {
     row = db.prepare('SELECT * FROM purchase_invoices WHERE id = ? AND company_id = ?').get(id, companyId);
-    if (!row && cleanPhone) {
-      row = db.prepare('SELECT * FROM purchase_invoices WHERE id = ? AND business_id = ?').get(id, cleanPhone);
-    }
   } else {
     row = db.prepare('SELECT * FROM purchase_invoices WHERE id = ? AND business_id = ?').get(id, cleanPhone);
   }
@@ -3988,8 +3679,8 @@ export function listPurchaseInvoices(companyContextOrId, { fiscalPeriod, startDa
   const params = [];
 
   if (hasCompanyIdCol) {
-    query = 'SELECT * FROM purchase_invoices WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?))';
-    params.push(companyId, cleanPhone);
+    query = 'SELECT * FROM purchase_invoices WHERE company_id = ?';
+    params.push(companyId);
   } else {
     query = 'SELECT * FROM purchase_invoices WHERE business_id = ?';
     params.push(cleanPhone);
@@ -4231,9 +3922,6 @@ export function getExpensePayment(companyContextOrId, id) {
   let row = null;
   if (hasCompanyIdCol) {
     row = db.prepare('SELECT * FROM expense_payments WHERE id = ? AND company_id = ?').get(id, companyId);
-    if (!row && cleanPhone) {
-      row = db.prepare('SELECT * FROM expense_payments WHERE id = ? AND business_id = ?').get(id, cleanPhone);
-    }
   } else {
     row = db.prepare('SELECT * FROM expense_payments WHERE id = ? AND business_id = ?').get(id, cleanPhone);
   }
@@ -4268,8 +3956,8 @@ export function listExpensePayments(companyContextOrId, purchaseInvoiceId = null
   const params = [];
 
   if (hasCompanyIdCol) {
-    query = 'SELECT * FROM expense_payments WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?))';
-    params.push(companyId, cleanPhone);
+    query = 'SELECT * FROM expense_payments WHERE company_id = ?';
+    params.push(companyId);
   } else {
     query = 'SELECT * FROM expense_payments WHERE business_id = ?';
     params.push(cleanPhone);
@@ -4506,9 +4194,6 @@ export function getInvestmentAsset(companyContextOrId, id) {
   let row = null;
   if (hasCompanyIdCol) {
     row = db.prepare('SELECT * FROM investment_assets WHERE id = ? AND company_id = ?').get(id, companyId);
-    if (!row && cleanPhone) {
-      row = db.prepare('SELECT * FROM investment_assets WHERE id = ? AND business_id = ?').get(id, cleanPhone);
-    }
   } else {
     row = db.prepare('SELECT * FROM investment_assets WHERE id = ? AND business_id = ?').get(id, cleanPhone);
   }
@@ -4570,7 +4255,7 @@ export function listInvestmentAssets(companyContextOrId) {
 
   let rows = [];
   if (hasCompanyIdCol) {
-    rows = db.prepare('SELECT * FROM investment_assets WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?)) ORDER BY purchase_date ASC').all(companyId, cleanPhone);
+    rows = db.prepare('SELECT * FROM investment_assets WHERE company_id = ? ORDER BY purchase_date ASC').all(companyId);
   } else {
     rows = db.prepare('SELECT * FROM investment_assets WHERE business_id = ? ORDER BY purchase_date ASC').all(cleanPhone);
   }
@@ -4778,10 +4463,6 @@ export function getFiscalPeriod(companyContextOrId, year, quarter) {
 
   if (hasCompanyId) {
     period = db.prepare('SELECT * FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').get(companyId, fiscalYear, q);
-    // Fallback legacy por business_id si no se encontrara por company_id
-    if (!period && cleanPhone) {
-      period = db.prepare('SELECT * FROM fiscal_periods WHERE business_id = ? AND fiscal_year = ? AND quarter = ?').get(cleanPhone, fiscalYear, q);
-    }
   } else {
     const id = `${cleanPhone}_${fiscalYear}_Q${q}`;
     period = db.prepare('SELECT * FROM fiscal_periods WHERE id = ? AND business_id = ?').get(id, cleanPhone);
@@ -5063,8 +4744,8 @@ export function listFiscalIncidents(companyContextOrId, fiscalPeriod = null, sta
   const params = [];
 
   if (hasCompanyIdCol) {
-    query = 'SELECT * FROM fiscal_incidents WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?))';
-    params.push(companyId, cleanPhone);
+    query = 'SELECT * FROM fiscal_incidents WHERE company_id = ?';
+    params.push(companyId);
   } else {
     query = 'SELECT * FROM fiscal_incidents WHERE business_id = ?';
     params.push(cleanPhone);
@@ -5110,8 +4791,8 @@ export function resolveFiscalIncident(companyContextOrId, incidentId) {
     res = db.prepare(`
       UPDATE fiscal_incidents 
       SET resolution_status = 'RESOLVED' 
-      WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND business_id = ?))
-    `).run(incidentId, companyId, cleanPhone);
+      WHERE id = ? AND company_id = ?
+    `).run(incidentId, companyId);
   } else {
     res = db.prepare("UPDATE fiscal_incidents SET resolution_status = 'RESOLVED' WHERE id = ? AND business_id = ?").run(incidentId, cleanPhone);
   }
@@ -5141,9 +4822,6 @@ export function getFiscalIncident(companyContextOrId, incidentId) {
   let row = null;
   if (hasCompanyIdCol) {
     row = db.prepare('SELECT * FROM fiscal_incidents WHERE id = ? AND company_id = ?').get(incidentId, companyId);
-    if (!row && cleanPhone) {
-      row = db.prepare('SELECT * FROM fiscal_incidents WHERE id = ? AND business_id = ?').get(incidentId, cleanPhone);
-    }
   } else {
     row = db.prepare('SELECT * FROM fiscal_incidents WHERE id = ? AND business_id = ?').get(incidentId, cleanPhone);
   }
@@ -5172,7 +4850,7 @@ export function deleteFiscalIncident(companyContextOrId, incidentId) {
 
   let res;
   if (hasCompanyIdCol) {
-    res = db.prepare('DELETE FROM fiscal_incidents WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND business_id = ?))').run(incidentId, companyId, cleanPhone);
+    res = db.prepare('DELETE FROM fiscal_incidents WHERE id = ? AND company_id = ?').run(incidentId, companyId);
   } else {
     res = db.prepare('DELETE FROM fiscal_incidents WHERE id = ? AND business_id = ?').run(incidentId, cleanPhone);
   }
@@ -5332,8 +5010,8 @@ export function listAuditLogs(companyContextOrId, { entityType, entityId } = {})
   const params = [];
 
   if (hasCompanyIdCol) {
-    query = 'SELECT * FROM audit_logs WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?))';
-    params.push(resolvedCompanyId, cleanPhone || '');
+    query = 'SELECT * FROM audit_logs WHERE company_id = ?';
+    params.push(resolvedCompanyId);
   } else {
     query = 'SELECT * FROM audit_logs WHERE business_id = ?';
     params.push(cleanPhone || resolvedCompanyId);
@@ -5422,7 +5100,7 @@ export function getAuditLog(companyContextOrId, logId) {
 
   let row = null;
   if (hasCompanyIdCol) {
-    row = db.prepare('SELECT * FROM audit_logs WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND business_id = ?))').get(logId, resolvedCompanyId, cleanPhone || '');
+    row = db.prepare('SELECT * FROM audit_logs WHERE id = ? AND company_id = ?').get(logId, resolvedCompanyId);
   } else {
     row = db.prepare('SELECT * FROM audit_logs WHERE id = ? AND business_id = ?').get(logId, cleanPhone || resolvedCompanyId);
   }

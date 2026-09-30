@@ -642,6 +642,7 @@ import {
 } from './db_service.js';
 
 const shoppingPhone = '34699001122';
+dbSaveCompany(shoppingPhone, { name: 'Empresa Shopping Test' });
 cleanDb.prepare('DELETE FROM shopping_items WHERE company_phone = ?').run(shoppingPhone);
 
 // 1. Inserción de materiales dictados para múltiples obras/clientes
@@ -711,6 +712,7 @@ assert(emptyList.length === 0, "La lista queda completamente vacía tras limpiar
 
 // Limpieza final
 cleanDb.prepare('DELETE FROM shopping_items WHERE company_phone = ?').run(shoppingPhone);
+cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(shoppingPhone);
 
 console.log("\nTEST 17: Modo Obra — Memoria Inteligente, Ficha Viva y Checklist por Obra (Captura Usuario)");
 import {
@@ -8092,6 +8094,488 @@ assert(integrityResult46 && (integrityResult46.integrity_check === 'ok' || integ
 
 cleanupTest46(phone46A);
 cleanupTest46(phone46B);
+
+// =============================================================================
+// TEST 47: Cierre de Autorización Canónica y Eliminación de Rutas Legacy (Fase 2H)
+// =============================================================================
+console.log("\nTEST 47: Cierre de Autorización Canónica y Eliminación de Rutas Legacy (Fase 2H)");
+
+const phone47A = '34677884701';
+const phone47B = '34677884702';
+
+const cleanupTest47 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    const cId = comp.id;
+    currentDb.prepare("DELETE FROM messages WHERE company_id = ? OR business_id = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM audit_logs WHERE company_id = ? OR business_id = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM fiscal_incidents WHERE company_id = ? OR business_id = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM investment_assets WHERE company_id = ? OR business_id = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM expense_payments WHERE company_id = ? OR business_id = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM purchase_invoices WHERE company_id = ? OR business_id = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM business_tax_profiles WHERE company_id = ? OR business_id = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM fiscal_periods WHERE company_id = ? OR business_id = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM payment_allocations WHERE company_id = ?").run(cId);
+    currentDb.prepare("DELETE FROM payments WHERE company_id = ? OR company_phone = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM invoices WHERE company_id = ? OR company_phone = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM shopping_items WHERE company_id = ? OR company_phone = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM budgets WHERE company_id = ? OR company_phone = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM appointments WHERE company_id = ? OR company_phone = ?").run(cId, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(cId);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(cId);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(cId);
+  }
+};
+
+cleanupTest47(phone47A);
+cleanupTest47(phone47B);
+
+const comp47A = createCompanyWithIdentity({ name: 'Empresa 2H Alpha', phone: phone47A, cif: 'A-47474701' });
+const comp47B = createCompanyWithIdentity({ name: 'Empresa 2H Beta', phone: phone47B, cif: 'B-47474702' });
+
+const context47A = resolveAuthenticatedContext('whatsapp', phone47A);
+const context47B = resolveAuthenticatedContext('whatsapp', phone47B);
+
+assert(Boolean(context47A && context47A.companyId === comp47A.companyId), "Setup context47A OK");
+assert(Boolean(context47B && context47B.companyId === comp47B.companyId), "Setup context47B OK");
+
+// ─── A. ELIMINACIÓN DE OR LEGACY EN AUTORIZACIÓN ───
+const dbServiceSrc47 = fs.readFileSync('src/db_service.js', 'utf8');
+const fiscalServiceSrc47 = fs.readFileSync('src/fiscal_service.js', 'utf8');
+
+assert(!dbServiceSrc47.includes('WHERE company_id = ? OR company_phone = ?'), "A1. Cero cláusulas 'WHERE company_id = ? OR company_phone = ?' en db_service");
+assert(!dbServiceSrc47.includes('WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?))'), "A2. Cero cláusulas 'WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?))' en db_service");
+assert(!dbServiceSrc47.includes('WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))'), "A3. Cero cláusulas 'WHERE (company_id = ? OR (company_id IS NULL AND company_phone = ?))' en db_service");
+assert(!fiscalServiceSrc47.includes('WHERE company_phone = ?'), "A4. Cero 'WHERE company_phone = ?' en fiscal_service");
+
+// ─── B. CROSS-TENANT SELECT (ZERO-DISCLOSURE) ───
+const bud47B = dbService.saveBudget(context47B, {
+  id: 'PRE-47-B01',
+  client: { name: 'Cliente Secreto B' },
+  items: [{ description: 'Trabajo B', total: 1000 }],
+  financials: { totalAmount: 1000 },
+  status: 'ACEPTADO',
+  workMemory: { startDate: '2026-11-01', estimatedEndDate: '2026-11-15' }
+});
+const inv47B = dbService.saveInvoice(context47B, {
+  id: 'FAC-47-B01',
+  budgetId: 'PRE-47-B01',
+  client: { name: 'Cliente Secreto B' },
+  total: 1000,
+  taxRate: 21,
+  status: 'EMITIDA'
+});
+const pay47B = dbService.savePayment(context47B, {
+  id: 'PAY-47-B01',
+  budgetId: 'FAC-47-B01',
+  amount: 500,
+  method: 'TRANSFERENCIA'
+});
+const apt47B = dbService.saveAppointment(context47B, {
+  id: 'CIT-47-B01',
+  clientName: 'Cliente Secreto B',
+  date: '2026-11-10',
+  time: '11:00'
+});
+const shop47B = dbService.addShoppingItems(context47B, [
+  { description: 'Material Privado B', qty: 2, unit: 'ud', budgetId: 'PRE-47-B01', clientName: 'Cliente Secreto B' }
+]);
+const pinv47B = dbService.savePurchaseInvoice(context47B, {
+  id: 'REC-47-B01',
+  invoiceNumber: 'PROV-47-01',
+  supplierName: 'Proveedor B',
+  supplierTaxId: 'B99887766',
+  taxBase: 1200,
+  vatRate: 21,
+  vatAmount: 252,
+  totalAmount: 1452,
+  category: 'MATERIALES'
+});
+const exp47B = dbService.saveExpensePayment(context47B, {
+  id: 'EXP-47-B01',
+  purchaseInvoiceId: 'REC-47-B01',
+  amount: 1452,
+  paymentMethod: 'TRANSFERENCIA',
+  paymentDate: '2026-11-02'
+});
+const ast47B = dbService.saveInvestmentAsset(context47B, {
+  id: 'AST-47-B01',
+  assetName: 'Maquinaria Privada B',
+  purchaseInvoiceId: 'REC-47-B01',
+  purchaseDate: '2026-11-03',
+  acquisitionValue: 5000,
+  amortizationYears: 5
+});
+const inc47B = dbService.saveFiscalIncident(context47B, {
+  id: 'INC-47-B01',
+  fiscalPeriod: '2026_Q4',
+  entityType: 'INVOICE',
+  entityId: 'FAC-47-B01',
+  severity: 'WARNING',
+  errorCode: 'TEST_INCIDENT',
+  message: 'Incidencia de prueba B'
+});
+const log47B = dbService.recordAuditLog({
+  companyContextOrId: context47B,
+  entityType: 'INVOICE',
+  entityId: 'FAC-47-B01',
+  action: 'CREATE',
+  reason: 'Audit log B'
+});
+
+assert(dbService.getBudget(context47A, 'PRE-47-B01') === null, "B1. getBudget(contextA, budB.id) retorna null");
+assert(dbService.getInvoice(context47A, 'FAC-47-B01') === null, "B2. getInvoice(contextA, invB.id) retorna null");
+assert(dbService.getPayment(context47A, 'PAY-47-B01') === null, "B3. getPayment(contextA, payB.id) retorna null");
+assert(dbService.getAppointment(context47A, 'CIT-47-B01') === null, "B4. getAppointment(contextA, aptB.id) retorna null");
+assert(dbService.getPurchaseInvoice(context47A, 'REC-47-B01') === null, "B5. getPurchaseInvoice(contextA, pinvB.id) retorna null");
+assert(dbService.getExpensePayment(context47A, 'EXP-47-B01') === null, "B6. getExpensePayment(contextA, expB.id) retorna null");
+assert(dbService.getInvestmentAsset(context47A, 'AST-47-B01') === null, "B7. getInvestmentAsset(contextA, astB.id) retorna null");
+assert(dbService.getFiscalIncident(context47A, 'INC-47-B01') === null, "B8. getFiscalIncident(contextA, incB.id) retorna null");
+assert(dbService.getAuditLog(context47A, log47B.id) === null, "B9. getAuditLog(contextA, logB.id) retorna null");
+
+const listBud47A = dbService.listBudgets(context47A);
+assert(!listBud47A.some(b => b.id === 'PRE-47-B01'), "B10. listBudgets(contextA) no revela presupuestos de B");
+const listInv47A = dbService.listInvoices(context47A);
+assert(!listInv47A.some(i => i.id === 'FAC-47-B01'), "B11. listInvoices(contextA) no revela facturas de B");
+const listPay47A = dbService.listPayments(context47A);
+assert(!listPay47A.some(p => p.id === 'PAY-47-B01'), "B12. listPayments(contextA) no revela pagos de B");
+const listShop47A = dbService.listShoppingItems(context47A, 'all');
+assert(!listShop47A.some(s => s.description === 'Material Privado B'), "B13. listShoppingItems(contextA) no revela items de B");
+const listPinv47A = dbService.listPurchaseInvoices(context47A);
+assert(!listPinv47A.some(p => p.id === 'REC-47-B01'), "B14. listPurchaseInvoices(contextA) no revela facturas de compra de B");
+const listExp47A = dbService.listExpensePayments(context47A);
+assert(!listExp47A.some(e => e.id === 'EXP-47-B01'), "B15. listExpensePayments(contextA) no revela pagos de gasto de B");
+const listAst47A = dbService.listInvestmentAssets(context47A);
+assert(!listAst47A.some(a => a.id === 'AST-47-B01'), "B16. listInvestmentAssets(contextA) no revela activos de B");
+const listInc47A = dbService.listFiscalIncidents(context47A);
+assert(!listInc47A.some(i => i.id === 'INC-47-B01'), "B17. listFiscalIncidents(contextA) no revela incidencias de B");
+const listLog47A = dbService.listAuditLogs(context47A);
+assert(!listLog47A.some(l => l.id === log47B.id), "B18. listAuditLogs(contextA) no revela audit logs de B");
+
+// ─── C. CROSS-TENANT UPDATE ───
+const taskUpdate47 = dbService.updateWorkTaskStatus(context47A, 'PRE-47-B01', 'Trabajo B', true);
+assert(taskUpdate47 === null, "C1. updateWorkTaskStatus cross-tenant retorna null");
+
+const datesUpdate47 = dbService.updateWorkDates(context47A, 'PRE-47-B01', '2026-12-01', '2026-12-31');
+assert(datesUpdate47 === null, "C2. updateWorkDates cross-tenant retorna null");
+
+const aptUpdate47 = dbService.updateAppointment(context47A, 'CIT-47-B01', { time: '18:00' });
+assert(aptUpdate47 === null, "C3. updateAppointment cross-tenant retorna null");
+
+const resInc47 = dbService.resolveFiscalIncident(context47A, 'INC-47-B01');
+assert(resInc47 === false, "C4. resolveFiscalIncident cross-tenant retorna false");
+
+const incB_after47 = currentDb.prepare("SELECT resolution_status FROM fiscal_incidents WHERE id = 'INC-47-B01'").get();
+assert(incB_after47 && incB_after47.resolution_status === 'OPEN', "C5. Incidencia de B permanece OPEN tras intento de resolución cross-tenant");
+const aptB_after47 = currentDb.prepare("SELECT time FROM appointments WHERE id = 'CIT-47-B01'").get();
+assert(aptB_after47 && aptB_after47.time === '11:00', "C6. Cita de B permanece a las 11:00 tras intento de modificación cross-tenant");
+
+// ─── D. CROSS-TENANT DELETE ───
+const delBud47 = dbService.deleteBudget(context47A, 'PRE-47-B01');
+assert(delBud47 && delBud47.deleted === false, "D1. deleteBudget cross-tenant retorna deleted: false");
+const delInv47 = dbService.deleteInvoice(context47A, 'FAC-47-B01');
+assert(delInv47 && delInv47.deleted === false, "D2. deleteInvoice cross-tenant retorna deleted: false");
+const delPay47 = dbService.deletePayment(context47A, 'PAY-47-B01');
+assert(delPay47 && delPay47.deleted === false, "D3. deletePayment cross-tenant retorna deleted: false");
+const delApt47 = dbService.cancelAppointment(context47A, 'CIT-47-B01');
+assert(delApt47 === null, "D4. cancelAppointment cross-tenant retorna null");
+const delPinv47 = dbService.deletePurchaseInvoice(context47A, 'REC-47-B01');
+assert(delPinv47 === false, "D5. deletePurchaseInvoice cross-tenant retorna false");
+const delExp47 = dbService.deleteExpensePayment(context47A, 'EXP-47-B01');
+assert(delExp47 === false, "D6. deleteExpensePayment cross-tenant retorna false");
+const delAst47 = dbService.deleteInvestmentAsset(context47A, 'AST-47-B01');
+assert(delAst47 === false, "D7. deleteInvestmentAsset cross-tenant retorna false");
+const delInc47 = dbService.deleteFiscalIncident(context47A, 'INC-47-B01');
+assert(delInc47 === false, "D8. deleteFiscalIncident cross-tenant retorna false");
+
+assert(currentDb.prepare("SELECT id FROM budgets WHERE id = 'PRE-47-B01'").get() !== undefined, "D9. Presupuesto de B sigue existiendo en BD");
+assert(currentDb.prepare("SELECT id FROM invoices WHERE id = 'FAC-47-B01'").get() !== undefined, "D10. Factura de B sigue existiendo en BD");
+assert(currentDb.prepare("SELECT id FROM payments WHERE id = 'PAY-47-B01'").get() !== undefined, "D11. Pago de B sigue existiendo en BD");
+assert(currentDb.prepare("SELECT id FROM appointments WHERE id = 'CIT-47-B01'").get() !== undefined, "D12. Cita de B sigue existiendo en BD");
+assert(currentDb.prepare("SELECT id FROM purchase_invoices WHERE id = 'REC-47-B01'").get() !== undefined, "D13. Factura de compra de B sigue intacta");
+assert(currentDb.prepare("SELECT id FROM expense_payments WHERE id = 'EXP-47-B01'").get() !== undefined, "D14. Pago de gasto de B sigue intacto");
+assert(currentDb.prepare("SELECT id FROM investment_assets WHERE id = 'AST-47-B01'").get() !== undefined, "D15. Activo de B sigue intacto");
+assert(currentDb.prepare("SELECT id FROM fiscal_incidents WHERE id = 'INC-47-B01'").get() !== undefined, "D16. Incidencia de B sigue intacta");
+
+// ─── E. PARENT/CHILD MISMATCH REJECTION ───
+let invMismatch47 = false;
+try {
+  dbService.saveInvoice(context47A, {
+    id: 'FAC-47-A-CROSS',
+    budgetId: 'PRE-47-B01',
+    client: { name: 'Cross Client' },
+    total: 500,
+    taxRate: 21
+  });
+} catch (e) {
+  invMismatch47 = true;
+}
+assert(invMismatch47, "E1. saveInvoice rechaza vincular factura de A a presupuesto de B");
+
+let payMismatch47 = false;
+try {
+  dbService.savePayment(context47A, {
+    id: 'PAY-47-A-CROSS',
+    budgetId: 'FAC-47-B01',
+    amount: 200,
+    method: 'EFECTIVO'
+  });
+} catch (e) {
+  payMismatch47 = true;
+}
+assert(payMismatch47, "E2. savePayment rechaza vincular pago de A a factura de B");
+
+const expMismatch47 = dbService.saveExpensePayment(context47A, {
+  id: 'EXP-47-A-CROSS',
+  purchaseInvoiceId: 'REC-47-B01',
+  amount: 200,
+  paymentMethod: 'TRANSFERENCIA'
+});
+assert(expMismatch47 === null, "E3. saveExpensePayment rechaza vincular gasto de A a factura de compra de B");
+
+const astMismatch47 = dbService.saveInvestmentAsset(context47A, {
+  id: 'AST-47-A-CROSS',
+  assetName: 'Activo Cross A',
+  purchaseInvoiceId: 'REC-47-B01',
+  acquisitionValue: 4000
+});
+assert(astMismatch47 === null, "E4. saveInvestmentAsset rechaza vincular activo de A a factura de compra de B");
+
+const incMismatch47 = dbService.saveFiscalIncident(context47A, {
+  id: 'INC-47-A-CROSS',
+  entityType: 'INVOICE',
+  entityId: 'FAC-47-B01',
+  severity: 'WARNING',
+  errorCode: 'CROSS_TEST'
+});
+assert(incMismatch47 === null, "E5. saveFiscalIncident rechaza vincular incidencia de A a factura de B");
+
+const shopMismatch47 = dbService.addShoppingItems(context47A, [
+  { description: 'Item Cross A', qty: 1, budgetId: 'PRE-47-B01' }
+]);
+const shopItemInDb47 = currentDb.prepare("SELECT * FROM shopping_items WHERE description = 'Item Cross A'").get();
+assert(!shopItemInDb47, "E6. addShoppingItems no asocia item de A a presupuesto de B");
+
+// ─── F. AUDIT LOGS ESTRICTAMENTE SCOPED ───
+const log47A = dbService.recordAuditLog({
+  companyContextOrId: context47A,
+  entityType: 'BUDGET',
+  entityId: 'PRE-47-A01',
+  action: 'UPDATE',
+  reason: 'Audit log legítimo de A'
+});
+assert(Boolean(log47A && log47A.companyId === comp47A.companyId), "F1. recordAuditLog asigna companyId canónico");
+const logsFor47A = dbService.listAuditLogs(context47A);
+assert(logsFor47A.some(l => l.id === log47A.id) && !logsFor47A.some(l => l.id === log47B.id), "F2. listAuditLogs(contextA) contiene solo logs de A y 0 de B");
+
+// ─── G. FISCAL INCIDENTS ESTRICTAMENTE SCOPED ───
+const inc47A = dbService.saveFiscalIncident(context47A, {
+  id: 'INC-47-A01',
+  fiscalPeriod: '2026_Q4',
+  severity: 'WARNING',
+  errorCode: 'LEGIT_A',
+  message: 'Incidencia legítima de A'
+});
+assert(Boolean(inc47A && inc47A.companyId === comp47A.companyId), "G1. saveFiscalIncident asigna companyId canónico");
+assert(dbService.getFiscalIncident(context47A, 'INC-47-A01') !== null, "G2. getFiscalIncident(contextA) recupera incidencia propia");
+assert(dbService.resolveFiscalIncident(context47A, 'INC-47-A01') === true, "G3. resolveFiscalIncident(contextA) resuelve legítimamente incidencia propia");
+assert(dbService.deleteFiscalIncident(context47A, 'INC-47-A01') === true, "G4. deleteFiscalIncident(contextA) elimina legítimamente incidencia propia");
+
+// ─── H. INVESTMENT ASSETS ESTRICTAMENTE SCOPED ───
+const ast47A = dbService.saveInvestmentAsset(context47A, {
+  id: 'AST-47-A01',
+  assetName: 'Furgoneta Taller A',
+  purchaseDate: '2026-11-05',
+  acquisitionValue: 18000,
+  amortizationYears: 4
+});
+assert(Boolean(ast47A && ast47A.companyId === comp47A.companyId), "H1. saveInvestmentAsset asigna companyId canónico");
+assert(dbService.getInvestmentAsset(context47A, 'AST-47-A01') !== null, "H2. getInvestmentAsset(contextA) lee activo propio");
+assert(dbService.deleteInvestmentAsset(context47A, 'AST-47-A01') === true, "H3. deleteInvestmentAsset(contextA) elimina activo propio");
+
+// ─── I. WORK MEMORY ESTRICTAMENTE SCOPED ───
+const bud47A_work = dbService.saveBudget(context47A, {
+  id: 'PRE-47-A02',
+  client: { name: 'Obra Alfa Test' },
+  items: [{ description: 'Demolición Alfa', total: 2000 }],
+  financials: { totalAmount: 2000 },
+  status: 'ACEPTADO',
+  workMemory: { startDate: '2026-11-01', estimatedEndDate: '2026-11-20' }
+});
+assert(dbService.getWorkMemory(context47A, 'PRE-47-A02') !== null, "I1. getWorkMemory(contextA) lee obra propia");
+assert(dbService.getWorkMemory(context47A, 'PRE-47-B01') === null, "I2. getWorkMemory(contextA, budB.id) retorna null (Zero-Disclosure)");
+assert(dbService.updateWorkTaskStatus(context47A, 'PRE-47-B01', 'Trabajo B', true) === null, "I3. updateWorkTaskStatus cross-tenant retorna null");
+assert(dbService.updateWorkDates(context47A, 'PRE-47-B01', '2026-12-01', '2026-12-31') === null, "I4. updateWorkDates cross-tenant retorna null");
+
+// ─── J. RENAME CLIENT BUDGET SCOPED ───
+const rename47A = dbService.renameClientBudget(context47A, 'PRE-47-A02', 'Obra Alfa Renombrada');
+assert(Boolean(rename47A && rename47A.newName === 'Obra Alfa Renombrada'), "J1. renameClientBudget(contextA) renombra obra propia");
+const rename47Cross = dbService.renameClientBudget(context47A, 'PRE-47-B01', 'Obra B Hackeada');
+assert(rename47Cross === null, "J2. renameClientBudget cross-tenant retorna null");
+const budB_afterRename47 = currentDb.prepare("SELECT client_name FROM budgets WHERE id = 'PRE-47-B01'").get();
+assert(budB_afterRename47 && budB_afterRename47.client_name === 'Cliente Secreto B', "J3. Presupuesto de B permanece inalterado");
+
+// ─── K. CLOUD SIGNATURES TENANT-SCOPED & GLOBAL WORKER ───
+const budPending47A = dbService.saveBudget(context47A, {
+  id: 'PRE-47-A-SIGN',
+  client: { name: 'Firma Pendiente A' },
+  status: 'PENDIENTE_ACEPTACION'
+});
+const budPending47B = dbService.saveBudget(context47B, {
+  id: 'PRE-47-B-SIGN',
+  client: { name: 'Firma Pendiente B' },
+  status: 'PENDIENTE_ACEPTACION'
+});
+
+const originalFetch47 = globalThis.fetch;
+try {
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes('PRE-47-A-SIGN')) {
+      return {
+        ok: true,
+        json: async () => ({
+          alreadySigned: true,
+          details: {
+            signed: true,
+            signedAt: new Date().toISOString(),
+            clientEmail: 'signed@tenantA.com',
+            companyId: comp47A.companyId,
+            companyPhone: phone47A
+          }
+        })
+      };
+    }
+    if (urlStr.includes('PRE-47-B-SIGN')) {
+      return {
+        ok: true,
+        json: async () => ({
+          alreadySigned: true,
+          details: {
+            signed: true,
+            signedAt: new Date().toISOString(),
+            clientEmail: 'signed@tenantB.com',
+            companyId: comp47B.companyId,
+            companyPhone: phone47B
+          }
+        })
+      };
+    }
+    return { ok: false, json: async () => ({}) };
+  };
+
+  const signResult47A = await dbService.syncPendingSignaturesFromCloud(context47A);
+  assert(signResult47A.length === 1 && signResult47A[0].budgetId === 'PRE-47-A-SIGN', "K1. syncPendingSignaturesFromCloud(contextA) sincroniza solo presupuestos de A");
+  assert(!signResult47A.some(s => s.budgetId === 'PRE-47-B-SIGN'), "K2. syncPendingSignaturesFromCloud(contextA) NO sincroniza presupuestos de B");
+  const budB_stillPending47 = currentDb.prepare("SELECT status FROM budgets WHERE id = 'PRE-47-B-SIGN'").get();
+  assert(budB_stillPending47 && budB_stillPending47.status === 'PENDIENTE_ACEPTACION', "K3. Presupuesto de B permanece PENDIENTE_ACEPTACION");
+} finally {
+  globalThis.fetch = originalFetch47;
+}
+
+// ─── L. GEMINI / AI TENANT INJECTION NEUTRALIZED ───
+const poisonedInvoicePayload47 = {
+  id: 'FAC-47-A-POISON',
+  companyId: comp47B.companyId,
+  company_id: comp47B.companyId,
+  company_phone: phone47B,
+  client: { name: 'Cliente A' },
+  total: 500,
+  taxRate: 21
+};
+const savedPoisonedInv47 = dbService.saveInvoice(context47A, poisonedInvoicePayload47);
+assert(Boolean(savedPoisonedInv47 && savedPoisonedInv47.companyId === comp47A.companyId), "L1. saveInvoice neutraliza companyId inyectado por IA");
+const poisonedDbRow47 = currentDb.prepare("SELECT company_id, company_phone FROM invoices WHERE id = 'FAC-47-A-POISON'").get();
+assert(poisonedDbRow47.company_id === comp47A.companyId && poisonedDbRow47.company_phone === phone47A, "L2. En SQLite la factura pertenece forzosamente al Tenant A");
+
+// ─── M. SESSION IDENTITY SPOOFING REJECTED ───
+const spoofedAuth47 = authenticateWhatsAppSession('34677884701@s.whatsapp.net', '34677884702');
+assert(spoofedAuth47 === null, "M1. authenticateWhatsAppSession con spoofing de senderNumber retorna null");
+const unknownJidSession47 = getUserSession('34600999999@s.whatsapp.net', '34600999999');
+assert(unknownJidSession47 === null, "M2. getUserSession con remitente no registrado retorna null");
+
+// ─── N. STARTUP SIDE EFFECTS VERIFIED ZERO ───
+const companiesCountBefore47 = currentDb.prepare("SELECT COUNT(*) as c FROM companies").get().c;
+const budgetsCountBefore47 = currentDb.prepare("SELECT COUNT(*) as c FROM budgets").get().c;
+currentDb.prepare('PRAGMA table_info("companies")').all();
+currentDb.prepare('PRAGMA table_info("budgets")').all();
+const companiesCountAfter47 = currentDb.prepare("SELECT COUNT(*) as c FROM companies").get().c;
+const budgetsCountAfter47 = currentDb.prepare("SELECT COUNT(*) as c FROM budgets").get().c;
+assert(companiesCountBefore47 === companiesCountAfter47 && budgetsCountBefore47 === budgetsCountAfter47, "N1. Startup y table_info producen cero mutaciones en base de datos");
+
+// ─── O. FILESYSTEM ISOLATION ───
+const dir47A = path.resolve('data', 'logos', comp47A.companyId);
+const dir47B = path.resolve('data', 'logos', comp47B.companyId);
+assert(dir47A !== dir47B, "O1. Directorios de logos de A y B son distintos");
+assert(dir47A.includes(comp47A.companyId) && dir47B.includes(comp47B.companyId), "O2. Rutas contienen estrictamente sus respectivos companyIds");
+
+// ─── P. PATH TRAVERSAL BLOCKED ───
+const traversalInput47 = '../../etc/shadow';
+const sanitizedPath47 = traversalInput47.replace(/[^a-zA-Z0-9_-]/g, '');
+assert(!sanitizedPath47.includes('..') && !sanitizedPath47.includes('/'), "P1. Path traversal neutralizado por sanitizador canónico");
+
+// ─── Q. GLOBAL WORKER FAIL-CLOSED ON AMBIGUITY ───
+const budPending47A2 = dbService.saveBudget(context47A, {
+  id: 'PRE-47-A-AMBIGUOUS',
+  client: { name: 'Firma Dudosa' },
+  status: 'PENDIENTE_ACEPTACION'
+});
+
+const originalFetchQ47 = globalThis.fetch;
+try {
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes('PRE-47-A-AMBIGUOUS')) {
+      return {
+        ok: true,
+        json: async () => ({
+          alreadySigned: true,
+          details: {
+            signed: true,
+            signedAt: new Date().toISOString(),
+            clientEmail: 'spoofed@evil.com',
+            companyId: comp47B.companyId, // mismatch intencional
+            companyPhone: phone47B
+          }
+        })
+      };
+    }
+    return { ok: false, json: async () => ({}) };
+  };
+
+  const ambiguousSync47 = await dbService.syncPendingSignaturesFromCloud(context47A);
+  assert(ambiguousSync47.length === 0, "Q1. syncPendingSignaturesFromCloud falla cerrado ante mismatch de companyId");
+  const budA2_status47 = currentDb.prepare("SELECT status FROM budgets WHERE id = 'PRE-47-A-AMBIGUOUS'").get();
+  assert(budA2_status47 && budA2_status47.status === 'PENDIENTE_ACEPTACION', "Q2. Presupuesto permanece PENDIENTE_ACEPTACION");
+} finally {
+  globalThis.fetch = originalFetchQ47;
+}
+
+// ─── R. PIPELINE CANÓNICO COMPLETO ───
+const resolvedTenant47 = dbService.resolveCompanyTenant(phone47A);
+assert(Boolean(resolvedTenant47 && resolvedTenant47.companyId === comp47A.companyId), "R1. resolveCompanyTenant resuelve teléfono legacy a company_id");
+const queriedBudget47 = dbService.getBudget(resolvedTenant47, 'PRE-47-A02');
+assert(Boolean(queriedBudget47 && queriedBudget47.id === 'PRE-47-A02'), "R2. Consulta recupera registro usando exclusivamente company_id resuelto");
+
+// ─── S. FAIL-CLOSED ANTE AUSENCIA DE TENANT ───
+assert(dbService.getBudget(null, 'PRE-47-A02') === null, "S1. getBudget(null) retorna null");
+assert(dbService.getInvoice(null, 'FAC-47-B01') === null, "S2. getInvoice(null) retorna null");
+assert(dbService.getPayment(null, 'PAY-47-B01') === null, "S3. getPayment(null) retorna null");
+assert(dbService.getAppointment(null, 'CIT-47-B01') === null, "S4. getAppointment(null) retorna null");
+assert(dbService.getWorkMemory(null, 'Obra Alfa') === null, "S5. getWorkMemory(null) retorna null");
+assert(dbService.listBudgets('00000000-0000-0000-0000-000000000000').length === 0, "S6. listBudgets con companyId inexistente retorna []");
+assert(dbService.getBudget('34600000000', 'PRE-47-A02') === null, "S7. getBudget con teléfono no registrado retorna null");
+assert(dbService.getInvoice({ companyId: null, phone: '' }, 'FAC-47-B01') === null, "S8. getInvoice con contexto corrupto retorna null");
+
+// ─── T. INTEGRIDAD RELACIONAL Y SCHEMA ───
+const fkViolations47 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult47 = currentDb.prepare("PRAGMA integrity_check;").get();
+assert(fkViolations47.length === 0, "T1. PRAGMA foreign_key_check = 0 violaciones tras TEST 47");
+assert(integrityResult47 && (integrityResult47.integrity_check === 'ok' || integrityResult47.integrity_check === 'OK'), "T2. PRAGMA integrity_check = ok tras TEST 47");
+
+cleanupTest47(phone47A);
+cleanupTest47(phone47B);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

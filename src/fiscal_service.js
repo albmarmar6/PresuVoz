@@ -163,12 +163,6 @@ export function getQuarterSummary(companyContextOrIdOrBusinessId, year = null, q
       WHERE company_id = ?
       ORDER BY created_at ASC
     `).all(companyId);
-  } else if (cleanId) {
-    issuedRows = db.prepare(`
-      SELECT * FROM invoices
-      WHERE company_phone = ?
-      ORDER BY created_at ASC
-    `).all(cleanId);
   }
 
   const issuedInvoices = [];
@@ -413,7 +407,9 @@ export function getQuarterSummary(companyContextOrIdOrBusinessId, year = null, q
     },
     invoices: issuedInvoices,
     purchaseInvoices: receivedInvoices,
-    investmentAssets: quarterAssets
+    investmentAssets: quarterAssets,
+    companyId,
+    businessId: cleanId
   };
 }
 
@@ -535,7 +531,12 @@ export function runFiscalQualityChecks(companyContextOrId, year = null, quarter 
 
     // Detección de Bien de Inversión (> 3.005,06 € en base imponible)
     if (pinv.taxBase > 3005.06) {
-      const existingAsset = db.prepare('SELECT id FROM investment_assets WHERE purchase_invoice_id = ?').get(pinv.id);
+      const cols = db.prepare('PRAGMA table_info("investment_assets")').all();
+      const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+      const compId = quarterData.companyId || (resolveCompanyTenant(companyContextOrId)?.companyId);
+      const existingAsset = (hasCompanyIdCol && compId)
+        ? db.prepare('SELECT id FROM investment_assets WHERE purchase_invoice_id = ? AND company_id = ?').get(pinv.id, compId)
+        : db.prepare('SELECT id FROM investment_assets WHERE purchase_invoice_id = ?').get(pinv.id);
       if (!existingAsset) {
         addIncident('WARNING', 'ASSET_OVER_THRESHOLD', `Gasto de ${pinv.taxBase}€ en ${pinv.supplierName} supera 3.005,06€. Debe registrarse como Bien de Inversión y amortizarse contablemente en varios años.`, 'PURCHASE_INVOICE', pinv.id);
       }
