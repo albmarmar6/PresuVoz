@@ -1260,6 +1260,7 @@ assert(showCompanyReply.includes('611223344'), "resolveIntent(SHOW_COMPANY) mues
 cleanDb.prepare('DELETE FROM invoices WHERE company_phone = ?').run(testPhoneIntent);
 cleanDb.prepare('DELETE FROM appointments WHERE company_phone = ?').run(testPhoneIntent);
 cleanDb.prepare('DELETE FROM budgets WHERE company_phone = ?').run(testPhoneIntent);
+cleanDb.prepare('DELETE FROM audit_logs WHERE business_id = ?').run(testPhoneIntent);
 
 // -----------------------------------------------------------------------------
 // CASO 21: Persistencia de Mensajes (messages), Deduplicación y Estados de Conversación
@@ -1373,6 +1374,7 @@ import {
   updateFiscalPeriodStatus,
   listFiscalIncidents,
   recordAuditLog,
+  getAuditLog,
   listAuditLogs,
   saveAppointment as testSaveAppointment,
   getAppointment as testGetAppointment,
@@ -1768,6 +1770,7 @@ console.log("\nTEST 23: Arquitectura Integral de Visitas Técnicas (CONFIRMED di
 const testVisitPhone = '34611998877';
 cleanDb.prepare('DELETE FROM appointments WHERE company_phone = ?').run(testVisitPhone);
 cleanDb.prepare('DELETE FROM audit_logs WHERE business_id = ?').run(testVisitPhone);
+cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(testVisitPhone);
 
 // 1. Creación directa (Regla de Oro: Siempre CONFIRMED de entrada)
 const apt1 = testSaveAppointment(testVisitPhone, {
@@ -1848,6 +1851,7 @@ assert(completedList.length === 1 && completedList[0].id === apt1.id, "CASO 15: 
 // Limpieza de datos de prueba
 cleanDb.prepare('DELETE FROM appointments WHERE company_phone = ?').run(testVisitPhone);
 cleanDb.prepare('DELETE FROM audit_logs WHERE business_id = ?').run(testVisitPhone);
+cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(testVisitPhone);
 
 // -----------------------------------------------------------------------------
 // TEST 24: Blindaje de Privacidad y Aislamiento de Chats (Gatekeeper & Firewall)
@@ -4147,6 +4151,7 @@ const phoneAttacker = '34699778899';
 const cleanupTest33 = (p) => {
   currentDb.prepare("DELETE FROM appointments WHERE company_phone = ?").run(p);
   currentDb.prepare("DELETE FROM shopping_items WHERE company_phone = ?").run(p);
+  currentDb.prepare("DELETE FROM audit_logs WHERE business_id = ?").run(p);
   currentDb.prepare("DELETE FROM channel_identities WHERE channel_identifier = ?").run(p);
   currentDb.prepare("DELETE FROM companies WHERE phone = ?").run(p);
 };
@@ -6872,6 +6877,352 @@ assert(integrityResult42 && (integrityResult42.integrity_check === 'ok' || integ
 
 cleanupTest42(phoneIncTenantA);
 cleanupTest42(phoneIncTenantB);
+
+console.log("\nTEST 43: Migración Controlada de audit_logs a company_id (Fase 2E-7 — Backfill, Tenant Isolation & Relational Integrity)");
+
+// ─── A. MIGRATION 013: EJECUCIÓN Y REGISTRO ───
+// A1. migration 013 se registra correctamente en TEST con versión 13
+const schemaRow013 = currentDb.prepare("SELECT version, name, applied_at FROM schema_migrations WHERE version = 13").get();
+assert(schemaRow013 && schemaRow013.version === 13, "A1. Migración 013 registrada en schema_migrations con versión 13");
+assert(schemaRow013 && schemaRow013.name === '013_audit_logs_company_id', "A2. Nombre de migración 013 coincide exactamente");
+assert(schemaRow013 && typeof schemaRow013.applied_at === 'string' && schemaRow013.applied_at.length > 10, "A3. Migración 013 tiene timestamp applied_at válido");
+
+// A4 & A5. production sigue con máximo migration 006 (007, 008, 009, 010, 011, 012 y 013 NO registradas)
+const prodDbFor013Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+const prodSchema013 = prodDbFor013Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
+const prodMaxVersion013 = prodDbFor013Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
+prodDbFor013Check.close();
+assert(prodSchema013.length === 0, "A4. DB de producción (data/presuvoz.db) NO tiene registradas las migraciones 007 a 013");
+assert(prodMaxVersion013 === 6, "A5. Versión máxima en DB de producción permanece inalterada en 6");
+
+// A6 & A7. migrations 011 y 012 siguen intactas en test
+const schemaRow011In43 = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 11").get();
+const schemaRow012In43 = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 12").get();
+assert(schemaRow011In43 && schemaRow011In43.name === '011_investment_assets_company_id', "A6. Migración 011 permanece intacta en la base de datos de test");
+assert(schemaRow012In43 && schemaRow012In43.name === '012_fiscal_incidents_company_id', "A7. Migración 012 permanece intacta en la base de datos de test");
+
+// ─── B. BACKFILL DETERMINISTA & CASOS FAIL-CLOSED ───
+// B1..B5. Memoria con datos existentes
+const memDb43B = new DatabaseSync(':memory:');
+initMigrationTable(memDb43B);
+runMigrations(memDb43B, { migrations: MIGRATIONS.slice(0, 12), authorized: true });
+
+// Insertar 2 empresas, facturas y citas, y 3 registros legacy de audit_logs según esquema previo a 013
+memDb43B.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-audit-comp1', '34677440001', 'Empresa Auditoría Alfa S.L.'),
+    ('uuid-audit-comp2', '34677440002', 'Empresa Auditoría Beta S.L.');
+  INSERT INTO invoices (id, company_id, company_phone, client_name, total_amount)
+  VALUES ('INV-43-01', 'uuid-audit-comp1', '34677440001', 'Cliente Alfa', 1210);
+  INSERT INTO appointments (id, company_id, company_phone, client_name, date, time, status)
+  VALUES ('APT-43-01', 'uuid-audit-comp1', '34677440001', 'Cliente Alfa', '2026-10-01', '10:00', 'CONFIRMED');
+  INSERT INTO audit_logs (
+    id, business_id, entity_type, entity_id, action,
+    field_changed, old_value, new_value, changed_by, reason, timestamp
+  ) VALUES
+    ('LOG-BF-01', '34677440001', 'INVOICE', 'INV-43-01', 'UPDATE', 'status', 'DRAFT', 'ISSUED', 'USER_WHATSAPP', 'Facturación completada', '2026-07-01T10:00:00Z'),
+    ('LOG-BF-02', '34677440001', 'APPOINTMENT', 'APT-43-01', 'RESCHEDULE', 'appointment_date', '2026-09-30', '2026-10-01', 'USER_WHATSAPP', 'Petición cliente', '2026-07-15T11:00:00Z'),
+    ('LOG-BF-03', '34677440002', 'COMPANY_PROFILE', 'uuid-audit-comp2', 'UPDATE', 'trade', 'Pintura', 'Reformas', 'USER_WHATSAPP', 'Cambio de actividad', '2026-07-02T12:00:00Z');
+`);
+
+const migRes43 = runMigrations(memDb43B, { migrations: [MIGRATIONS[12]], authorized: true });
+assert(migRes43.appliedCount === 1, "B1. Migración 013 se aplica con éxito sobre base de datos con datos");
+
+const auditRows43 = memDb43B.prepare("SELECT id, company_id, business_id, entity_type, entity_id, action, field_changed, old_value, new_value, changed_by, reason, timestamp FROM audit_logs ORDER BY id ASC").all();
+assert(auditRows43.length === 3, "B2. Recuento de filas se preserva exactamente tras migración (3 filas)");
+assert(auditRows43[0].company_id === 'uuid-audit-comp1' && auditRows43[0].business_id === '34677440001', "B3. Fila 1 migrada con company_id correcto de Empresa 1");
+assert(auditRows43[1].company_id === 'uuid-audit-comp1' && auditRows43[1].business_id === '34677440001', "B4. Fila 2 migrada con company_id correcto de Empresa 1");
+assert(auditRows43[2].company_id === 'uuid-audit-comp2' && auditRows43[2].business_id === '34677440002', "B5. Fila 3 migrada con company_id correcto de Empresa 2");
+
+// B6..B10. Rollback atómico ante registro huérfano
+const memDb43Rollback = new DatabaseSync(':memory:');
+initMigrationTable(memDb43Rollback);
+runMigrations(memDb43Rollback, { migrations: MIGRATIONS.slice(0, 12), authorized: true });
+
+memDb43Rollback.exec(`
+  INSERT INTO companies (id, phone, name) VALUES ('uuid-audit-comp-ok', '34677440001', 'Empresa OK');
+  INSERT INTO audit_logs (
+    id, business_id, entity_type, entity_id, action, timestamp
+  ) VALUES
+    ('LOG-OK-01', '34677440001', 'APPOINTMENT', 'APT-1', 'CREATE', '2026-07-01T10:00:00Z'),
+    ('LOG-ORPHAN-01', '34699999999', 'APPOINTMENT', 'APT-2', 'CREATE', '2026-07-01T11:00:00Z');
+`);
+
+let caughtOrphan013 = false;
+let orphanErrMsg013 = '';
+try {
+  runMigrations(memDb43Rollback, { migrations: [MIGRATIONS[12]], authorized: true });
+} catch (err) {
+  caughtOrphan013 = true;
+  orphanErrMsg013 = err.message;
+}
+assert(caughtOrphan013 === true, "B6. Migración 013 aborta inmediatamente ante log huérfano (fail-closed)");
+assert(orphanErrMsg013.includes('fail-closed') && orphanErrMsg013.includes('huérfano'), "B7. Error descriptivo fail-closed ante log con business_id huérfano");
+
+// Verificar rollback atómico
+const schemaAfterFail013 = memDb43Rollback.prepare("SELECT * FROM schema_migrations WHERE version = 13").get();
+assert(!schemaAfterFail013, "B8. Rollback atómico: Versión 13 NO queda registrada en schema_migrations");
+
+const colsAfterFail013 = memDb43Rollback.prepare('PRAGMA table_info("audit_logs")').all();
+assert(!colsAfterFail013.some(c => c.name === 'company_id'), "B9. Rollback atómico: La tabla audit_logs queda exactamente como estaba");
+
+const tempTableCheck013 = memDb43Rollback.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_logs_new'").get();
+assert(!tempTableCheck013, "B10. Rollback atómico: No quedan tablas temporales (audit_logs_new)");
+
+// B11..B12. Fallo ante ambigüedad de companies con el mismo teléfono
+const memDb43Ambig = new DatabaseSync(':memory:');
+initMigrationTable(memDb43Ambig);
+runMigrations(memDb43Ambig, { migrations: MIGRATIONS.slice(0, 12), authorized: true });
+memDb43Ambig.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-audit-ambig-1', '34677000088', 'Empresa Ambigua 1'),
+    ('uuid-audit-ambig-2', '+34 677 00 00 88', 'Empresa Ambigua 2');
+  INSERT INTO audit_logs (
+    id, business_id, entity_type, entity_id, action, timestamp
+  ) VALUES
+    ('LOG-AMBIG-01', '34677000088', 'APPOINTMENT', 'APT-AMBIG-1', 'CREATE', '2026-07-01T10:00:00Z');
+`);
+let caughtAmbig013 = false;
+try {
+  runMigrations(memDb43Ambig, { migrations: [MIGRATIONS[12]], authorized: true });
+} catch (err) {
+  caughtAmbig013 = true;
+  assert(err.message.includes('Ambigüedad crítica'), "B11. Fail-closed: Múltiples empresas ambiguas provocan aborto y rollback");
+}
+assert(caughtAmbig013 === true, "B12. Migración 013 aborta ante ambigüedad en companies");
+
+// B13..B14. Fallo ante inconsistencia cross-tenant entre log y entidad asociada (ej. invoice o appointment)
+const memDb43CrossTenant = new DatabaseSync(':memory:');
+initMigrationTable(memDb43CrossTenant);
+runMigrations(memDb43CrossTenant, { migrations: MIGRATIONS.slice(0, 12), authorized: true });
+memDb43CrossTenant.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-audit-cross-1', '34677440091', 'Empresa Alpha Log'),
+    ('uuid-audit-cross-2', '34677440092', 'Empresa Beta Log');
+  INSERT INTO invoices (id, company_id, company_phone, client_name, total_amount)
+  VALUES ('INV-BETA-43', 'uuid-audit-cross-2', '34677440092', 'Cliente Beta', 1000);
+  INSERT INTO audit_logs (
+    id, business_id, entity_type, entity_id, action, timestamp
+  ) VALUES
+    ('LOG-CROSS-01', '34677440091', 'INVOICE', 'INV-BETA-43', 'UPDATE', '2026-07-01T10:00:00Z');
+`);
+let caughtCrossTenant013 = false;
+try {
+  runMigrations(memDb43CrossTenant, { migrations: [MIGRATIONS[12]], authorized: true });
+} catch (err) {
+  caughtCrossTenant013 = true;
+  assert(err.message.includes('Inconsistencia cross-tenant'), "B13. Fail-closed: Inconsistencia cross-tenant entre log y factura provoca aborto");
+}
+assert(caughtCrossTenant013 === true, "B14. Migración 013 aborta ante inconsistencia cross-tenant");
+
+// ─── C. PRESERVACIÓN DE DATOS DE AUDIT LOGS ───
+assert(auditRows43[0].entity_type === 'INVOICE' && auditRows43[0].entity_id === 'INV-43-01', "C1. entity_type y entity_id preservados intactos");
+assert(auditRows43[0].action === 'UPDATE' && auditRows43[0].field_changed === 'status', "C2. action y field_changed preservados intactos");
+assert(auditRows43[0].old_value === 'DRAFT' && auditRows43[0].new_value === 'ISSUED', "C3. old_value y new_value preservados intactos");
+assert(auditRows43[0].changed_by === 'USER_WHATSAPP' && auditRows43[0].reason === 'Facturación completada', "C4. changed_by y reason preservados intactos");
+
+// ─── D. AISLAMIENTO MULTI-TENANT EN TEST DB ───
+const phoneAuditTenantA = '34677441101';
+const phoneAuditTenantB = '34677441102';
+
+const cleanupTest43 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM audit_logs WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_incidents WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM investment_assets WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM expense_payments WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM purchase_invoices WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM business_tax_profiles WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM fiscal_periods WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM invoices WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM appointments WHERE company_id = ? OR company_phone = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+
+cleanupTest43(phoneAuditTenantA);
+cleanupTest43(phoneAuditTenantB);
+
+const compAuditA = createCompanyWithIdentity({
+  name: 'Empresa Alpha Auditoría S.L.',
+  phone: phoneAuditTenantA,
+  trade: 'Construcción'
+});
+const contextAuditA = resolveAuthenticatedContext('whatsapp', phoneAuditTenantA);
+
+const compAuditB = createCompanyWithIdentity({
+  name: 'Empresa Beta Auditoría S.L.',
+  phone: phoneAuditTenantB,
+  trade: 'Fontanería'
+});
+const contextAuditB = resolveAuthenticatedContext('whatsapp', phoneAuditTenantB);
+
+// D1 & D2. Cada tenant registra su evento en audit_logs
+const logA_43 = recordAuditLog({
+  companyContextOrId: contextAuditA,
+  entityType: 'INVOICE',
+  entityId: 'INV-43-A01',
+  action: 'CREATE',
+  fieldChanged: 'status',
+  oldValue: null,
+  newValue: 'DRAFT',
+  reason: 'Creación presupuesto facturado'
+});
+assert(logA_43 && logA_43.id, "D1. recordAuditLog de Tenant A registra su evento de auditoría");
+
+const logB_43 = recordAuditLog({
+  companyContextOrId: contextAuditB,
+  entityType: 'APPOINTMENT',
+  entityId: 'APT-43-B01',
+  action: 'RESCHEDULE',
+  fieldChanged: 'appointment_time',
+  oldValue: '10:00',
+  newValue: '16:00',
+  reason: 'Cambio de hora por cliente'
+});
+assert(logB_43 && logB_43.id, "D2. recordAuditLog de Tenant B registra su evento de auditoría");
+
+// D3. Cross-Tenant Read: getAuditLog(contextB, idA) devuelve null
+const crossReadAfromB_43 = getAuditLog(contextAuditB, logA_43.id);
+assert(crossReadAfromB_43 === null, "D3. Cross-Tenant Read: getAuditLog(tenantB, idA) devuelve null (Zero-Disclosure)");
+
+// D4. Cross-Tenant Read: getAuditLog(contextA, idB) devuelve null
+const crossReadBfromA_43 = getAuditLog(contextAuditA, logB_43.id);
+assert(crossReadBfromA_43 === null, "D4. Cross-Tenant Read: getAuditLog(tenantA, idB) devuelve null (Zero-Disclosure)");
+
+// D5. Lectura legítima de Tenant A
+const legitReadA_43 = getAuditLog(contextAuditA, logA_43.id);
+assert(legitReadA_43 !== null && legitReadA_43.id === logA_43.id && legitReadA_43.companyId === compAuditA.companyId, "D5. Lectura legítima: getAuditLog(tenantA, idA) recupera su log");
+
+// D6. Lectura legítima de Tenant B
+const legitReadB_43 = getAuditLog(contextAuditB, logB_43.id);
+assert(legitReadB_43 !== null && legitReadB_43.id === logB_43.id && legitReadB_43.companyId === compAuditB.companyId, "D6. Lectura legítima: getAuditLog(tenantB, idB) recupera su log");
+
+// D7. listAuditLogs(contextA) solo retorna logs de Tenant A
+const listLogA_43 = listAuditLogs(contextAuditA);
+assert(listLogA_43.every(l => l.companyId === compAuditA.companyId) && listLogA_43.some(l => l.id === logA_43.id), "D7. listAuditLogs(contextA) solo retorna logs del Tenant A");
+
+// D8. listAuditLogs(contextB) solo retorna logs de Tenant B
+const listLogB_43 = listAuditLogs(contextAuditB);
+assert(listLogB_43.every(l => l.companyId === compAuditB.companyId) && listLogB_43.some(l => l.id === logB_43.id), "D8. listAuditLogs(contextB) solo retorna logs del Tenant B");
+
+// D9. Historial de citas con filtro de tenant: getAppointmentHistory
+const createdAptA43 = testSaveAppointment(contextAuditA, {
+  clientName: 'Cliente Cita Audit A',
+  date: '2026-10-10',
+  time: '10:00',
+  notes: 'Revisión obra'
+});
+assert(createdAptA43 && createdAptA43.id, "D9. Cita creada con éxito para Tenant A");
+const historyA_43 = testGetAppointmentHistory(contextAuditA, createdAptA43.id);
+assert(historyA_43.length > 0 && historyA_43.every(h => h.companyId === compAuditA.companyId || h.businessId === phoneAuditTenantA), "D10. getAppointmentHistory(contextA) retorna historial perteneciente a Tenant A");
+const crossHistoryB_43 = testGetAppointmentHistory(contextAuditB, createdAptA43.id);
+assert(crossHistoryB_43.length === 0, "D11. Cross-tenant appointment history: Tenant B no puede ver historial de cita de Tenant A");
+
+// ─── E. INYECCIÓN DE MODELO (DEFENSA FAIL-CLOSED) ───
+// E1..E4. Gemini spoofing companyId / businessId en payload es neutralizado
+const maliciousAiAuditLog_43 = {
+  companyContextOrId: contextAuditA,
+  companyId: compAuditB.companyId,
+  company_id: compAuditB.companyId,
+  businessId: phoneAuditTenantB,
+  business_id: phoneAuditTenantB,
+  entityType: 'INVOICE',
+  entityId: 'INV-43-A01',
+  action: 'UPDATE',
+  fieldChanged: 'spoofed_field',
+  oldValue: 'valA',
+  newValue: 'valB',
+  reason: 'Inyección de log spoofed'
+};
+const savedInjected_43 = recordAuditLog(maliciousAiAuditLog_43);
+assert(savedInjected_43.companyId === compAuditA.companyId, "E1. Modelo injection defendida: companyId de A se mantiene como autoridad");
+assert(savedInjected_43.businessId === phoneAuditTenantA, "E2. Modelo injection defendida: businessId de A se mantiene sincronizado con phoneA");
+
+const verifyInjectedLogInDb_43 = currentDb.prepare("SELECT company_id, business_id FROM audit_logs WHERE id = ?").get(savedInjected_43.id);
+assert(verifyInjectedLogInDb_43.company_id === compAuditA.companyId && verifyInjectedLogInDb_43.business_id === phoneAuditTenantA, "E3. En SQLite, el log inyectado pertenece legítimamente a Tenant A");
+
+const readInjectedLogFromB_43 = getAuditLog(contextAuditB, savedInjected_43.id);
+assert(readInjectedLogFromB_43 === null, "E4. Tenant B permanece completamente protegido contra log spoofed");
+
+// ─── F. ROBUSTEZ DE UUID v4 ───
+assert(isUuid(savedInjected_43.companyId), "F1. companyId retornado es un UUID v4 canónico");
+assert(savedInjected_43.companyId.length === 36 && savedInjected_43.companyId.includes('-'), "F2. companyId tiene formato UUID con guiones intactos (36 caracteres)");
+
+const sqliteRowLogA_43 = currentDb.prepare("SELECT company_id FROM audit_logs WHERE id = ?").get(logA_43.id);
+assert(sqliteRowLogA_43 && sqliteRowLogA_43.company_id === compAuditA.companyId, "F3. SQLite almacena el UUID con guiones intactos sin regex stripping");
+
+// ─── G. CLAVE FORÁNEA & ON DELETE RESTRICT ───
+// G1. Inserción con company_id inexistente lanza FK constraint violation
+let caughtFkInexistenteLog_43 = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO audit_logs (id, company_id, business_id, entity_type, entity_id, action, timestamp)
+    VALUES ('fake-id-log', '00000000-0000-4000-8000-000000000099', '34600999999', 'INVOICE', 'INV-FAKE', 'CREATE', '2026-07-01T10:00:00Z');
+  `).run();
+} catch (err) {
+  caughtFkInexistenteLog_43 = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "G1. Violación de Foreign Key hacia companies(id) detectada");
+}
+assert(caughtFkInexistenteLog_43 === true, "G2. SQLite rechaza inserción en audit_logs con company inexistente");
+
+// G3. Inserción con company_id NULL es rechazada
+let caughtNullCidLog_43 = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO audit_logs (id, company_id, business_id, entity_type, entity_id, action, timestamp)
+    VALUES ('fake-id-log2', NULL, '34600999999', 'INVOICE', 'INV-FAKE', 'CREATE', '2026-07-01T10:00:00Z');
+  `).run();
+} catch (err) {
+  caughtNullCidLog_43 = true;
+  assert(err.message.includes('NOT NULL constraint failed'), "G3. NOT NULL constraint en company_id detectada");
+}
+assert(caughtNullCidLog_43 === true, "G4. Inserción con company_id NULL es rechazada");
+
+// G5. ON DELETE RESTRICT previene el borrado de empresa con registros de auditoría
+let caughtRestrictDeleteLog_43 = false;
+try {
+  currentDb.prepare("DELETE FROM companies WHERE id = ?").run(compAuditB.companyId);
+} catch (err) {
+  caughtRestrictDeleteLog_43 = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "G5. ON DELETE RESTRICT previene el borrado de empresa con logs registrados");
+}
+assert(caughtRestrictDeleteLog_43 === true, "G6. La empresa no puede ser eliminada mientras tenga registros en audit_logs");
+
+// ─── H. COMPATIBILIDAD HACIA ATRÁS (LEGACY ADAPTER & DUAL-WRITE) ───
+// H1. getAuditLog(phone, logId) funciona vía legacy adapter
+const legacyReadLogA_43 = getAuditLog(phoneAuditTenantA, logA_43.id);
+assert(legacyReadLogA_43 !== null && legacyReadLogA_43.companyId === compAuditA.companyId, "H1. getAuditLog(phone) funciona vía legacy adapter");
+
+// H2. listAuditLogs(phone) funciona vía legacy adapter
+const legacyListLogA_43 = listAuditLogs(phoneAuditTenantA);
+assert(legacyListLogA_43.length >= 1 && legacyListLogA_43.some(l => l.id === logA_43.id), "H2. listAuditLogs(phone) funciona vía legacy adapter");
+
+// H3. recordAuditLog({ businessId: phone, ... }) registra y preserva dual-write
+const legacyRecordLogA_43 = recordAuditLog({
+  businessId: phoneAuditTenantA,
+  entityType: 'INVOICE',
+  entityId: 'INV-43-LEGACY',
+  action: 'UPDATE',
+  fieldChanged: 'notes',
+  oldValue: 'nota vieja',
+  newValue: 'nota nueva'
+});
+assert(legacyRecordLogA_43 && legacyRecordLogA_43.id, "H3. recordAuditLog({ businessId: phone }) registra con éxito");
+assert(legacyRecordLogA_43.companyId === compAuditA.companyId && legacyRecordLogA_43.businessId === phoneAuditTenantA, "H4. Dual-write preservado: company_id y business_id sincronizados");
+
+// ─── I. INTEGRIDAD RELACIONAL FINAL ───
+const fkViolations43 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult43 = currentDb.prepare("PRAGMA integrity_check;").get();
+assert(fkViolations43.length === 0, "I1. PRAGMA foreign_key_check = 0 violaciones en base de datos de test");
+assert(integrityResult43 && (integrityResult43.integrity_check === 'ok' || integrityResult43.integrity_check === 'OK'), "I2. PRAGMA integrity_check = ok en base de datos de test");
+
+cleanupTest43(phoneAuditTenantA);
+cleanupTest43(phoneAuditTenantB);
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

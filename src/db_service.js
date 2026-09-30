@@ -2090,14 +2090,31 @@ export function getAppointmentHistory(companyContextOrIdOrPhone, appointmentId) 
   const companyId = tenant?.companyId;
   const cleanPhone = tenant?.phone;
 
-  return db.prepare(`
-    SELECT * FROM audit_logs
-    WHERE (business_id = ? OR business_id = ?)
-      AND entity_type = 'APPOINTMENT'
-      AND entity_id = ?
-    ORDER BY timestamp ASC
-  `).all(companyId || cleanPhone, cleanPhone, appointmentId).map(r => ({
+  const cols = db.prepare('PRAGMA table_info("audit_logs")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let rows = [];
+  if (hasCompanyIdCol && companyId) {
+    rows = db.prepare(`
+      SELECT * FROM audit_logs
+      WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?))
+        AND entity_type = 'APPOINTMENT'
+        AND entity_id = ?
+      ORDER BY timestamp ASC
+    `).all(companyId, cleanPhone || '', appointmentId);
+  } else {
+    rows = db.prepare(`
+      SELECT * FROM audit_logs
+      WHERE (business_id = ? OR business_id = ?)
+        AND entity_type = 'APPOINTMENT'
+        AND entity_id = ?
+      ORDER BY timestamp ASC
+    `).all(companyId || cleanPhone, cleanPhone, appointmentId);
+  }
+
+  return rows.map(r => ({
     id: r.id,
+    companyId: r.company_id || companyId,
     businessId: r.business_id,
     entityType: r.entity_type,
     entityId: r.entity_id,
@@ -4851,11 +4868,12 @@ export function deleteFiscalIncident(companyContextOrId, incidentId) {
 }
 
 /**
- * Trazabilidad y Auditoría Fiscal (Audit Log)
+ * Trazabilidad y Auditoría Fiscal (Audit Log) — Tenant Scoped
  */
 export function recordAuditLog({
   companyContextOrId = null,
   businessId = null,
+  companyId = null,
   entityType,
   entityId,
   action,
@@ -4865,38 +4883,150 @@ export function recordAuditLog({
   changedBy = 'USER_WHATSAPP',
   reason = null
 }) {
-  const target = companyContextOrId || businessId;
-  const cleanId = resolveLegacyBusinessId(target) || (typeof target === 'string' && !isUuid(target) && !target.includes('-') ? target.replace(/\D/g, '') : null);
-  if (!cleanId) return null;
+  const target = companyContextOrId || companyId || businessId;
+  if (!target) return null;
+
+  let resolvedCompanyId = null;
+  let cleanPhone = null;
+
+  const tenant = resolveCanonicalFiscalTenant(target);
+  if (tenant && tenant.companyId) {
+    resolvedCompanyId = tenant.companyId;
+    cleanPhone = tenant.phone;
+  } else {
+    const compTenant = resolveCompanyTenant(target);
+    if (compTenant && compTenant.companyId) {
+      resolvedCompanyId = compTenant.companyId;
+      cleanPhone = compTenant.phone;
+    } else if (typeof target === 'string') {
+      const trimmed = target.trim();
+      if (isUuid(trimmed)) {
+        const comp = db.prepare('SELECT id, phone FROM companies WHERE id = ?').get(trimmed);
+        if (comp) {
+          resolvedCompanyId = comp.id;
+          cleanPhone = comp.phone ? String(comp.phone).replace(/\D/g, '') : '';
+        }
+      } else {
+        const clean = trimmed.replace(/\D/g, '');
+        if (clean) {
+          let comp = db.prepare('SELECT id, phone FROM companies WHERE phone = ?').get(clean);
+          if (!comp) {
+            saveCompany(clean);
+            comp = db.prepare('SELECT id, phone FROM companies WHERE phone = ?').get(clean);
+          }
+          if (comp) {
+            resolvedCompanyId = comp.id;
+            cleanPhone = String(comp.phone).replace(/\D/g, '');
+          }
+        }
+      }
+    }
+  }
+
+  if (!resolvedCompanyId) return null;
+
   const id = `LOG-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
   const now = new Date().toISOString();
 
-  db.prepare(`
-    INSERT INTO audit_logs (id, business_id, entity_type, entity_id, action, field_changed, old_value, new_value, changed_by, reason, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    id,
-    cleanId,
-    entityType || 'FISCAL_RECORD',
-    entityId || '',
-    action || 'UPDATE',
-    fieldChanged,
-    oldValue ? String(oldValue) : null,
-    newValue ? String(newValue) : null,
-    changedBy,
-    reason,
-    now
-  );
-  return { id, timestamp: now };
+  const cols = db.prepare('PRAGMA table_info("audit_logs")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  if (hasCompanyIdCol) {
+    db.prepare(`
+      INSERT INTO audit_logs (
+        id, company_id, business_id, entity_type, entity_id,
+        action, field_changed, old_value, new_value, changed_by, reason, timestamp
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      resolvedCompanyId,
+      cleanPhone || resolvedCompanyId,
+      entityType || 'FISCAL_RECORD',
+      entityId || '',
+      action || 'UPDATE',
+      fieldChanged,
+      oldValue != null ? String(oldValue) : null,
+      newValue != null ? String(newValue) : null,
+      changedBy,
+      reason,
+      now
+    );
+  } else {
+    db.prepare(`
+      INSERT INTO audit_logs (
+        id, business_id, entity_type, entity_id,
+        action, field_changed, old_value, new_value, changed_by, reason, timestamp
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      cleanPhone || resolvedCompanyId,
+      entityType || 'FISCAL_RECORD',
+      entityId || '',
+      action || 'UPDATE',
+      fieldChanged,
+      oldValue != null ? String(oldValue) : null,
+      newValue != null ? String(newValue) : null,
+      changedBy,
+      reason,
+      now
+    );
+  }
+
+  return { id, companyId: resolvedCompanyId, businessId: cleanPhone, timestamp: now };
 }
 
 export function listAuditLogs(companyContextOrId, { entityType, entityId } = {}) {
   if (!companyContextOrId) return [];
-  const cleanId = resolveLegacyBusinessId(companyContextOrId) || (typeof companyContextOrId === 'string' && !isUuid(companyContextOrId) && !companyContextOrId.includes('-') ? companyContextOrId.replace(/\D/g, '') : null);
-  if (!cleanId) return [];
 
-  let query = 'SELECT * FROM audit_logs WHERE business_id = ?';
-  const params = [cleanId];
+  let resolvedCompanyId = null;
+  let cleanPhone = null;
+
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (tenant && tenant.companyId) {
+    resolvedCompanyId = tenant.companyId;
+    cleanPhone = tenant.phone;
+  } else {
+    const compTenant = resolveCompanyTenant(companyContextOrId);
+    if (compTenant && compTenant.companyId) {
+      resolvedCompanyId = compTenant.companyId;
+      cleanPhone = compTenant.phone;
+    } else if (typeof companyContextOrId === 'string') {
+      const trimmed = companyContextOrId.trim();
+      if (isUuid(trimmed)) {
+        const comp = db.prepare('SELECT id, phone FROM companies WHERE id = ?').get(trimmed);
+        if (comp) {
+          resolvedCompanyId = comp.id;
+          cleanPhone = comp.phone ? String(comp.phone).replace(/\D/g, '') : '';
+        }
+      } else {
+        const clean = trimmed.replace(/\D/g, '');
+        if (clean) {
+          const comp = db.prepare('SELECT id, phone FROM companies WHERE phone = ?').get(clean);
+          if (comp) {
+            resolvedCompanyId = comp.id;
+            cleanPhone = String(comp.phone).replace(/\D/g, '');
+          }
+        }
+      }
+    }
+  }
+
+  if (!resolvedCompanyId) return [];
+
+  const cols = db.prepare('PRAGMA table_info("audit_logs")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let query = '';
+  const params = [];
+
+  if (hasCompanyIdCol) {
+    query = 'SELECT * FROM audit_logs WHERE (company_id = ? OR (company_id IS NULL AND business_id = ?))';
+    params.push(resolvedCompanyId, cleanPhone || '');
+  } else {
+    query = 'SELECT * FROM audit_logs WHERE business_id = ?';
+    params.push(cleanPhone || resolvedCompanyId);
+  }
+
   if (entityType) {
     query += ' AND entity_type = ?';
     params.push(entityType);
@@ -4906,7 +5036,110 @@ export function listAuditLogs(companyContextOrId, { entityType, entityId } = {})
     params.push(entityId);
   }
   query += ' ORDER BY timestamp DESC';
-  return db.prepare(query).all(...params);
+
+  const rows = db.prepare(query).all(...params);
+  return rows.map(r => ({
+    ...r,
+    id: r.id,
+    companyId: r.company_id || resolvedCompanyId,
+    company_id: r.company_id || resolvedCompanyId,
+    businessId: r.business_id || cleanPhone,
+    business_id: r.business_id || cleanPhone,
+    entityType: r.entity_type,
+    entity_type: r.entity_type,
+    entityId: r.entity_id,
+    entity_id: r.entity_id,
+    action: r.action,
+    fieldChanged: r.field_changed,
+    field_changed: r.field_changed,
+    oldValue: r.old_value,
+    old_value: r.old_value,
+    newValue: r.new_value,
+    new_value: r.new_value,
+    changedBy: r.changed_by,
+    changed_by: r.changed_by,
+    reason: r.reason,
+    timestamp: r.timestamp
+  }));
+}
+
+export function getAuditLog(companyContextOrId, logId) {
+  if (logId === undefined) {
+    console.warn("🛑 [Seguridad Tenant] getAuditLog invocado sin tenant context obligatorio.");
+    return null;
+  }
+  if (!companyContextOrId || !logId) return null;
+
+  let resolvedCompanyId = null;
+  let cleanPhone = null;
+
+  const tenant = resolveCanonicalFiscalTenant(companyContextOrId);
+  if (tenant && tenant.companyId) {
+    resolvedCompanyId = tenant.companyId;
+    cleanPhone = tenant.phone;
+  } else {
+    const compTenant = resolveCompanyTenant(companyContextOrId);
+    if (compTenant && compTenant.companyId) {
+      resolvedCompanyId = compTenant.companyId;
+      cleanPhone = compTenant.phone;
+    } else if (typeof companyContextOrId === 'string') {
+      const trimmed = companyContextOrId.trim();
+      if (isUuid(trimmed)) {
+        const comp = db.prepare('SELECT id, phone FROM companies WHERE id = ?').get(trimmed);
+        if (comp) {
+          resolvedCompanyId = comp.id;
+          cleanPhone = comp.phone ? String(comp.phone).replace(/\D/g, '') : '';
+        }
+      } else {
+        const clean = trimmed.replace(/\D/g, '');
+        if (clean) {
+          const comp = db.prepare('SELECT id, phone FROM companies WHERE phone = ?').get(clean);
+          if (comp) {
+            resolvedCompanyId = comp.id;
+            cleanPhone = String(comp.phone).replace(/\D/g, '');
+          }
+        }
+      }
+    }
+  }
+
+  if (!resolvedCompanyId) return null;
+
+  const cols = db.prepare('PRAGMA table_info("audit_logs")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let row = null;
+  if (hasCompanyIdCol) {
+    row = db.prepare('SELECT * FROM audit_logs WHERE id = ? AND (company_id = ? OR (company_id IS NULL AND business_id = ?))').get(logId, resolvedCompanyId, cleanPhone || '');
+  } else {
+    row = db.prepare('SELECT * FROM audit_logs WHERE id = ? AND business_id = ?').get(logId, cleanPhone || resolvedCompanyId);
+  }
+
+  if (!row) return null;
+
+  return {
+    ...row,
+    id: row.id,
+    companyId: row.company_id || resolvedCompanyId,
+    company_id: row.company_id || resolvedCompanyId,
+    businessId: row.business_id || cleanPhone,
+    business_id: row.business_id || cleanPhone,
+    entityType: row.entity_type,
+    entity_type: row.entity_type,
+    entityId: row.entity_id,
+    entity_id: row.entity_id,
+    action: row.action,
+    fieldChanged: row.field_changed,
+    field_changed: row.field_changed,
+    oldValue: row.old_value,
+    old_value: row.old_value,
+    newValue: row.new_value,
+    new_value: row.new_value,
+    changedBy: row.changed_by,
+    changed_by: row.changed_by,
+    reason: row.reason,
+    timestamp: row.timestamp
+  };
 }
 
 
