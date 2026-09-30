@@ -2925,10 +2925,13 @@ export function renameClientBudget(phone, budgetIdOrQuery, newNameWithBadge) {
 /**
  * Registra un mensaje entrante en la tabla messages de SQLite con estado inicial RECEIVED.
  * Si ya existía por whatsapp_message_id, no lo duplica.
+ * Soporta companyId / companyContext para mensajes autenticados, y NULL para no autenticados.
  */
 export function recordIncomingMessage({
   id = null,
   whatsappMessageId,
+  companyContextOrId = null,
+  companyId = null,
   businessId = null,
   chatId,
   senderPhone,
@@ -2939,37 +2942,135 @@ export function recordIncomingMessage({
   const msgId = id || `msg_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
   const now = new Date().toISOString();
 
-  const stmt = db.prepare(`
-    INSERT INTO messages (id, whatsapp_message_id, business_id, chat_id, sender_phone, content, timestamp, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(whatsapp_message_id) DO NOTHING
-  `);
+  // Model injection defense: resolver companyId canónico estrictamente desde la autoridad
+  let canonicalCompanyId = null;
+  const authTarget = companyContextOrId || companyId;
+  if (authTarget) {
+    const tenant = resolveCompanyTenant(authTarget);
+    if (tenant && tenant.companyId) {
+      canonicalCompanyId = tenant.companyId;
+    } else if (typeof authTarget === 'string' && isUuid(authTarget.trim())) {
+      const comp = db.prepare('SELECT id FROM companies WHERE id = ?').get(authTarget.trim());
+      if (comp) canonicalCompanyId = comp.id;
+    }
+  }
 
-  stmt.run(msgId, whatsappMessageId, businessId || '', chatId || '', senderPhone || '', content || '', now, status);
+  const cols = db.prepare('PRAGMA table_info("messages")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  if (hasCompanyIdCol) {
+    const stmt = db.prepare(`
+      INSERT INTO messages (
+        id, whatsapp_message_id, company_id, business_id,
+        chat_id, sender_phone, content, timestamp, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(whatsapp_message_id) DO NOTHING
+    `);
+    stmt.run(
+      msgId,
+      whatsappMessageId,
+      canonicalCompanyId,
+      businessId || '',
+      chatId || '',
+      senderPhone || '',
+      content || '',
+      now,
+      status
+    );
+  } else {
+    const stmt = db.prepare(`
+      INSERT INTO messages (
+        id, whatsapp_message_id, business_id,
+        chat_id, sender_phone, content, timestamp, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(whatsapp_message_id) DO NOTHING
+    `);
+    stmt.run(
+      msgId,
+      whatsappMessageId,
+      businessId || '',
+      chatId || '',
+      senderPhone || '',
+      content || '',
+      now,
+      status
+    );
+  }
+
   return getMessageByWhatsappId(whatsappMessageId);
 }
 
 /**
  * Actualiza el estado de procesamiento de un mensaje en SQLite:
- * RECEIVED -> QUEUED -> PROCESSING -> PROCESSED (o FAILED)
+ * RECEIVED -> QUEUED -> PROCESSING -> PROCESSED (o FAILED / REJECTED)
+ * Soporta llamadas técnicas de gateway (wamId, status) o tenant-scoped (context, wamId, status).
  */
-export function updateMessageStatus(whatsappMessageId, status) {
-  if (!whatsappMessageId) return;
-  const stmt = db.prepare('UPDATE messages SET status = ? WHERE whatsapp_message_id = ?');
-  stmt.run(status, whatsappMessageId);
+export function updateMessageStatus(companyContextOrWamId, whatsappMessageIdOrStatus, maybeStatus = null) {
+  let whatsappMessageId = null;
+  let status = null;
+  let targetCompanyId = null;
+
+  if (maybeStatus !== null) {
+    // Llamada tenant-scoped: updateMessageStatus(context, wamId, status)
+    const tenant = resolveCompanyTenant(companyContextOrWamId);
+    targetCompanyId = tenant?.companyId || (typeof companyContextOrWamId === 'string' && isUuid(companyContextOrWamId.trim()) ? companyContextOrWamId.trim() : null);
+    whatsappMessageId = whatsappMessageIdOrStatus;
+    status = maybeStatus;
+  } else {
+    // Llamada técnica interna de gateway: updateMessageStatus(wamId, status)
+    whatsappMessageId = companyContextOrWamId;
+    status = whatsappMessageIdOrStatus;
+  }
+
+  if (!whatsappMessageId || !status) return false;
+
+  const cols = db.prepare('PRAGMA table_info("messages")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  if (targetCompanyId && hasCompanyIdCol) {
+    const res = db.prepare('UPDATE messages SET status = ? WHERE whatsapp_message_id = ? AND company_id = ?').run(status, whatsappMessageId, targetCompanyId);
+    return res.changes > 0;
+  } else {
+    const res = db.prepare('UPDATE messages SET status = ? WHERE whatsapp_message_id = ?').run(status, whatsappMessageId);
+    return res.changes > 0;
+  }
 }
 
 /**
- * Obtiene un mensaje por su whatsapp_message_id
+ * Obtiene un mensaje por su whatsapp_message_id.
+ * Soporta llamada interna (wamId) o tenant-scoped con Zero-Disclosure (context, wamId).
  */
-export function getMessageByWhatsappId(whatsappMessageId) {
+export function getMessageByWhatsappId(companyContextOrWamId, maybeWamId = null) {
+  let whatsappMessageId = null;
+  let targetCompanyId = null;
+
+  if (maybeWamId !== null) {
+    const tenant = resolveCompanyTenant(companyContextOrWamId);
+    targetCompanyId = tenant?.companyId || (typeof companyContextOrWamId === 'string' && isUuid(companyContextOrWamId.trim()) ? companyContextOrWamId.trim() : null);
+    whatsappMessageId = maybeWamId;
+  } else {
+    whatsappMessageId = companyContextOrWamId;
+  }
+
   if (!whatsappMessageId) return null;
+
+  const cols = db.prepare('PRAGMA table_info("messages")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
   const stmt = db.prepare('SELECT * FROM messages WHERE whatsapp_message_id = ?');
   const row = stmt.get(whatsappMessageId);
   if (!row) return null;
+
+  // Zero-Disclosure: si se solicitó con ámbito tenant y no pertenece a dicho tenant -> null
+  if (targetCompanyId && hasCompanyIdCol && row.company_id !== targetCompanyId) {
+    return null;
+  }
+
   return {
     id: row.id,
     whatsappMessageId: row.whatsapp_message_id,
+    companyId: row.company_id || null,
+    company_id: row.company_id || null,
     businessId: row.business_id,
     chatId: row.chat_id,
     senderPhone: row.sender_phone,
@@ -2980,7 +3081,58 @@ export function getMessageByWhatsappId(whatsappMessageId) {
 }
 
 /**
- * Comprueba si un mensaje ya está siendo procesado o ya fue procesado con éxito
+ * Obtiene un mensaje de forma tenant-scoped con Zero-Disclosure garantizado.
+ */
+export function getMessage(companyContextOrId, messageIdOrWamId) {
+  if (messageIdOrWamId === undefined) {
+    console.warn("🛑 [Seguridad Tenant] getMessage invocado sin tenant context obligatorio. Retornando null.");
+    return null;
+  }
+  if (!companyContextOrId || !messageIdOrWamId) return null;
+
+  const tenant = resolveCompanyTenant(companyContextOrId);
+  const companyId = tenant?.companyId || (typeof companyContextOrId === 'string' && isUuid(companyContextOrId.trim()) ? companyContextOrId.trim() : null);
+  if (!companyId) return null;
+
+  const cols = db.prepare('PRAGMA table_info("messages")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  if (!hasCompanyIdCol) {
+    const row = db.prepare('SELECT * FROM messages WHERE id = ? OR whatsapp_message_id = ?').get(messageIdOrWamId, messageIdOrWamId);
+    if (!row) return null;
+    return {
+      id: row.id,
+      whatsappMessageId: row.whatsapp_message_id,
+      companyId: null,
+      company_id: null,
+      businessId: row.business_id,
+      chatId: row.chat_id,
+      senderPhone: row.sender_phone,
+      content: row.content,
+      timestamp: row.timestamp,
+      status: row.status
+    };
+  }
+
+  const row = db.prepare('SELECT * FROM messages WHERE (id = ? OR whatsapp_message_id = ?) AND company_id = ?').get(messageIdOrWamId, messageIdOrWamId, companyId);
+  if (!row) return null;
+
+  return {
+    id: row.id,
+    whatsappMessageId: row.whatsapp_message_id,
+    companyId: row.company_id,
+    company_id: row.company_id,
+    businessId: row.business_id,
+    chatId: row.chat_id,
+    senderPhone: row.sender_phone,
+    content: row.content,
+    timestamp: row.timestamp,
+    status: row.status
+  };
+}
+
+/**
+ * Comprueba si un mensaje ya está siendo procesado, ya fue procesado o fue rechazado
  * para evitar ejecuciones duplicadas en caso de reenvíos de WhatsApp/API.
  */
 export function isMessageAlreadyProcessed(whatsappMessageId) {
@@ -2988,19 +3140,63 @@ export function isMessageAlreadyProcessed(whatsappMessageId) {
   const stmt = db.prepare('SELECT status FROM messages WHERE whatsapp_message_id = ?');
   const row = stmt.get(whatsappMessageId);
   if (!row) return false;
-  return row.status === 'PROCESSING' || row.status === 'PROCESSED';
+  return row.status === 'PROCESSING' || row.status === 'PROCESSED' || row.status === 'REJECTED';
 }
 
 /**
- * Lista los mensajes recientes de un chat para auditoría y debug
+ * Lista los mensajes recientes para auditoría y debug con aislamiento tenant-scoped.
+ * Si se pasa companyContext o UUID, aísla estrictamente por company_id.
+ * Soporta firma legacy: listRecentMessages(chatId, limit)
  */
-export function listRecentMessages(chatId, limit = 50) {
-  if (!chatId) return [];
-  const stmt = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?');
-  const rows = stmt.all(chatId, limit);
+export function listRecentMessages(companyContextOrChatId, limitOrChatId = 50, maybeLimit = 50) {
+  if (!companyContextOrChatId) return [];
+
+  let companyId = null;
+  let chatId = null;
+  let limit = 50;
+
+  const tenant = resolveCompanyTenant(companyContextOrChatId);
+  if (tenant?.companyId) {
+    companyId = tenant.companyId;
+    if (typeof limitOrChatId === 'string') {
+      chatId = limitOrChatId;
+      limit = Number(maybeLimit) || 50;
+    } else {
+      limit = Number(limitOrChatId) || 50;
+    }
+  } else if (typeof companyContextOrChatId === 'string' && isUuid(companyContextOrChatId.trim())) {
+    companyId = companyContextOrChatId.trim();
+    if (typeof limitOrChatId === 'string') {
+      chatId = limitOrChatId;
+      limit = Number(maybeLimit) || 50;
+    } else {
+      limit = Number(limitOrChatId) || 50;
+    }
+  } else {
+    // Modo legacy por chatId
+    chatId = String(companyContextOrChatId);
+    limit = Number(limitOrChatId) || 50;
+  }
+
+  const cols = db.prepare('PRAGMA table_info("messages")').all();
+  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
+
+  let rows = [];
+  if (hasCompanyIdCol && companyId) {
+    if (chatId) {
+      rows = db.prepare('SELECT * FROM messages WHERE company_id = ? AND chat_id = ? ORDER BY timestamp DESC LIMIT ?').all(companyId, chatId, limit);
+    } else {
+      rows = db.prepare('SELECT * FROM messages WHERE company_id = ? ORDER BY timestamp DESC LIMIT ?').all(companyId, limit);
+    }
+  } else if (chatId) {
+    rows = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?').all(chatId, limit);
+  }
+
   return rows.map(row => ({
     id: row.id,
     whatsappMessageId: row.whatsapp_message_id,
+    companyId: row.company_id || companyId,
+    company_id: row.company_id || companyId,
     businessId: row.business_id,
     chatId: row.chat_id,
     senderPhone: row.sender_phone,

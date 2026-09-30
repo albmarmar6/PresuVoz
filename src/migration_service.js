@@ -22,6 +22,7 @@ import { migration as expensePaymentsMigration } from './migrations/010_expense_
 import { migration as investmentAssetsMigration } from './migrations/011_investment_assets_company_id.js';
 import { migration as fiscalIncidentsMigration } from './migrations/012_fiscal_incidents_company_id.js';
 import { migration as auditLogsMigration } from './migrations/013_audit_logs_company_id.js';
+import { migration as messagesMigration } from './migrations/014_messages_company_id.js';
 
 export const MIGRATIONS = [
   baselineMigration,
@@ -36,7 +37,8 @@ export const MIGRATIONS = [
   expensePaymentsMigration,
   investmentAssetsMigration,
   fiscalIncidentsMigration,
-  auditLogsMigration
+  auditLogsMigration,
+  messagesMigration
 ];
 
 /**

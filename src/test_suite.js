@@ -1270,6 +1270,7 @@ import {
   recordIncomingMessage,
   updateMessageStatus,
   getMessageByWhatsappId,
+  getMessage,
   isMessageAlreadyProcessed,
   listRecentMessages
 } from './db_service.js';
@@ -7223,6 +7224,332 @@ assert(integrityResult43 && (integrityResult43.integrity_check === 'ok' || integ
 
 cleanupTest43(phoneAuditTenantA);
 cleanupTest43(phoneAuditTenantB);
+
+console.log("\nTEST 44: Migración Controlada de messages a company_id (Fase 2E-8 — Backfill, Tenant Isolation & Rejected Inbound Policy)");
+
+// ─── A. MIGRATION 014: EJECUCIÓN Y REGISTRO ───
+// A1. migration 014 se registra correctamente en TEST con versión 14
+const schemaRow014 = currentDb.prepare("SELECT version, name, applied_at FROM schema_migrations WHERE version = 14").get();
+assert(schemaRow014 && schemaRow014.version === 14, "A1. Migración 014 registrada en schema_migrations con versión 14");
+assert(schemaRow014 && schemaRow014.name === '014_messages_company_id', "A2. Nombre de migración 014 coincide exactamente");
+assert(schemaRow014 && typeof schemaRow014.applied_at === 'string' && schemaRow014.applied_at.length > 10, "A3. Migración 014 tiene timestamp applied_at válido");
+
+// A4 & A5. production sigue con máximo migration 006 (007 a 014 NO registradas)
+const prodDbFor014Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+const prodSchema014 = prodDbFor014Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
+const prodMaxVersion014 = prodDbFor014Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
+prodDbFor014Check.close();
+assert(prodSchema014.length === 0, "A4. DB de producción (data/presuvoz.db) NO tiene registradas las migraciones 007 a 014");
+assert(prodMaxVersion014 === 6, "A5. Versión máxima en DB de producción permanece inalterada en 6");
+
+// A6 & A7. migrations 012 y 013 siguen intactas en test
+const schemaRow012In44 = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 12").get();
+const schemaRow013In44 = currentDb.prepare("SELECT version, name FROM schema_migrations WHERE version = 13").get();
+assert(schemaRow012In44 && schemaRow012In44.name === '012_fiscal_incidents_company_id', "A6. Migración 012 permanece intacta en la base de datos de test");
+assert(schemaRow013In44 && schemaRow013In44.name === '013_audit_logs_company_id', "A7. Migración 013 permanece intacta en la base de datos de test");
+
+// ─── B. BACKFILL DETERMINISTA & CASOS FAIL-CLOSED ───
+// B1..B6. Memoria con datos existentes (incluyendo resolución por LID y mensajes REJECTED)
+const memDb44B = new DatabaseSync(':memory:');
+initMigrationTable(memDb44B);
+runMigrations(memDb44B, { migrations: MIGRATIONS.slice(0, 13), authorized: true });
+
+// Insertar 2 empresas (una con phone_contact LID) y 4 mensajes representativos
+memDb44B.exec(`
+  INSERT INTO companies (id, phone, phone_contact, name) VALUES
+    ('uuid-msg-comp1', '34677330001', '82987509096647', 'Empresa Mensajería Alfa S.L.'),
+    ('uuid-msg-comp2', '34677330002', NULL, 'Empresa Mensajería Beta S.L.');
+  INSERT INTO messages (
+    id, whatsapp_message_id, business_id, chat_id, sender_phone, content, timestamp, status
+  ) VALUES
+    ('msg-bf-01', 'wam-bf-01', '34677330001', '34677330001@s.whatsapp.net', '34677330001', 'Hola presupuesto Alfa', '2026-07-01T10:00:00Z', 'PROCESSED'),
+    ('msg-bf-02', 'wam-bf-02', '82987509096647', '82987509096647@lid', '82987509096647', 'Mensaje con LID WhatsApp', '2026-07-01T10:05:00Z', 'PROCESSED'),
+    ('msg-bf-03', 'wam-bf-03', '34677330002', '34677330002@s.whatsapp.net', '34677330002', 'Hola presupuesto Beta', '2026-07-01T10:10:00Z', 'PROCESSED'),
+    ('msg-bf-04', 'wam-bf-04', '34699999999', '34699999999@s.whatsapp.net', '34699999999', 'Spam no autorizado', '2026-07-01T10:15:00Z', 'REJECTED');
+`);
+
+const migRes44 = runMigrations(memDb44B, { migrations: [MIGRATIONS[13]], authorized: true });
+assert(migRes44.appliedCount === 1, "B1. Migración 014 se aplica con éxito sobre base de datos con datos");
+
+const msgRows44 = memDb44B.prepare("SELECT id, whatsapp_message_id, company_id, business_id, chat_id, sender_phone, content, status FROM messages ORDER BY id ASC").all();
+assert(msgRows44.length === 4, "B2. Recuento de filas se preserva exactamente tras migración (4 filas)");
+assert(msgRows44[0].company_id === 'uuid-msg-comp1' && msgRows44[0].business_id === '34677330001', "B3. Fila 1 migrada con company_id correcto de Empresa 1 por teléfono");
+assert(msgRows44[1].company_id === 'uuid-msg-comp1' && msgRows44[1].business_id === '82987509096647', "B4. Fila 2 migrada con company_id correcto de Empresa 1 por LID (phone_contact)");
+assert(msgRows44[2].company_id === 'uuid-msg-comp2' && msgRows44[2].business_id === '34677330002', "B5. Fila 3 migrada con company_id correcto de Empresa 2");
+assert(msgRows44[3].company_id === null && msgRows44[3].status === 'REJECTED', "B6. Fila 4 con status REJECTED se preserva con company_id = NULL");
+
+// B7..B11. Rollback atómico ante mensaje huérfano no rechazado
+const memDb44Rollback = new DatabaseSync(':memory:');
+initMigrationTable(memDb44Rollback);
+runMigrations(memDb44Rollback, { migrations: MIGRATIONS.slice(0, 13), authorized: true });
+
+memDb44Rollback.exec(`
+  INSERT INTO companies (id, phone, name) VALUES ('uuid-msg-comp-ok', '34677330001', 'Empresa OK');
+  INSERT INTO messages (
+    id, whatsapp_message_id, business_id, chat_id, sender_phone, content, timestamp, status
+  ) VALUES
+    ('msg-ok-01', 'wam-ok-01', '34677330001', '34677330001@s.whatsapp.net', '34677330001', 'Mensaje OK', '2026-07-01T10:00:00Z', 'PROCESSED'),
+    ('msg-orphan-01', 'wam-orphan-01', '34699999999', '34699999999@s.whatsapp.net', '34699999999', 'Mensaje Activo Huérfano', '2026-07-01T11:00:00Z', 'PROCESSED');
+`);
+
+let caughtOrphan014 = false;
+let orphanErrMsg014 = '';
+try {
+  runMigrations(memDb44Rollback, { migrations: [MIGRATIONS[13]], authorized: true });
+} catch (err) {
+  caughtOrphan014 = true;
+  orphanErrMsg014 = err.message;
+}
+assert(caughtOrphan014 === true, "B7. Migración 014 aborta inmediatamente ante mensaje huérfano activo (fail-closed)");
+assert(orphanErrMsg014.includes('fail-closed') && orphanErrMsg014.includes('huérfano'), "B8. Error descriptivo fail-closed ante mensaje con business_id huérfano");
+
+// Verificar rollback atómico
+const schemaAfterFail014 = memDb44Rollback.prepare("SELECT * FROM schema_migrations WHERE version = 14").get();
+assert(!schemaAfterFail014, "B9. Rollback atómico: Versión 14 NO queda registrada en schema_migrations");
+
+const colsAfterFail014 = memDb44Rollback.prepare('PRAGMA table_info("messages")').all();
+assert(!colsAfterFail014.some(c => c.name === 'company_id'), "B10. Rollback atómico: La tabla messages queda exactamente como estaba");
+
+const tempTableCheck014 = memDb44Rollback.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_new'").get();
+assert(!tempTableCheck014, "B11. Rollback atómico: No quedan tablas temporales (messages_new)");
+
+// B12..B13. Fallo ante ambigüedad de companies con el mismo teléfono
+const memDb44Ambig = new DatabaseSync(':memory:');
+initMigrationTable(memDb44Ambig);
+runMigrations(memDb44Ambig, { migrations: MIGRATIONS.slice(0, 13), authorized: true });
+memDb44Ambig.exec(`
+  INSERT INTO companies (id, phone, name) VALUES
+    ('uuid-msg-ambig-1', '34677000077', 'Empresa Ambigua 1'),
+    ('uuid-msg-ambig-2', '+34 677 00 00 77', 'Empresa Ambigua 2');
+  INSERT INTO messages (
+    id, whatsapp_message_id, business_id, chat_id, sender_phone, content, timestamp, status
+  ) VALUES
+    ('msg-ambig-01', 'wam-ambig-01', '34677000077', '34677000077@s.whatsapp.net', '34677000077', 'Mensaje Ambiguo', '2026-07-01T10:00:00Z', 'PROCESSED');
+`);
+let caughtAmbig014 = false;
+try {
+  runMigrations(memDb44Ambig, { migrations: [MIGRATIONS[13]], authorized: true });
+} catch (err) {
+  caughtAmbig014 = true;
+  assert(err.message.includes('Ambigüedad crítica'), "B12. Fail-closed: Múltiples empresas ambiguas provocan aborto y rollback");
+}
+assert(caughtAmbig014 === true, "B13. Migración 014 aborta ante ambigüedad en companies");
+
+// ─── C. PRESERVACIÓN DE DATOS DE MENSAJES ───
+assert(msgRows44[0].whatsapp_message_id === 'wam-bf-01', "C1. whatsapp_message_id preservado intacto");
+assert(msgRows44[0].chat_id === '34677330001@s.whatsapp.net' && msgRows44[0].sender_phone === '34677330001', "C2. chat_id y sender_phone preservados intactos");
+assert(msgRows44[0].content === 'Hola presupuesto Alfa' && msgRows44[0].status === 'PROCESSED', "C3. content y status preservados intactos");
+
+// ─── D. AISLAMIENTO MULTI-TENANT EN TEST DB ───
+const phoneMsgTenantA = '34677331101';
+const phoneMsgTenantB = '34677331102';
+
+const cleanupTest44 = (phone) => {
+  const comp = currentDb.prepare("SELECT id FROM companies WHERE phone = ?").get(phone);
+  if (comp) {
+    currentDb.prepare("DELETE FROM messages WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM audit_logs WHERE company_id = ? OR business_id = ?").run(comp.id, phone);
+    currentDb.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp.id);
+    currentDb.prepare("DELETE FROM users WHERE phone = ?").run(phone);
+    currentDb.prepare("DELETE FROM companies WHERE id = ?").run(comp.id);
+  }
+};
+
+cleanupTest44(phoneMsgTenantA);
+cleanupTest44(phoneMsgTenantB);
+
+const compMsgA = createCompanyWithIdentity({
+  name: 'Empresa Alpha Mensajería S.L.',
+  phone: phoneMsgTenantA,
+  trade: 'Construcción'
+});
+const contextMsgA = resolveAuthenticatedContext('whatsapp', phoneMsgTenantA);
+
+const compMsgB = createCompanyWithIdentity({
+  name: 'Empresa Beta Mensajería S.L.',
+  phone: phoneMsgTenantB,
+  trade: 'Climatización'
+});
+const contextMsgB = resolveAuthenticatedContext('whatsapp', phoneMsgTenantB);
+
+// D1 & D2. Cada tenant registra su mensaje autenticado
+const msgA_44 = recordIncomingMessage({
+  whatsappMessageId: 'wam-44-A01',
+  companyContextOrId: contextMsgA,
+  businessId: phoneMsgTenantA,
+  chatId: `${phoneMsgTenantA}@s.whatsapp.net`,
+  senderPhone: phoneMsgTenantA,
+  content: 'Presupuesto reforma cocina',
+  status: 'RECEIVED'
+});
+assert(msgA_44 && msgA_44.id, "D1. recordIncomingMessage de Tenant A registra su mensaje con company_id");
+
+const msgB_44 = recordIncomingMessage({
+  whatsappMessageId: 'wam-44-B01',
+  companyContextOrId: contextMsgB,
+  businessId: phoneMsgTenantB,
+  chatId: `${phoneMsgTenantB}@s.whatsapp.net`,
+  senderPhone: phoneMsgTenantB,
+  content: 'Instalación aire acondicionado',
+  status: 'RECEIVED'
+});
+assert(msgB_44 && msgB_44.id, "D2. recordIncomingMessage de Tenant B registra su mensaje con company_id");
+
+// D3 & D4. Cross-Tenant Read: getMessage(contextB, idA) devuelve null (Zero-Disclosure)
+const crossReadAfromB_44 = getMessage(contextMsgB, msgA_44.id);
+assert(crossReadAfromB_44 === null, "D3. Cross-Tenant Read: getMessage(tenantB, msgA.id) devuelve null (Zero-Disclosure)");
+
+const crossReadBfromA_44 = getMessage(contextMsgA, msgB_44.id);
+assert(crossReadBfromA_44 === null, "D4. Cross-Tenant Read: getMessage(tenantA, msgB.id) devuelve null (Zero-Disclosure)");
+
+// D5 & D6. Lecturas legítimas de cada tenant
+const legitReadA_44 = getMessage(contextMsgA, msgA_44.id);
+assert(legitReadA_44 !== null && legitReadA_44.id === msgA_44.id && legitReadA_44.companyId === compMsgA.companyId, "D5. Lectura legítima: getMessage(tenantA, msgA.id) recupera su mensaje");
+
+const legitReadB_44 = getMessage(contextMsgB, msgB_44.id);
+assert(legitReadB_44 !== null && legitReadB_44.id === msgB_44.id && legitReadB_44.companyId === compMsgB.companyId, "D6. Lectura legítima: getMessage(tenantB, msgB.id) recupera su mensaje");
+
+// D7 & D8. listRecentMessages tenant-scoped
+const listMsgA_44 = listRecentMessages(contextMsgA);
+assert(listMsgA_44.every(m => m.companyId === compMsgA.companyId) && listMsgA_44.some(m => m.id === msgA_44.id), "D7. listRecentMessages(contextA) solo retorna mensajes del Tenant A");
+
+const listMsgB_44 = listRecentMessages(contextMsgB);
+assert(listMsgB_44.every(m => m.companyId === compMsgB.companyId) && listMsgB_44.some(m => m.id === msgB_44.id), "D8. listRecentMessages(contextB) solo retorna mensajes del Tenant B");
+
+// D9 & D10. Intento de modificación cross-tenant de estado
+const crossUpdateResult_44 = updateMessageStatus(contextMsgA, msgB_44.whatsappMessageId, 'PROCESSED');
+assert(crossUpdateResult_44 === false, "D9. Cross-tenant updateMessageStatus(tenantA, msgB) es rechazado");
+const verifyMsgBStatus_44 = getMessageByWhatsappId(msgB_44.whatsappMessageId);
+assert(verifyMsgBStatus_44.status === 'RECEIVED', "D10. El estado del mensaje de Tenant B permanece inalterado (RECEIVED)");
+
+// ─── E. POLÍTICA DE MENSAJES RECHAZADOS Y NO AUTENTICADOS ───
+// E1. Remitente no autenticado se registra con companyId = NULL
+const unauthMsg_44 = recordIncomingMessage({
+  whatsappMessageId: 'wam-unauth-01',
+  companyContextOrId: null,
+  businessId: '34600111222',
+  chatId: '34600111222@s.whatsapp.net',
+  senderPhone: '34600111222',
+  content: 'Mensaje de número no registrado',
+  status: 'RECEIVED'
+});
+assert(unauthMsg_44 && unauthMsg_44.companyId === null, "E1. Mensaje no autenticado se registra legítimamente con company_id = NULL");
+
+// E2. Transición a REJECTED
+updateMessageStatus('wam-unauth-01', 'REJECTED');
+const rejectedMsgInDb = getMessageByWhatsappId('wam-unauth-01');
+assert(rejectedMsgInDb && rejectedMsgInDb.status === 'REJECTED', "E2. Estado pasa a REJECTED");
+
+// E3. Deduplicación de mensaje rechazado
+assert(isMessageAlreadyProcessed('wam-unauth-01') === true, "E3. Deduplicación activa para mensaje REJECTED (evita procesar reintentos)");
+
+// E4. Mensaje rechazado no se expone a operaciones normales de tenant
+assert(getMessage(contextMsgA, 'wam-unauth-01') === null, "E4. Mensaje REJECTED no es accesible desde Tenant A");
+assert(listRecentMessages(contextMsgA).every(m => m.whatsappMessageId !== 'wam-unauth-01'), "E5. Mensaje REJECTED no aparece en listados de Tenant A");
+
+// E6. Inserción duplicada de mensaje rechazado se ignora de forma segura (ON CONFLICT DO NOTHING)
+const duplicateRejected = recordIncomingMessage({
+  whatsappMessageId: 'wam-unauth-01',
+  companyContextOrId: null,
+  businessId: '34600111222',
+  chatId: '34600111222@s.whatsapp.net',
+  content: 'Reintento spam',
+  status: 'RECEIVED'
+});
+assert(duplicateRejected && duplicateRejected.status === 'REJECTED', "E6. Reintento de mensaje rechazado mantiene estado REJECTED sin duplicar");
+
+// ─── F. INYECCIÓN DE MODELO (DEFENSA FAIL-CLOSED) ───
+// F1..F4. Gemini spoofing companyId / businessId en payload es neutralizado
+const maliciousAiMessage_44 = {
+  whatsappMessageId: 'wam-inject-01',
+  companyContextOrId: contextMsgA,
+  companyId: compMsgB.companyId,
+  businessId: phoneMsgTenantB,
+  chatId: `${phoneMsgTenantA}@s.whatsapp.net`,
+  senderPhone: phoneMsgTenantA,
+  content: 'Intento de suplantación de empresa',
+  status: 'RECEIVED'
+};
+const savedInjectedMsg_44 = recordIncomingMessage(maliciousAiMessage_44);
+assert(savedInjectedMsg_44.companyId === compMsgA.companyId, "F1. Modelo injection defendida: companyId de A se mantiene como autoridad");
+
+const verifyInjectedMsgInDb = currentDb.prepare("SELECT company_id FROM messages WHERE whatsapp_message_id = ?").get('wam-inject-01');
+assert(verifyInjectedMsgInDb.company_id === compMsgA.companyId, "F2. En SQLite, el mensaje pertenece legítimamente a Tenant A");
+
+const readInjectedMsgFromB_44 = getMessage(contextMsgB, 'wam-inject-01');
+assert(readInjectedMsgFromB_44 === null, "F3. Tenant B permanece completamente protegido contra payload spoofed");
+
+// ─── G. ROBUSTEZ DE UUID v4 ───
+assert(isUuid(msgA_44.companyId), "G1. companyId retornado es un UUID v4 canónico");
+assert(msgA_44.companyId.length === 36 && msgA_44.companyId.includes('-'), "G2. companyId tiene formato UUID con guiones intactos (36 caracteres)");
+
+const sqliteRowMsgA_44 = currentDb.prepare("SELECT company_id FROM messages WHERE id = ?").get(msgA_44.id);
+assert(sqliteRowMsgA_44 && sqliteRowMsgA_44.company_id === compMsgA.companyId, "G3. SQLite almacena el UUID con guiones intactos sin regex stripping");
+
+// ─── H. CLAVE FORÁNEA & ON DELETE RESTRICT ───
+// H1 & H2. Inserción con company_id inexistente lanza FK constraint violation
+let caughtFkInexistenteMsg_44 = false;
+try {
+  currentDb.prepare(`
+    INSERT INTO messages (id, whatsapp_message_id, company_id, business_id, chat_id, sender_phone, content, status)
+    VALUES ('fake-msg-id', 'wam-fake-01', '00000000-0000-4000-8000-000000000099', '34600999999', 'fake@s.whatsapp.net', '34600999999', 'Fake', 'RECEIVED');
+  `).run();
+} catch (err) {
+  caughtFkInexistenteMsg_44 = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "H1. Violación de Foreign Key hacia companies(id) detectada");
+}
+assert(caughtFkInexistenteMsg_44 === true, "H2. SQLite rechaza inserción en messages con company inexistente");
+
+// H3. Inserción con company_id NULL está permitida para mensajes rechazados / no autenticados
+currentDb.prepare(`
+  INSERT INTO messages (id, whatsapp_message_id, company_id, business_id, chat_id, sender_phone, content, status)
+  VALUES ('null-msg-id', 'wam-null-01', NULL, '34600999999', 'fake@s.whatsapp.net', '34600999999', 'Null Company', 'REJECTED');
+`).run();
+const verifyNullMsgInDb = currentDb.prepare("SELECT company_id, status FROM messages WHERE id = 'null-msg-id'").get();
+assert(verifyNullMsgInDb && verifyNullMsgInDb.company_id === null && verifyNullMsgInDb.status === 'REJECTED', "H3. SQLite permite company_id NULL para mensajes rechazados");
+
+// H4 & H5. ON DELETE RESTRICT previene el borrado de empresa con mensajes registrados
+let caughtRestrictDeleteMsg_44 = false;
+try {
+  currentDb.prepare("DELETE FROM companies WHERE id = ?").run(compMsgB.companyId);
+} catch (err) {
+  caughtRestrictDeleteMsg_44 = true;
+  assert(err.message.includes('FOREIGN KEY constraint failed'), "H4. ON DELETE RESTRICT previene el borrado de empresa con mensajes registrados");
+}
+assert(caughtRestrictDeleteMsg_44 === true, "H5. La empresa no puede ser eliminada mientras tenga registros en messages");
+
+// ─── I. OPERACIÓN: DEDUPLICACIÓN, ESTADOS Y REINTENTOS ───
+// I1. Transición de estados legítima
+const opWamId = `wam-op-${Date.now()}`;
+recordIncomingMessage({
+  whatsappMessageId: opWamId,
+  companyContextOrId: contextMsgA,
+  status: 'RECEIVED'
+});
+assert(isMessageAlreadyProcessed(opWamId) === false, "I1. RECEIVED no bloquea el procesamiento");
+
+updateMessageStatus(opWamId, 'QUEUED');
+assert(isMessageAlreadyProcessed(opWamId) === false, "I2. QUEUED no bloquea el procesamiento inicial");
+
+updateMessageStatus(opWamId, 'PROCESSING');
+assert(isMessageAlreadyProcessed(opWamId) === true, "I3. PROCESSING activa deduplicación inmediata");
+
+updateMessageStatus(opWamId, 'FAILED');
+assert(isMessageAlreadyProcessed(opWamId) === false, "I4. FAILED permite reintento operacional");
+
+updateMessageStatus(opWamId, 'PROCESSED');
+assert(isMessageAlreadyProcessed(opWamId) === true, "I5. PROCESSED descarta reenvíos duplicados");
+
+// ─── J. INTEGRIDAD RELACIONAL FINAL ───
+const fkViolations44 = currentDb.prepare("PRAGMA foreign_key_check;").all();
+const integrityResult44 = currentDb.prepare("PRAGMA integrity_check;").get();
+assert(fkViolations44.length === 0, "J1. PRAGMA foreign_key_check = 0 violaciones en base de datos de test");
+assert(integrityResult44 && (integrityResult44.integrity_check === 'ok' || integrityResult44.integrity_check === 'OK'), "J2. PRAGMA integrity_check = ok en base de datos de test");
+
+cleanupTest44(phoneMsgTenantA);
+cleanupTest44(phoneMsgTenantB);
+currentDb.prepare("DELETE FROM messages WHERE whatsapp_message_id IN ('wam-unauth-01', 'wam-inject-01', 'wam-null-01') OR whatsapp_message_id LIKE 'wam-op-%'").run();
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

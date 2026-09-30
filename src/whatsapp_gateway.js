@@ -4473,8 +4473,13 @@ async function startWhatsAppGateway() {
           console.log(`   ⏭️ Ignorado mensaje ya procesado en base de datos [id: ${wamId}]`);
           continue;
         }
+
+        const preAuthSession = getUserSession(remoteJid, senderNumber);
+        const canonicalCompanyId = preAuthSession?.authContext?.companyId || null;
+
         recordIncomingMessage({
           whatsappMessageId: wamId,
+          companyId: canonicalCompanyId,
           businessId: senderNumber,
           chatId: remoteJid,
           senderPhone: senderNumber,
