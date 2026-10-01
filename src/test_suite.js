@@ -8601,6 +8601,12 @@ const test51Result = await runTest51();
 passedCount += test51Result.passed;
 totalCount += test51Result.total;
 
+// ─── TEST 52: Final Security / Production Candidate Gate (Fase 3B.4) ───
+const { runTest52 } = await import('./test_52_final_security_gate.js');
+const test52Result = await runTest52();
+passedCount += test52Result.passed;
+totalCount += test52Result.total;
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
