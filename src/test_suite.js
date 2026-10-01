@@ -8637,6 +8637,12 @@ const test57Result = await runTest57();
 passedCount += test57Result.passed;
 totalCount += test57Result.total;
 
+// ─── TEST 58: Post-Deployment Stabilization & Production Verification (Fase 3D.1) ───
+const { runTest58 } = await import('./test_58_phase3d_post_deployment_stabilization.js');
+const test58Result = await runTest58();
+passedCount += test58Result.passed;
+totalCount += test58Result.total;
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
