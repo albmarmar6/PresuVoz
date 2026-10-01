@@ -12,7 +12,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
-import { runMigrations, isProductionDatabase, initMigrationTable, getPendingMigrations, checkMigrationsDryRun } from '../src/migration_service.js';
+import { runMigrations, isProductionDatabase, initMigrationTable, getPendingMigrations, checkMigrationsDryRun, MIGRATIONS_ALL } from '../src/migration_service.js';
 
 const isDryRun = process.argv.includes('--dry-run') || process.argv.includes('--check');
 const targetDbPath = process.env.PRESUVOZ_DB_PATH || path.resolve('data', 'presuvoz.db');
@@ -28,7 +28,7 @@ console.log(`Modo:                  ${isDryRun ? 'DRY-RUN / READ-ONLY (Sin modif
 
 if (isDryRun) {
   const readOnlyDb = new DatabaseSync(targetDbPath, { open: true, readOnly: true });
-  const check = checkMigrationsDryRun(readOnlyDb);
+  const check = checkMigrationsDryRun(readOnlyDb, MIGRATIONS_ALL);
   console.log(`\n📋 Estado del Esquema:`);
   console.log(`  - Migraciones aplicadas: ${check.appliedCount}`);
   for (const m of check.applied) {
@@ -60,7 +60,7 @@ const db = new DatabaseSync(targetDbPath);
 db.exec('PRAGMA foreign_keys = ON;');
 
 initMigrationTable(db);
-const pending = getPendingMigrations(db);
+const pending = getPendingMigrations(db, MIGRATIONS_ALL);
 
 if (pending.length === 0) {
   console.log('\n✅ No hay migraciones pendientes. El esquema ya está actualizado.');
@@ -75,7 +75,8 @@ for (const m of pending) {
 
 const result = runMigrations(db, {
   authorized: true,
-  allowProduction: allowProd
+  allowProduction: allowProd,
+  migrations: MIGRATIONS_ALL
 });
 
 db.close();

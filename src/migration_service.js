@@ -23,6 +23,7 @@ import { migration as investmentAssetsMigration } from './migrations/011_investm
 import { migration as fiscalIncidentsMigration } from './migrations/012_fiscal_incidents_company_id.js';
 import { migration as auditLogsMigration } from './migrations/013_audit_logs_company_id.js';
 import { migration as messagesMigration } from './migrations/014_messages_company_id.js';
+import { migration as canonicalMigration } from './migrations/015_structural_canonical_company_id.js';
 
 export const MIGRATIONS = [
   baselineMigration,
@@ -39,6 +40,11 @@ export const MIGRATIONS = [
   fiscalIncidentsMigration,
   auditLogsMigration,
   messagesMigration
+];
+
+export const MIGRATIONS_ALL = [
+  ...MIGRATIONS,
+  canonicalMigration
 ];
 
 /**
@@ -187,24 +193,36 @@ export function runMigrations(db, options = {}) {
       break;
     }
 
-    // Ejecutar cada migración en su propia transacción atómica
-    db.exec('BEGIN;');
-    try {
-      m.up(db);
-      const now = new Date().toISOString();
-      db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
-        .run(m.version, m.name, now);
-      db.exec('COMMIT;');
-      appliedVersions.push(m.version);
-      console.log(`✅ [Migración ${m.version}] '${m.name}' aplicada con éxito.`);
-    } catch (err) {
+    if (m.standaloneTransaction) {
+      // Migración estructural canónica autónoma (gestiona su propio PRAGMA foreign_keys y transacción atómica)
       try {
-        db.exec('ROLLBACK;');
-      } catch (rbErr) {
-        console.error('⚠️ Error al hacer rollback de migración:', rbErr.message);
+        m.up(db);
+        appliedVersions.push(m.version);
+        console.log(`✅ [Migración ${m.version}] '${m.name}' aplicada con éxito.`);
+      } catch (err) {
+        console.error(`❌ [Migración ${m.version}] Fallo crítico al aplicar '${m.name}':`, err.message);
+        throw err;
       }
-      console.error(`❌ [Migración ${m.version}] Fallo crítico al aplicar '${m.name}':`, err.message);
-      throw err;
+    } else {
+      // Ejecutar cada migración en su propia transacción atómica
+      db.exec('BEGIN;');
+      try {
+        m.up(db);
+        const now = new Date().toISOString();
+        db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
+          .run(m.version, m.name, now);
+        db.exec('COMMIT;');
+        appliedVersions.push(m.version);
+        console.log(`✅ [Migración ${m.version}] '${m.name}' aplicada con éxito.`);
+      } catch (err) {
+        try {
+          db.exec('ROLLBACK;');
+        } catch (rbErr) {
+          console.error('⚠️ Error al hacer rollback de migración:', rbErr.message);
+        }
+        console.error(`❌ [Migración ${m.version}] Fallo crítico al aplicar '${m.name}':`, err.message);
+        throw err;
+      }
     }
   }
 

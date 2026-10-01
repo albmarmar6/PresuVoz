@@ -942,3 +942,10 @@ export function executeCanonicalMigration(db, options = {}) {
     db.exec(`PRAGMA foreign_keys = ${originalFk ? 'ON' : 'OFF'};`);
   }
 }
+
+export const migration = {
+  version: 15,
+  name: '015_structural_canonical_company_id',
+  standaloneTransaction: true,
+  up: (db, options = {}) => executeCanonicalMigration(db, options)
+};
