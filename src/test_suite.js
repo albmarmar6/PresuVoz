@@ -8578,9 +8578,15 @@ assert(integrityResult47 && (integrityResult47.integrity_check === 'ok' || integ
 cleanupTest47(phone47A);
 cleanupTest47(phone47B);
 
+console.log('\n==========================================================');
+console.log('--- RECONCILIACIÓN MATEMÁTICA EN TEST_SUITE.JS ---');
+console.log('SUBTOTAL TESTS 1-47: passed = ' + passedCount + ', total = ' + totalCount);
+console.log('==========================================================\n');
+
 // ─── TEST 48: Validación Exhaustiva de Migración Estructural Canónica (Fase 3B) ───
 const { runTest48 } = await import('./test_48_structural.js');
 const test48Result = await runTest48();
+console.log('TEST 48 RESULT:', { passed: test48Result.passed, total: test48Result.total });
 passedCount += test48Result.passed;
 totalCount += test48Result.total;
 
@@ -8604,6 +8610,7 @@ const resetRehearsalDb = () => {
 resetRehearsalDb();
 const { runTest49 } = await import('./test_49_hardening.js');
 const test49Result = await runTest49();
+console.log('TEST 49 RESULT:', { passed: test49Result.passed, total: test49Result.total });
 passedCount += test49Result.passed;
 totalCount += test49Result.total;
 
@@ -8611,6 +8618,7 @@ totalCount += test49Result.total;
 resetRehearsalDb();
 const { runTest50 } = await import('./test_50_final_gate.js');
 const test50Result = await runTest50();
+console.log('TEST 50 RESULT:', { passed: test50Result.passed, total: test50Result.total });
 passedCount += test50Result.passed;
 totalCount += test50Result.total;
 
@@ -8618,6 +8626,7 @@ totalCount += test50Result.total;
 resetRehearsalDb();
 const { runTest51 } = await import('./test_51_pre_production_readiness.js');
 const test51Result = await runTest51();
+console.log('TEST 51 RESULT:', { passed: test51Result.passed, total: test51Result.total });
 passedCount += test51Result.passed;
 totalCount += test51Result.total;
 
@@ -8625,6 +8634,7 @@ totalCount += test51Result.total;
 resetRehearsalDb();
 const { runTest52 } = await import('./test_52_final_security_gate.js');
 const test52Result = await runTest52();
+console.log('TEST 52 RESULT:', { passed: test52Result.passed, total: test52Result.total });
 passedCount += test52Result.passed;
 totalCount += test52Result.total;
 
@@ -8632,6 +8642,7 @@ totalCount += test52Result.total;
 resetRehearsalDb();
 const { runTest53 } = await import('./test_53_migration_lineage.js');
 const test53Result = await runTest53();
+console.log('TEST 53 RESULT:', { passed: test53Result.passed, total: test53Result.total });
 passedCount += test53Result.passed;
 totalCount += test53Result.total;
 
@@ -8639,6 +8650,7 @@ totalCount += test53Result.total;
 resetRehearsalDb();
 const { runTest54 } = await import('./test_54_phase3c1_deployment_rehearsal.js');
 const test54Result = await runTest54();
+console.log('TEST 54 RESULT:', { passed: test54Result.passed, total: test54Result.total });
 passedCount += test54Result.passed;
 totalCount += test54Result.total;
 
@@ -8646,6 +8658,7 @@ totalCount += test54Result.total;
 resetRehearsalDb();
 const { runTest55 } = await import('./test_55_phase3c2_production_gate.js');
 const test55Result = await runTest55();
+console.log('TEST 55 RESULT:', { passed: test55Result.passed, total: test55Result.total });
 passedCount += test55Result.passed;
 totalCount += test55Result.total;
 
@@ -8653,6 +8666,7 @@ totalCount += test55Result.total;
 resetRehearsalDb();
 const { runTest56 } = await import('./test_56_phase3c21_final_deployment_hardening.js');
 const test56Result = await runTest56();
+console.log('TEST 56 RESULT:', { passed: test56Result.passed, total: test56Result.total });
 passedCount += test56Result.passed;
 totalCount += test56Result.total;
 
@@ -8660,6 +8674,7 @@ totalCount += test56Result.total;
 resetRehearsalDb();
 const { runTest57 } = await import('./test_57_phase3c22_final_integrity_lock_gate.js');
 const test57Result = await runTest57();
+console.log('TEST 57 RESULT:', { passed: test57Result.passed, total: test57Result.total });
 passedCount += test57Result.passed;
 totalCount += test57Result.total;
 
@@ -8672,14 +8687,23 @@ try {
 // ─── TEST 58: Post-Deployment Stabilization & Production Verification (Fase 3D.1) ───
 const { runTest58 } = await import('./test_58_phase3d_post_deployment_stabilization.js');
 const test58Result = await runTest58();
+console.log('TEST 58 RESULT:', { passed: test58Result.passed, total: test58Result.total });
 passedCount += test58Result.passed;
 totalCount += test58Result.total;
 
 // ─── TEST 59: Post-015 Runtime Compatibility & Regression Hardening (Fase 3D.2) ───
 const { runTest59 } = await import('./test_59_phase3d2_runtime_post015.js');
 const test59Result = await runTest59();
+console.log('TEST 59 RESULT:', { passed: test59Result.passed, total: test59Result.total });
 passedCount += test59Result.passed;
 totalCount += test59Result.total;
+
+// ─── TEST 60: Test Suite Integrity & Post-015 Runtime Final Gate (Fase 3D.3) ───
+const { runTest60 } = await import('./test_60_phase3d3_test_suite_integrity.js');
+const test60Result = await runTest60();
+console.log('TEST 60 RESULT:', { passed: test60Result.passed, total: test60Result.total });
+passedCount += test60Result.passed;
+totalCount += test60Result.total;
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

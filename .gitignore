@@ -37,7 +37,10 @@ payload.json
 # SQLite Database & User Logos
 data/*.db
 data/*.db-journal
+data/test/
+data/test_scratch_55/
 data/backups/
 data/fiscal_exports/
 data/logos/*
 !data/logos/.gitkeep
+
