@@ -488,13 +488,13 @@ export async function syncPendingSignaturesFromCloud(companyContextOrId = null) 
       }
 
       rows = db.prepare(`
-        SELECT id, company_id, company_phone, data_json 
+        SELECT id, company_id, data_json 
         FROM budgets 
         WHERE company_id = ?
           AND status != 'ACEPTADO' AND status != 'FIRMADO'
       `).all(targetCompanyId);
     } else {
-      const stmt = db.prepare("SELECT id, company_id, company_phone, data_json FROM budgets WHERE company_id IS NOT NULL AND status != 'ACEPTADO' AND status != 'FIRMADO'");
+      const stmt = db.prepare("SELECT id, company_id, data_json FROM budgets WHERE company_id IS NOT NULL AND status != 'ACEPTADO' AND status != 'FIRMADO'");
       rows = stmt.all();
     }
 
@@ -3875,7 +3875,7 @@ export function saveExpensePayment(companyContextOrId, p = {}) {
 
   // Comprobar existencia y tenant en caso de actualización
   if (safeP.id) {
-    const existing = db.prepare('SELECT company_id, business_id FROM expense_payments WHERE id = ?').get(safeP.id);
+    const existing = db.prepare('SELECT company_id FROM expense_payments WHERE id = ?').get(safeP.id);
     if (existing && existing.company_id !== companyId) {
       console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar pago de gasto ${safeP.id} de otro tenant.`);
       return null;
@@ -4079,7 +4079,7 @@ export function saveInvestmentAsset(companyContextOrId, asset = {}) {
 
   // Comprobar existencia y tenant en caso de actualización
   if (safeAsset.id) {
-    const existing = db.prepare('SELECT company_id, business_id FROM investment_assets WHERE id = ?').get(safeAsset.id);
+    const existing = db.prepare('SELECT company_id FROM investment_assets WHERE id = ?').get(safeAsset.id);
     if (existing && existing.company_id !== companyId) {
       console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar bien de inversión ${safeAsset.id} de otro tenant.`);
       return null;
@@ -4572,7 +4572,7 @@ export function saveFiscalIncident(companyContextOrId, incident = {}) {
 
 
   if (incident.id) {
-    const existing = db.prepare('SELECT company_id, business_id FROM fiscal_incidents WHERE id = ?').get(incident.id);
+    const existing = db.prepare('SELECT company_id FROM fiscal_incidents WHERE id = ?').get(incident.id);
     if (existing && existing.company_id !== companyId) {
       console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar incidencia fiscal ${incident.id} de otro tenant.`);
       return null;

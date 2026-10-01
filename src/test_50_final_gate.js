@@ -25,7 +25,7 @@ export async function runTest50() {
   }
 
   const expectedOfficialHash = '0D369E79DF8EB4205C849FBCC0DE67D9DE07EAADCAE2F58F0D8C9996EDEE16F1';
-  const prodDbPath = path.resolve('data', 'presuvoz.db');
+  const prodDbPath = path.resolve(process.env.PRESUVOZ_PRE015_REHEARSAL_DB || 'data/presuvoz.db');
   const test50DbPath = path.resolve('data', 'presuvoz_test50_final_gate.db');
 
   // Comprobar SHA-256 inicial de producción

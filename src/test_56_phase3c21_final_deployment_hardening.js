@@ -68,7 +68,7 @@ export async function runTest56() {
   }
 
   const expectedOfficialHash = '0D369E79DF8EB4205C849FBCC0DE67D9DE07EAADCAE2F58F0D8C9996EDEE16F1';
-  const prodDbPath = path.resolve('data', 'presuvoz.db');
+  const prodDbPath = path.resolve(process.env.PRESUVOZ_PRE015_REHEARSAL_DB || 'data/presuvoz.db');
   const backupDbPath = path.resolve('data', 'backups', 'presuvoz_pre_migration_backup.db');
   const recoveryDbPath = path.resolve('data', 'backups', 'presuvoz_recovery_20261001_185500.db');
   const manifestPath = path.resolve('src', 'migration_manifest.json');

@@ -149,6 +149,10 @@ export function isProductionDatabase(dbOrPath) {
   if (!p) return false;
   const resolved = path.resolve(p).toLowerCase();
   const prod = path.resolve('data', 'presuvoz.db').toLowerCase();
+  if (process.env.PRESUVOZ_PRE015_REHEARSAL_DB) {
+    const rehearsal = path.resolve(process.env.PRESUVOZ_PRE015_REHEARSAL_DB).toLowerCase();
+    return resolved === prod || resolved === rehearsal;
+  }
   return resolved === prod;
 }
 

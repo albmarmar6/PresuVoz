@@ -30,7 +30,7 @@ export function runPreflightChecks(customOptions = {}) {
     if (!passed) allPassed = false;
   }
 
-  const targetDbPath = path.resolve(customOptions.targetDb || 'data/presuvoz.db');
+  const targetDbPath = path.resolve(customOptions.targetDb || process.env.PRESUVOZ_PRE015_REHEARSAL_DB || 'data/presuvoz.db');
   const backupDbPath = path.resolve(customOptions.backupDb || 'data/backups/presuvoz_pre_migration_backup.db');
   const recoveryDbPath = path.resolve(customOptions.recoveryDb || 'data/backups/presuvoz_recovery_20261001_185500.db');
   const manifestPath = path.resolve(customOptions.manifestPath || 'src/migration_manifest.json');

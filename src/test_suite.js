@@ -30,6 +30,7 @@ export function computeFileSha256(filePath) {
 
 // Captura de integridad inicial de la base de datos de producción
 const PROD_DB_PATH = path.resolve('data', 'presuvoz.db');
+const HISTORICAL_PRE015_PROD_PATH = path.resolve('data', 'backups', 'presuvoz_pre_migration_backup.db');
 const prodDbInitialStat = fs.existsSync(PROD_DB_PATH) 
   ? { mtimeMs: fs.statSync(PROD_DB_PATH).mtimeMs, size: fs.statSync(PROD_DB_PATH).size }
   : null;
@@ -4897,8 +4898,8 @@ assert(schemaRow007 && schemaRow007.version === 7, "A1. Migración 007 registrad
 assert(schemaRow007 && schemaRow007.name === '007_business_tax_profiles_company_id', "A2. Nombre de migración 007 coincide exactamente");
 assert(schemaRow007 && typeof schemaRow007.applied_at === 'string' && schemaRow007.applied_at.length > 10, "A3. Migración 007 tiene timestamp applied_at válido");
 
-// Producción NO tiene la versión 7 registrada
-const prodDbFor007Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+// Producción pre-015 NO tiene la versión 7 registrada
+const prodDbFor007Check = new DatabaseSync(HISTORICAL_PRE015_PROD_PATH, { readOnly: true });
 const prodSchema007 = prodDbFor007Check.prepare("SELECT version FROM schema_migrations WHERE version = 7").get();
 const prodMaxVersion = prodDbFor007Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
 prodDbFor007Check.close();
@@ -5165,8 +5166,8 @@ assert(schemaRow008 && schemaRow008.version === 8, "A1. Migración 008 registrad
 assert(schemaRow008 && schemaRow008.name === '008_fiscal_periods_company_id', "A2. Nombre de migración 008 coincide exactamente");
 assert(schemaRow008 && typeof schemaRow008.applied_at === 'string' && schemaRow008.applied_at.length > 10, "A3. Migración 008 tiene timestamp applied_at válido");
 
-// 2. production sigue con máximo migration 006 (007 y 008 NO registradas)
-const prodDbFor008Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+// 2. production pre-015 sigue con máximo migration 006 (007 y 008 NO registradas)
+const prodDbFor008Check = new DatabaseSync(HISTORICAL_PRE015_PROD_PATH, { readOnly: true });
 const prodSchema008 = prodDbFor008Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
 const prodMaxVersion008 = prodDbFor008Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
 prodDbFor008Check.close();
@@ -5434,8 +5435,8 @@ assert(schemaRow009 && schemaRow009.version === 9, "A1. Migración 009 registrad
 assert(schemaRow009 && schemaRow009.name === '009_purchase_invoices_company_id', "A2. Nombre de migración 009 coincide exactamente");
 assert(schemaRow009 && typeof schemaRow009.applied_at === 'string' && schemaRow009.applied_at.length > 10, "A3. Migración 009 tiene timestamp applied_at válido");
 
-// A4 & A5. production sigue con máximo migration 006 (007, 008 y 009 NO registradas)
-const prodDbFor009Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+// A4 & A5. production pre-015 sigue con máximo migration 006 (007, 008 y 009 NO registradas)
+const prodDbFor009Check = new DatabaseSync(HISTORICAL_PRE015_PROD_PATH, { readOnly: true });
 const prodSchema009 = prodDbFor009Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
 const prodMaxVersion009 = prodDbFor009Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
 prodDbFor009Check.close();
@@ -5770,8 +5771,8 @@ assert(schemaRow010 && schemaRow010.version === 10, "A1. Migración 010 registra
 assert(schemaRow010 && schemaRow010.name === '010_expense_payments_company_id', "A2. Nombre de migración 010 coincide exactamente");
 assert(schemaRow010 && typeof schemaRow010.applied_at === 'string' && schemaRow010.applied_at.length > 10, "A3. Migración 010 tiene timestamp applied_at válido");
 
-// A4 & A5. production sigue con máximo migration 006 (007, 008, 009 y 010 NO registradas)
-const prodDbFor010Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+// A4 & A5. production pre-015 sigue con máximo migration 006 (007, 008, 009 y 010 NO registradas)
+const prodDbFor010Check = new DatabaseSync(HISTORICAL_PRE015_PROD_PATH, { readOnly: true });
 const prodSchema010 = prodDbFor010Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
 const prodMaxVersion010 = prodDbFor010Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
 prodDbFor010Check.close();
@@ -6131,8 +6132,8 @@ assert(schemaRow011 && schemaRow011.version === 11, "A1. Migración 011 registra
 assert(schemaRow011 && schemaRow011.name === '011_investment_assets_company_id', "A2. Nombre de migración 011 coincide exactamente");
 assert(schemaRow011 && typeof schemaRow011.applied_at === 'string' && schemaRow011.applied_at.length > 10, "A3. Migración 011 tiene timestamp applied_at válido");
 
-// A4 & A5. production sigue con máximo migration 006 (007, 008, 009, 010 y 011 NO registradas)
-const prodDbFor011Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+// A4 & A5. production pre-015 sigue con máximo migration 006 (007, 008, 009, 010 y 011 NO registradas)
+const prodDbFor011Check = new DatabaseSync(HISTORICAL_PRE015_PROD_PATH, { readOnly: true });
 const prodSchema011 = prodDbFor011Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
 const prodMaxVersion011 = prodDbFor011Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
 prodDbFor011Check.close();
@@ -6504,8 +6505,8 @@ assert(schemaRow012 && schemaRow012.version === 12, "A1. Migración 012 registra
 assert(schemaRow012 && schemaRow012.name === '012_fiscal_incidents_company_id', "A2. Nombre de migración 012 coincide exactamente");
 assert(schemaRow012 && typeof schemaRow012.applied_at === 'string' && schemaRow012.applied_at.length > 10, "A3. Migración 012 tiene timestamp applied_at válido");
 
-// A4 & A5. production sigue con máximo migration 006 (007, 008, 009, 010, 011 y 012 NO registradas)
-const prodDbFor012Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+// A4 & A5. production pre-015 sigue con máximo migration 006 (007, 008, 009, 010, 011 y 012 NO registradas)
+const prodDbFor012Check = new DatabaseSync(HISTORICAL_PRE015_PROD_PATH, { readOnly: true });
 const prodSchema012 = prodDbFor012Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
 const prodMaxVersion012 = prodDbFor012Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
 prodDbFor012Check.close();
@@ -6890,8 +6891,8 @@ assert(schemaRow013 && schemaRow013.version === 13, "A1. Migración 013 registra
 assert(schemaRow013 && schemaRow013.name === '013_audit_logs_company_id', "A2. Nombre de migración 013 coincide exactamente");
 assert(schemaRow013 && typeof schemaRow013.applied_at === 'string' && schemaRow013.applied_at.length > 10, "A3. Migración 013 tiene timestamp applied_at válido");
 
-// A4 & A5. production sigue con máximo migration 006 (007, 008, 009, 010, 011, 012 y 013 NO registradas)
-const prodDbFor013Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+// A4 & A5. production pre-015 sigue con máximo migration 006 (007, 008, 009, 010, 011, 012 y 013 NO registradas)
+const prodDbFor013Check = new DatabaseSync(HISTORICAL_PRE015_PROD_PATH, { readOnly: true });
 const prodSchema013 = prodDbFor013Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
 const prodMaxVersion013 = prodDbFor013Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
 prodDbFor013Check.close();
@@ -7236,8 +7237,8 @@ assert(schemaRow014 && schemaRow014.version === 14, "A1. Migración 014 registra
 assert(schemaRow014 && schemaRow014.name === '014_messages_company_id', "A2. Nombre de migración 014 coincide exactamente");
 assert(schemaRow014 && typeof schemaRow014.applied_at === 'string' && schemaRow014.applied_at.length > 10, "A3. Migración 014 tiene timestamp applied_at válido");
 
-// A4 & A5. production sigue con máximo migration 006 (007 a 014 NO registradas)
-const prodDbFor014Check = new DatabaseSync(PROD_DB_PATH, { readOnly: true });
+// A4 & A5. production pre-015 sigue con máximo migration 006 (007 a 014 NO registradas)
+const prodDbFor014Check = new DatabaseSync(HISTORICAL_PRE015_PROD_PATH, { readOnly: true });
 const prodSchema014 = prodDbFor014Check.prepare("SELECT version FROM schema_migrations WHERE version >= 7").all();
 const prodMaxVersion014 = prodDbFor014Check.prepare("SELECT MAX(version) as max_v FROM schema_migrations").get().max_v;
 prodDbFor014Check.close();
@@ -8583,65 +8584,102 @@ const test48Result = await runTest48();
 passedCount += test48Result.passed;
 totalCount += test48Result.total;
 
+// ─── SUITE REHEARSAL PRE-015 (TESTS 49 AL 57) ───
+// Los tests 49 al 57 fueron diseñados como puertas de auditoría y simulacro de despliegue
+// previas a la Fase 3D, validando la transición desde el estado pre-015 (SHA 0D36...).
+// Se ejecutan en un entorno aislado de trabajo (data/test/phase3d2_pre015_rehearsal.db)
+// generado a partir de data/backups/presuvoz_pre_migration_backup.db, sin modificar
+// en ningún momento la base de datos real de producción (data/presuvoz.db).
+const rehearsalDir = path.resolve('data', 'test');
+if (!fs.existsSync(rehearsalDir)) fs.mkdirSync(rehearsalDir, { recursive: true });
+const rehearsalDbPath = path.join(rehearsalDir, 'phase3d2_pre015_rehearsal.db');
+const preMigrationBackupPath = path.resolve('data/backups/presuvoz_pre_migration_backup.db');
+
+const resetRehearsalDb = () => {
+  fs.copyFileSync(preMigrationBackupPath, rehearsalDbPath);
+  process.env.PRESUVOZ_PRE015_REHEARSAL_DB = rehearsalDbPath;
+};
+
 // ─── TEST 49: Hardening Final de la Migración Estructural 015 (Fase 3B.1) ───
+resetRehearsalDb();
 const { runTest49 } = await import('./test_49_hardening.js');
 const test49Result = await runTest49();
 passedCount += test49Result.passed;
 totalCount += test49Result.total;
 
 // ─── TEST 50: Final Gate / Auditoría Definitiva de Migración Estructural 015 (Fase 3B.2) ───
+resetRehearsalDb();
 const { runTest50 } = await import('./test_50_final_gate.js');
 const test50Result = await runTest50();
 passedCount += test50Result.passed;
 totalCount += test50Result.total;
 
 // ─── TEST 51: Production Deployment Readiness / Auditoría Pre-Producción 015 (Fase 3B.3) ───
+resetRehearsalDb();
 const { runTest51 } = await import('./test_51_pre_production_readiness.js');
 const test51Result = await runTest51();
 passedCount += test51Result.passed;
 totalCount += test51Result.total;
 
 // ─── TEST 52: Final Security / Production Candidate Gate (Fase 3B.4) ───
+resetRehearsalDb();
 const { runTest52 } = await import('./test_52_final_security_gate.js');
 const test52Result = await runTest52();
 passedCount += test52Result.passed;
 totalCount += test52Result.total;
 
 // ─── TEST 53: Migration Lineage / Future Migration Safety (Fase 3C.0) ───
+resetRehearsalDb();
 const { runTest53 } = await import('./test_53_migration_lineage.js');
 const test53Result = await runTest53();
 passedCount += test53Result.passed;
 totalCount += test53Result.total;
 
 // ─── TEST 54: Production Deployment Rehearsal & Recovery Gate (Fase 3C.1) ───
+resetRehearsalDb();
 const { runTest54 } = await import('./test_54_phase3c1_deployment_rehearsal.js');
 const test54Result = await runTest54();
 passedCount += test54Result.passed;
 totalCount += test54Result.total;
 
 // ─── TEST 55: Final Production Deployment Gate & Pre-Flight (Fase 3C.2) ───
+resetRehearsalDb();
 const { runTest55 } = await import('./test_55_phase3c2_production_gate.js');
 const test55Result = await runTest55();
 passedCount += test55Result.passed;
 totalCount += test55Result.total;
 
 // ─── TEST 56: Final Deployment Safety Hardening (Fase 3C.2.1) ───
+resetRehearsalDb();
 const { runTest56 } = await import('./test_56_phase3c21_final_deployment_hardening.js');
 const test56Result = await runTest56();
 passedCount += test56Result.passed;
 totalCount += test56Result.total;
 
 // ─── TEST 57: Final Migration Integrity & Lock Gate (Fase 3C.2.2) ───
+resetRehearsalDb();
 const { runTest57 } = await import('./test_57_phase3c22_final_integrity_lock_gate.js');
 const test57Result = await runTest57();
 passedCount += test57Result.passed;
 totalCount += test57Result.total;
+
+// Limpieza de entorno rehearsal PRE-015
+delete process.env.PRESUVOZ_PRE015_REHEARSAL_DB;
+try {
+  if (fs.existsSync(rehearsalDbPath)) fs.unlinkSync(rehearsalDbPath);
+} catch (_) {}
 
 // ─── TEST 58: Post-Deployment Stabilization & Production Verification (Fase 3D.1) ───
 const { runTest58 } = await import('./test_58_phase3d_post_deployment_stabilization.js');
 const test58Result = await runTest58();
 passedCount += test58Result.passed;
 totalCount += test58Result.total;
+
+// ─── TEST 59: Post-015 Runtime Compatibility & Regression Hardening (Fase 3D.2) ───
+const { runTest59 } = await import('./test_59_phase3d2_runtime_post015.js');
+const test59Result = await runTest59();
+passedCount += test59Result.passed;
+totalCount += test59Result.total;
 
 console.log("==========================================================");
 if (passedCount === totalCount) {

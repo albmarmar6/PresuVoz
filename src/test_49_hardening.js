@@ -23,8 +23,7 @@ export async function runTest49() {
     }
   }
 
-  // 0. Preparar entorno de copia aislada desde dataset de producción (preservando data/presuvoz.db intacto)
-  const prodDbPath = path.resolve('data', 'presuvoz.db');
+  const prodDbPath = path.resolve(process.env.PRESUVOZ_PRE015_REHEARSAL_DB || 'data/presuvoz.db');
   const test49DbPath = path.resolve('data', 'presuvoz_test49_hardening.db');
   fs.copyFileSync(prodDbPath, test49DbPath);
 
