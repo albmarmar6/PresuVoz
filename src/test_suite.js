@@ -8625,6 +8625,12 @@ const test55Result = await runTest55();
 passedCount += test55Result.passed;
 totalCount += test55Result.total;
 
+// ─── TEST 56: Final Deployment Safety Hardening (Fase 3C.2.1) ───
+const { runTest56 } = await import('./test_56_phase3c21_final_deployment_hardening.js');
+const test56Result = await runTest56();
+passedCount += test56Result.passed;
+totalCount += test56Result.total;
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

@@ -187,6 +187,14 @@ export function verifyMigrationLineage(db, nextVersion) {
  * @param {boolean} [options.enforceLineage] Exigir linaje estricto sin huecos
  * @returns {{ appliedCount: number, appliedVersions: number[] }}
  */
+export class MigrationIncidentError extends Error {
+  constructor(message, diagnostic) {
+    super(message);
+    this.name = 'MigrationIncidentError';
+    this.diagnostic = diagnostic;
+  }
+}
+
 export function runMigrations(db, options = {}) {
   // 1. Barrera General: Por defecto NO migrar (Opening/inspecting a database must NEVER mutate its schema)
   const isAuthorized = options.authorized === true || (options.authorized !== false && process.env.ALLOW_DATABASE_MIGRATIONS === 'true');
@@ -224,7 +232,41 @@ export function runMigrations(db, options = {}) {
         console.log(`✅ [Migración ${m.version}] '${m.name}' aplicada con éxito.`);
       } catch (err) {
         console.error(`❌ [Migración ${m.version}] Fallo crítico al aplicar '${m.name}':`, err.message);
-        throw err;
+        let integrityOk = false;
+        let fkViolations = -1;
+        let versionsAfter = [];
+        try {
+          const integ = db.prepare('PRAGMA integrity_check;').get();
+          integrityOk = integ && (integ.integrity_check === 'ok' || integ.integrity_check === 'OK');
+          const fks = db.prepare('PRAGMA foreign_key_check;').all();
+          fkViolations = fks.length;
+          versionsAfter = db.prepare('SELECT version FROM schema_migrations ORDER BY version ASC;').all().map(r => r.version);
+        } catch (_) {}
+
+        // Matriz Formal D:
+        // Si el rollback de 015 deja un estado exactamente equivalente al esperado antes de 015 y todas las verificaciones pasan: ABORT.
+        // Si el estado no es inequívocamente seguro: RESTORE.
+        const isSafeRollback = integrityOk && fkViolations === 0 && !versionsAfter.includes(m.version);
+        const decision = isSafeRollback ? 'ABORT' : 'RESTORE';
+
+        const incident = {
+          phase: 'STANDALONE_TRANSACTION_FAILURE',
+          versionAttempted: m.version,
+          migrationName: m.name,
+          rolledBack: true,
+          versionsBefore: appliedVersions.slice(),
+          versionsAfter,
+          integrityOk,
+          fkViolations,
+          decision,
+          originalError: err.message
+        };
+
+        const incidentErr = new MigrationIncidentError(
+          `🛑 [MIGRATION FAILURE] Error en migración ${m.version} (${m.name}): ${err.message}. Decisión operativa: ${decision}.`,
+          incident
+        );
+        throw incidentErr;
       }
     } else {
       // Ejecutar cada migración en su propia transacción atómica
@@ -238,13 +280,50 @@ export function runMigrations(db, options = {}) {
         appliedVersions.push(m.version);
         console.log(`✅ [Migración ${m.version}] '${m.name}' aplicada con éxito.`);
       } catch (err) {
+        let rolledBack = false;
         try {
           db.exec('ROLLBACK;');
+          rolledBack = true;
         } catch (rbErr) {
           console.error('⚠️ Error al hacer rollback de migración:', rbErr.message);
         }
-        console.error(`❌ [Migración ${m.version}] Fallo crítico al aplicar '${m.name}':`, err.message);
-        throw err;
+
+        let integrityOk = false;
+        let fkViolations = -1;
+        let versionsAfter = [];
+        try {
+          const integ = db.prepare('PRAGMA integrity_check;').get();
+          integrityOk = integ && (integ.integrity_check === 'ok' || integ.integrity_check === 'OK');
+          const fks = db.prepare('PRAGMA foreign_key_check;').all();
+          fkViolations = fks.length;
+          versionsAfter = db.prepare('SELECT version FROM schema_migrations ORDER BY version ASC;').all().map(r => r.version);
+        } catch (_) {}
+
+        // Matriz Formal B:
+        // Si la migración falla antes de COMMIT y ROLLBACK tiene éxito en estado conocido: DECISIÓN = ABORT.
+        // Si el estado queda indeterminado o integridad corrupta: DECISIÓN = RESTORE.
+        const isKnownSafe = rolledBack && integrityOk && fkViolations === 0 && !versionsAfter.includes(m.version);
+        const decision = isKnownSafe ? 'ABORT' : 'RESTORE';
+
+        const incident = {
+          phase: 'TRANSACTIONAL_MIGRATION_FAILURE',
+          versionAttempted: m.version,
+          migrationName: m.name,
+          rolledBack,
+          versionsBefore: appliedVersions.slice(),
+          versionsAfter,
+          integrityOk,
+          fkViolations,
+          decision,
+          originalError: err.message
+        };
+
+        console.error(`❌ [Migración ${m.version}] Fallo crítico al aplicar '${m.name}'. Decisión: ${decision}. Rolled back: ${rolledBack}. Integrity: ${integrityOk ? 'OK' : 'FAIL'}. FKs: ${fkViolations}`);
+        const incidentErr = new MigrationIncidentError(
+          `🛑 [MIGRATION FAILURE] Error en migración ${m.version} (${m.name}): ${err.message}. Decisión operativa: ${decision}.`,
+          incident
+        );
+        throw incidentErr;
       }
     }
   }
@@ -252,6 +331,44 @@ export function runMigrations(db, options = {}) {
   return {
     appliedCount: appliedVersions.length,
     appliedVersions
+  };
+}
+
+/**
+ * Realiza una validación exhaustiva post-migración del esquema y datos.
+ * Criterio E: Si algo falla -> RESTORE.
+ * Criterio F: Todo correcto -> CONTINUE.
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {number[]} [expectedVersions]
+ * @returns {{ success: boolean, decision: 'CONTINUE' | 'RESTORE', integrityOk: boolean, fkViolations: number, versionsOk: boolean, tablesOk: boolean, appliedVersions: number[] }}
+ */
+export function validatePostMigration(db, expectedVersions = Array.from({ length: 15 }, (_, i) => i + 1)) {
+  const integrity = db.prepare('PRAGMA integrity_check;').get();
+  const integrityOk = integrity && (integrity.integrity_check === 'ok' || integrity.integrity_check === 'OK');
+  const fks = db.prepare('PRAGMA foreign_key_check;').all();
+  const fksOk = fks.length === 0;
+  const applied = getAppliedMigrations(db).map(m => m.version);
+  const versionsOk = JSON.stringify(applied) === JSON.stringify(expectedVersions);
+
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+  const requiredTables = [
+    'companies', 'channel_identities', 'users', 'memberships',
+    'budgets', 'invoices', 'payments', 'payment_allocations',
+    'appointments', 'shopping_items', 'business_tax_profiles',
+    'fiscal_periods', 'purchase_invoices', 'expense_payments',
+    'investment_assets', 'fiscal_incidents', 'audit_logs', 'messages'
+  ];
+  const tablesOk = requiredTables.every(t => tables.includes(t));
+
+  const allOk = Boolean(integrityOk && fksOk && versionsOk && tablesOk);
+  return {
+    success: allOk,
+    decision: allOk ? 'CONTINUE' : 'RESTORE',
+    integrityOk: Boolean(integrityOk),
+    fkViolations: fks.length,
+    versionsOk,
+    tablesOk,
+    appliedVersions: applied
   };
 }
 
