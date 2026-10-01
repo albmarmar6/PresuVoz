@@ -15,13 +15,14 @@ function getDbData() {
   const db = new DatabaseSync(DB_PATH);
 
   const companies = db.prepare('SELECT * FROM companies ORDER BY updated_at DESC').all();
-  const budgets = db.prepare('SELECT id, company_phone, client_name, client_address, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets ORDER BY updated_at DESC').all();
-  const invoices = db.prepare('SELECT id, budget_id, company_phone, client_name, total_amount, status, created_at, data_json FROM invoices ORDER BY created_at DESC').all();
-  const payments = db.prepare('SELECT id, budget_id, company_phone, amount, method, concept, created_at, data_json FROM payments ORDER BY created_at DESC').all();
-  const appointments = db.prepare('SELECT id, company_phone, client_name, client_phone, client_address, date, time, notes, status, reschedule_count, created_at, updated_at FROM appointments ORDER BY date DESC, time DESC').all();
+  const budgets = db.prepare('SELECT * FROM budgets ORDER BY updated_at DESC').all();
+  const invoices = db.prepare('SELECT * FROM invoices ORDER BY created_at DESC').all();
+  const payments = db.prepare('SELECT * FROM payments ORDER BY created_at DESC').all();
+  const appointments = db.prepare('SELECT * FROM appointments ORDER BY date DESC, time DESC').all();
+
   let shoppingItems = [];
   try {
-    shoppingItems = db.prepare('SELECT id, company_phone, client_name, budget_id, description, qty, unit, status, notes, created_at, bought_at FROM shopping_items ORDER BY status ASC, created_at DESC').all();
+    shoppingItems = db.prepare('SELECT * FROM shopping_items ORDER BY status ASC, created_at DESC').all();
   } catch (e) {
     // Tabla shopping_items puede no existir si no se inicializó aún
   }
@@ -87,7 +88,7 @@ function getDbData() {
         clientName: b.client_name,
         clientAddress: b.client_address,
         clientPhone: b.client_phone,
-        companyPhone: b.company_phone,
+        companyId: b.company_id,
         totalAmount,
         totalPaid,
         remainingBalance,
@@ -262,7 +263,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
           html += '<tr class="hover:bg-slate-800/50 transition-colors">';
           html += '<td class="p-3.5 font-bold font-mono text-emerald-400">' + b.id + '</td>';
           html += '<td class="p-3.5"><div class="font-semibold text-white">' + (b.client_name || 'Cliente') + '</div><div class="text-slate-400 text-[11px]">' + (b.client_address || '-') + '</div></td>';
-          html += '<td class="p-3.5 font-mono text-slate-300">' + b.company_phone + '</td>';
+          html += '<td class="p-3.5 font-mono text-slate-300">' + (b.company_id ? b.company_id.slice(0, 8) + '...' : '-') + '</td>';
           html += '<td class="p-3.5"><div class="font-bold text-white text-sm">' + formatEur(b.total_amount) + '</div>' + (paid > 0 ? '<div class="text-[11px] text-emerald-400">Cobrado: ' + formatEur(paid) + '</div><div class="text-[11px] text-amber-400">Restante: ' + formatEur(remaining) + '</div>' : '') + '</td>';
           html += '<td class="p-3.5">' + renderBadge(b.status) + '</td>';
           html += '<td class="p-3.5"><span class="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[11px]">' + partCount + ' partidas</span></td>';
@@ -384,7 +385,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
           html += '<td class="p-3.5">' + clientDisplay + '</td>';
           html += '<td class="p-3.5 ' + descClass + '">' + m.description + (m.notes ? '<div class="text-[11px] text-slate-400 font-normal">' + m.notes + '</div>' : '') + '</td>';
           html += '<td class="p-3.5 font-mono text-emerald-400 font-bold">' + (m.qty || 1) + ' ' + (m.unit || 'ud') + '</td>';
-          html += '<td class="p-3.5 font-mono text-slate-400">' + (m.company_phone || '-') + '</td>';
+          html += '<td class="p-3.5 font-mono text-slate-400">' + (m.company_id ? m.company_id.slice(0, 8) + '...' : '-') + '</td>';
           html += '<td class="p-3.5">' + badge + '</td>';
           html += '<td class="p-3.5 font-mono text-slate-400 text-[11px]">' + (m.created_at ? new Date(m.created_at).toLocaleDateString('es-ES') : '-') + (m.bought_at ? '<div class="text-emerald-500/80">Comprado: ' + new Date(m.bought_at).toLocaleDateString('es-ES') + '</div>' : '') + '</td>';
           html += '</tr>';

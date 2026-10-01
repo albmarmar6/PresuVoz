@@ -26,6 +26,22 @@ export const db = new DatabaseSync(DB_PATH);
 // Activar integridad referencial estricta
 db.exec('PRAGMA foreign_keys = ON;');
 
+let _cachedIs015 = null;
+export function isMigration015Applied(targetDb = db) {
+  if (_cachedIs015 !== null && targetDb === db) return _cachedIs015;
+  try {
+    const row = targetDb.prepare("SELECT 1 FROM schema_migrations WHERE name = '015_structural_canonical_company_id'").get();
+    const res = !!row;
+    if (targetDb === db) _cachedIs015 = res;
+    return res;
+  } catch {
+    return false;
+  }
+}
+export function resetMigration015Cache() {
+  _cachedIs015 = null;
+}
+
 // NOTA DE SEGURIDAD CRÍTICA:
 // Opening/inspecting a database must NEVER mutate its schema.
 // Las migraciones NO se ejecutan automáticamente al importar db_service.js.
@@ -362,37 +378,69 @@ export function saveBudget(companyContextOrIdOrPhone, budget) {
     workMemory: budget.workMemory || {}
   };
 
-  const stmt = db.prepare(`
-    INSERT INTO budgets (id, company_id, company_phone, client_name, client_address, client_phone, total_amount, status, data_json, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      company_id = COALESCE(excluded.company_id, budgets.company_id),
-      company_phone = COALESCE(excluded.company_phone, budgets.company_phone),
-      client_name = excluded.client_name,
-      client_address = excluded.client_address,
-      client_phone = excluded.client_phone,
-      total_amount = excluded.total_amount,
-      status = excluded.status,
-      data_json = excluded.data_json,
-      updated_at = excluded.updated_at
-    WHERE budgets.company_id = excluded.company_id 
-       OR budgets.company_id IS NULL
-       OR (budgets.company_phone = excluded.company_phone AND budgets.company_id IS NULL)
-  `);
 
-  stmt.run(
-    budget.id,
-    companyId,
-    cleanPhone,
-    budget.client?.name || 'Cliente Particular',
-    budget.client?.address || '',
-    budget.client?.phone || '',
-    total,
-    budget.status || 'PENDIENTE_ACEPTACION',
-    JSON.stringify(cleanBudget),
-    now,
-    now
-  );
+  if (!isMigration015Applied()) {
+    const stmt = db.prepare(`
+      INSERT INTO budgets (id, company_id, company_phone, client_name, client_address, client_phone, total_amount, status, data_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        company_id = COALESCE(excluded.company_id, budgets.company_id),
+        company_phone = COALESCE(excluded.company_phone, budgets.company_phone),
+        client_name = excluded.client_name,
+        client_address = excluded.client_address,
+        client_phone = excluded.client_phone,
+        total_amount = excluded.total_amount,
+        status = excluded.status,
+        data_json = excluded.data_json,
+        updated_at = excluded.updated_at
+      WHERE budgets.company_id = excluded.company_id 
+         OR budgets.company_id IS NULL
+         OR (budgets.company_phone = excluded.company_phone AND budgets.company_id IS NULL)
+    `);
+
+    stmt.run(
+      budget.id,
+      companyId,
+      cleanPhone,
+      budget.client?.name || 'Cliente Particular',
+      budget.client?.address || '',
+      budget.client?.phone || '',
+      total,
+      budget.status || 'PENDIENTE_ACEPTACION',
+      JSON.stringify(cleanBudget),
+      now,
+      now
+    );
+  } else {
+    const stmt = db.prepare(`
+      INSERT INTO budgets (id, company_id, client_name, client_address, client_phone, total_amount, status, data_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        company_id = COALESCE(excluded.company_id, budgets.company_id),
+        client_name = excluded.client_name,
+        client_address = excluded.client_address,
+        client_phone = excluded.client_phone,
+        total_amount = excluded.total_amount,
+        status = excluded.status,
+        data_json = excluded.data_json,
+        updated_at = excluded.updated_at
+      WHERE budgets.company_id = excluded.company_id 
+         OR budgets.company_id IS NULL
+    `);
+
+    stmt.run(
+      budget.id,
+      companyId,
+      budget.client?.name || 'Cliente Particular',
+      budget.client?.address || '',
+      budget.client?.phone || '',
+      total,
+      budget.status || 'PENDIENTE_ACEPTACION',
+      JSON.stringify(cleanBudget),
+      now,
+      now
+    );
+  }
 
   return cleanBudget;
 }
@@ -634,24 +682,6 @@ export function saveInvoice(companyContextOrIdOrPhone, invoice) {
   const fiscalPeriod = invoice.fiscal_period || invoice.fiscalPeriod || null;
   const verifactuHash = invoice.verifactu_hash || invoice.verifactuHash || null;
 
-  const stmt = db.prepare(`
-    INSERT INTO invoices (id, company_id, budget_id, company_phone, client_name, total_amount, status, data_json, rectifies_invoice_id, fiscal_period, verifactu_hash, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      company_id = COALESCE(excluded.company_id, invoices.company_id),
-      company_phone = COALESCE(excluded.company_phone, invoices.company_phone),
-      budget_id = excluded.budget_id,
-      client_name = excluded.client_name,
-      total_amount = excluded.total_amount,
-      status = excluded.status,
-      data_json = excluded.data_json,
-      rectifies_invoice_id = excluded.rectifies_invoice_id,
-      fiscal_period = excluded.fiscal_period,
-      verifactu_hash = excluded.verifactu_hash
-    WHERE invoices.company_id = excluded.company_id 
-       OR invoices.company_id IS NULL
-       OR (invoices.company_phone = excluded.company_phone AND invoices.company_id IS NULL)
-  `);
 
   invoice.rectifiesInvoiceId = rectifiesId;
   invoice.fiscalPeriod = fiscalPeriod;
@@ -660,20 +690,73 @@ export function saveInvoice(companyContextOrIdOrPhone, invoice) {
     invoice.isAdvance = Boolean(invoice.is_advance);
   }
 
-  stmt.run(
-    invoice.id,
-    companyId,
-    budgetId,
-    cleanPhone,
-    invoice.client?.name || invoice.client_name || 'Cliente Particular',
-    total,
-    invoice.status || 'PENDIENTE_PAGO',
-    JSON.stringify(invoice),
-    rectifiesId,
-    fiscalPeriod,
-    verifactuHash,
-    now
-  );
+  if (!isMigration015Applied()) {
+    const stmt = db.prepare(`
+      INSERT INTO invoices (id, company_id, budget_id, company_phone, client_name, total_amount, status, data_json, rectifies_invoice_id, fiscal_period, verifactu_hash, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        company_id = COALESCE(excluded.company_id, invoices.company_id),
+        company_phone = COALESCE(excluded.company_phone, invoices.company_phone),
+        budget_id = excluded.budget_id,
+        client_name = excluded.client_name,
+        total_amount = excluded.total_amount,
+        status = excluded.status,
+        data_json = excluded.data_json,
+        rectifies_invoice_id = excluded.rectifies_invoice_id,
+        fiscal_period = excluded.fiscal_period,
+        verifactu_hash = excluded.verifactu_hash
+      WHERE invoices.company_id = excluded.company_id 
+         OR invoices.company_id IS NULL
+         OR (invoices.company_phone = excluded.company_phone AND invoices.company_id IS NULL)
+    `);
+
+    stmt.run(
+      invoice.id,
+      companyId,
+      budgetId,
+      cleanPhone,
+      invoice.client?.name || invoice.client_name || 'Cliente Particular',
+      total,
+      invoice.status || 'PENDIENTE_PAGO',
+      JSON.stringify(invoice),
+      rectifiesId,
+      fiscalPeriod,
+      verifactuHash,
+      now
+    );
+  } else {
+    const stmt = db.prepare(`
+      INSERT INTO invoices (id, company_id, budget_id, client_name, total_amount, status, data_json, rectifies_invoice_id, fiscal_period, verifactu_hash, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        company_id = COALESCE(excluded.company_id, invoices.company_id),
+        budget_id = excluded.budget_id,
+        client_name = excluded.client_name,
+        total_amount = excluded.total_amount,
+        status = excluded.status,
+        data_json = excluded.data_json,
+        rectifies_invoice_id = excluded.rectifies_invoice_id,
+        fiscal_period = excluded.fiscal_period,
+        verifactu_hash = excluded.verifactu_hash
+      WHERE invoices.company_id = excluded.company_id 
+         OR invoices.company_id IS NULL
+    `);
+
+    stmt.run(
+      invoice.id,
+      companyId,
+      budgetId,
+      invoice.client?.name || invoice.client_name || 'Cliente Particular',
+      total,
+      invoice.status || 'PENDIENTE_PAGO',
+      JSON.stringify(invoice),
+      rectifiesId,
+      fiscalPeriod,
+      verifactuHash,
+      now
+    );
+  }
+
   return invoice;
 }
 
@@ -875,36 +958,62 @@ export function savePayment(companyContextOrIdOrPhone, paymentOrBudgetId, maybeP
   // La nueva arquitectura formal desacopla los cobros de las facturas a través de la tabla
   // canónica 'payment_allocations', donde la relación con la factura se almacena unívocamente
   // en la columna 'invoice_id'. Se mantiene 'payments.budget_id' estrictamente por retrocompatibilidad.
-  const stmt = db.prepare(`
-    INSERT INTO payments (id, company_id, budget_id, company_phone, amount, method, concept, data_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      company_id = COALESCE(excluded.company_id, payments.company_id),
-      company_phone = COALESCE(excluded.company_phone, payments.company_phone),
-      budget_id = excluded.budget_id,
-      amount = excluded.amount,
-      method = excluded.method,
-      concept = excluded.concept,
-      data_json = excluded.data_json
-    WHERE payments.company_id = excluded.company_id 
-       OR payments.company_id IS NULL
-       OR (payments.company_phone = excluded.company_phone AND payments.company_id IS NULL)
-  `);
 
   // Ejecución transaccional estrictamente atómica
   db.exec('BEGIN IMMEDIATE;');
   try {
-    stmt.run(
-      pId,
-      companyId,
-      targetId,
-      cleanPhone,
-      Number(payment.amount || 0),
-      payment.method || 'Bizum',
-      payment.concept || '',
-      JSON.stringify(payment),
-      now
-    );
+    if (!isMigration015Applied()) {
+      const stmt = db.prepare(`
+        INSERT INTO payments (id, company_id, budget_id, company_phone, amount, method, concept, data_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          company_id = COALESCE(excluded.company_id, payments.company_id),
+          company_phone = COALESCE(excluded.company_phone, payments.company_phone),
+          budget_id = excluded.budget_id,
+          amount = excluded.amount,
+          method = excluded.method,
+          concept = excluded.concept,
+          data_json = excluded.data_json
+        WHERE payments.company_id = excluded.company_id 
+           OR payments.company_id IS NULL
+           OR (payments.company_phone = excluded.company_phone AND payments.company_id IS NULL)
+      `);
+      stmt.run(
+        pId,
+        companyId,
+        targetId,
+        cleanPhone,
+        Number(payment.amount || 0),
+        payment.method || 'Bizum',
+        payment.concept || '',
+        JSON.stringify(payment),
+        now
+      );
+    } else {
+      const stmt = db.prepare(`
+        INSERT INTO payments (id, company_id, budget_id, amount, method, concept, data_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          company_id = COALESCE(excluded.company_id, payments.company_id),
+          budget_id = excluded.budget_id,
+          amount = excluded.amount,
+          method = excluded.method,
+          concept = excluded.concept,
+          data_json = excluded.data_json
+        WHERE payments.company_id = excluded.company_id 
+           OR payments.company_id IS NULL
+      `);
+      stmt.run(
+        pId,
+        companyId,
+        targetId,
+        Number(payment.amount || 0),
+        payment.method || 'Bizum',
+        payment.concept || '',
+        JSON.stringify(payment),
+        now
+      );
+    }
 
     // Si targetId es una factura legítima del tenant y el importe es estrictamente positivo (> 0),
     // registrar automáticamente su allocation inicial si no existe previamente
@@ -1451,9 +1560,11 @@ export function saveAppointment(companyContextOrIdOrPhone, appointment = {}) {
   let isNew = false;
   const existing = id ? getAppointment(companyContextOrIdOrPhone, id) : null;
   
+
   if (id && !existing) {
     // Verificar si el ID ya existe en otro tenant (cross-tenant overwrite attempt)
-    const crossCheck = db.prepare('SELECT id, company_id, company_phone FROM appointments WHERE id = ?').get(id);
+    const checkSql = 'SELECT id, company_id FROM appointments WHERE id = ?';
+    const crossCheck = db.prepare(checkSql).get(id);
     if (crossCheck) {
       console.warn(`🛑 [Seguridad Tenant] Intento de sobreescritura cross-tenant en cita '${id}'. Rechazado.`);
       return null;
@@ -1490,42 +1601,80 @@ export function saveAppointment(companyContextOrIdOrPhone, appointment = {}) {
     ? Number(appointment.reschedule_count) 
     : (existing?.rescheduleCount || 0);
 
-  const stmt = db.prepare(`
-    INSERT INTO appointments (
-      id, company_id, company_phone, client_name, client_phone, client_address,
-      date, time, title, notes, timezone,
-      status, outcome, needs_outcome_confirmation,
-      scheduled_start, scheduled_end, original_scheduled_start, reschedule_count,
-      created_at, updated_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      company_id = COALESCE(excluded.company_id, appointments.company_id),
-      company_phone = COALESCE(excluded.company_phone, appointments.company_phone),
-      client_name = excluded.client_name,
-      client_phone = excluded.client_phone,
-      client_address = excluded.client_address,
-      date = excluded.date,
-      time = excluded.time,
-      title = excluded.title,
-      notes = excluded.notes,
-      timezone = excluded.timezone,
-      status = excluded.status,
-      outcome = excluded.outcome,
-      needs_outcome_confirmation = excluded.needs_outcome_confirmation,
-      scheduled_start = excluded.scheduled_start,
-      scheduled_end = excluded.scheduled_end,
-      reschedule_count = excluded.reschedule_count,
-      updated_at = excluded.updated_at
-  `);
+  if (!isMigration015Applied()) {
+    const stmt = db.prepare(`
+      INSERT INTO appointments (
+        id, company_id, company_phone, client_name, client_phone, client_address,
+        date, time, title, notes, timezone,
+        status, outcome, needs_outcome_confirmation,
+        scheduled_start, scheduled_end, original_scheduled_start, reschedule_count,
+        created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        company_id = COALESCE(excluded.company_id, appointments.company_id),
+        company_phone = COALESCE(excluded.company_phone, appointments.company_phone),
+        client_name = excluded.client_name,
+        client_phone = excluded.client_phone,
+        client_address = excluded.client_address,
+        date = excluded.date,
+        time = excluded.time,
+        title = excluded.title,
+        notes = excluded.notes,
+        timezone = excluded.timezone,
+        status = excluded.status,
+        outcome = excluded.outcome,
+        needs_outcome_confirmation = excluded.needs_outcome_confirmation,
+        scheduled_start = excluded.scheduled_start,
+        scheduled_end = excluded.scheduled_end,
+        reschedule_count = excluded.reschedule_count,
+        updated_at = excluded.updated_at
+    `);
 
-  stmt.run(
-    id, companyId, cleanPhone, clientName, clientPhone, clientAddress,
-    date, time, title, notes, timezone,
-    status, outcome, needsOutcomeConfirmation,
-    scheduledStart, scheduledEnd, originalScheduledStart, rescheduleCount,
-    now, now
-  );
+    stmt.run(
+      id, companyId, cleanPhone, clientName, clientPhone, clientAddress,
+      date, time, title, notes, timezone,
+      status, outcome, needsOutcomeConfirmation,
+      scheduledStart, scheduledEnd, originalScheduledStart, rescheduleCount,
+      now, now
+    );
+  } else {
+    const stmt = db.prepare(`
+      INSERT INTO appointments (
+        id, company_id, client_name, client_phone, client_address,
+        date, time, title, notes, timezone,
+        status, outcome, needs_outcome_confirmation,
+        scheduled_start, scheduled_end, original_scheduled_start, reschedule_count,
+        created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        company_id = COALESCE(excluded.company_id, appointments.company_id),
+        client_name = excluded.client_name,
+        client_phone = excluded.client_phone,
+        client_address = excluded.client_address,
+        date = excluded.date,
+        time = excluded.time,
+        title = excluded.title,
+        notes = excluded.notes,
+        timezone = excluded.timezone,
+        status = excluded.status,
+        outcome = excluded.outcome,
+        needs_outcome_confirmation = excluded.needs_outcome_confirmation,
+        scheduled_start = excluded.scheduled_start,
+        scheduled_end = excluded.scheduled_end,
+        reschedule_count = excluded.reschedule_count,
+        updated_at = excluded.updated_at
+    `);
+
+    stmt.run(
+      id, companyId, clientName, clientPhone, clientAddress,
+      date, time, title, notes, timezone,
+      status, outcome, needsOutcomeConfirmation,
+      scheduledStart, scheduledEnd, originalScheduledStart, rescheduleCount,
+      now, now
+    );
+  }
 
   if (isNew) {
     recordAuditLog({
@@ -1960,27 +2109,13 @@ export function getAppointmentHistory(companyContextOrIdOrPhone, appointmentId) 
   const companyId = tenant?.companyId;
   if (!companyId) return [];
 
-  const cols = db.prepare('PRAGMA table_info("audit_logs")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let rows = [];
-  if (hasCompanyIdCol) {
-    rows = db.prepare(`
-      SELECT * FROM audit_logs
-      WHERE company_id = ?
-        AND entity_type = 'APPOINTMENT'
-        AND entity_id = ?
-      ORDER BY timestamp ASC
-    `).all(companyId, appointmentId);
-  } else {
-    rows = db.prepare(`
-      SELECT * FROM audit_logs
-      WHERE business_id = ?
-        AND entity_type = 'APPOINTMENT'
-        AND entity_id = ?
-      ORDER BY timestamp ASC
-    `).all(companyId, appointmentId);
-  }
+  const rows = db.prepare(`
+    SELECT * FROM audit_logs
+    WHERE company_id = ?
+      AND entity_type = 'APPOINTMENT'
+      AND entity_id = ?
+    ORDER BY timestamp ASC
+  `).all(companyId, appointmentId);
 
   return rows.map(r => ({
     id: r.id,
@@ -2228,10 +2363,16 @@ export function addShoppingItems(companyContextOrIdOrPhone, items, defaultClient
   const now = new Date().toISOString();
   const inserted = [];
 
-  const stmt = db.prepare(`
-    INSERT INTO shopping_items (id, company_id, company_phone, client_name, budget_id, description, qty, unit, status, notes, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
-  `);
+
+  const stmt = !isMigration015Applied()
+    ? db.prepare(`
+        INSERT INTO shopping_items (id, company_id, company_phone, client_name, budget_id, description, qty, unit, status, notes, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+      `)
+    : db.prepare(`
+        INSERT INTO shopping_items (id, company_id, client_name, budget_id, description, qty, unit, status, notes, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+      `);
 
   for (const item of itemsList) {
     if (!item) continue;
@@ -2265,7 +2406,11 @@ export function addShoppingItems(companyContextOrIdOrPhone, items, defaultClient
     }
 
     const id = `MAT-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-    stmt.run(id, companyId, cleanPhone, clientName, budgetId, description, qty, unit, notes, now);
+  if (!isMigration015Applied()) {
+      stmt.run(id, companyId, cleanPhone, clientName, budgetId, description, qty, unit, notes, now);
+    } else {
+      stmt.run(id, companyId, clientName, budgetId, description, qty, unit, notes, now);
+    }
     inserted.push({
       id,
       companyId,
@@ -2767,10 +2912,8 @@ export function recordIncomingMessage({
     }
   }
 
-  const cols = db.prepare('PRAGMA table_info("messages")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
 
-  if (hasCompanyIdCol) {
+  if (!isMigration015Applied()) {
     const stmt = db.prepare(`
       INSERT INTO messages (
         id, whatsapp_message_id, company_id, business_id,
@@ -2792,7 +2935,7 @@ export function recordIncomingMessage({
   } else {
     const stmt = db.prepare(`
       INSERT INTO messages (
-        id, whatsapp_message_id, business_id,
+        id, whatsapp_message_id, company_id,
         chat_id, sender_phone, content, timestamp, status
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(whatsapp_message_id) DO NOTHING
@@ -2800,7 +2943,7 @@ export function recordIncomingMessage({
     stmt.run(
       msgId,
       whatsappMessageId,
-      businessId || '',
+      canonicalCompanyId,
       chatId || '',
       senderPhone || '',
       content || '',
@@ -2836,10 +2979,8 @@ export function updateMessageStatus(companyContextOrWamId, whatsappMessageIdOrSt
 
   if (!whatsappMessageId || !status) return false;
 
-  const cols = db.prepare('PRAGMA table_info("messages")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
 
-  if (targetCompanyId && hasCompanyIdCol) {
+  if (targetCompanyId) {
     const res = db.prepare('UPDATE messages SET status = ? WHERE whatsapp_message_id = ? AND company_id = ?').run(status, whatsappMessageId, targetCompanyId);
     return res.changes > 0;
   } else {
@@ -2866,15 +3007,13 @@ export function getMessageByWhatsappId(companyContextOrWamId, maybeWamId = null)
 
   if (!whatsappMessageId) return null;
 
-  const cols = db.prepare('PRAGMA table_info("messages")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
 
   const stmt = db.prepare('SELECT * FROM messages WHERE whatsapp_message_id = ?');
   const row = stmt.get(whatsappMessageId);
   if (!row) return null;
 
   // Zero-Disclosure: si se solicitó con ámbito tenant y no pertenece a dicho tenant -> null
-  if (targetCompanyId && hasCompanyIdCol && row.company_id !== targetCompanyId) {
+  if (targetCompanyId && row.company_id !== targetCompanyId) {
     return null;
   }
 
@@ -2905,26 +3044,6 @@ export function getMessage(companyContextOrId, messageIdOrWamId) {
   const tenant = resolveCompanyTenant(companyContextOrId);
   const companyId = tenant?.companyId || (typeof companyContextOrId === 'string' && isUuid(companyContextOrId.trim()) ? companyContextOrId.trim() : null);
   if (!companyId) return null;
-
-  const cols = db.prepare('PRAGMA table_info("messages")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  if (!hasCompanyIdCol) {
-    const row = db.prepare('SELECT * FROM messages WHERE id = ? OR whatsapp_message_id = ?').get(messageIdOrWamId, messageIdOrWamId);
-    if (!row) return null;
-    return {
-      id: row.id,
-      whatsappMessageId: row.whatsapp_message_id,
-      companyId: null,
-      company_id: null,
-      businessId: row.business_id,
-      chatId: row.chat_id,
-      senderPhone: row.sender_phone,
-      content: row.content,
-      timestamp: row.timestamp,
-      status: row.status
-    };
-  }
 
   const row = db.prepare('SELECT * FROM messages WHERE (id = ? OR whatsapp_message_id = ?) AND company_id = ?').get(messageIdOrWamId, messageIdOrWamId, companyId);
   if (!row) return null;
@@ -2990,11 +3109,9 @@ export function listRecentMessages(companyContextOrChatId, limitOrChatId = 50, m
     limit = Number(limitOrChatId) || 50;
   }
 
-  const cols = db.prepare('PRAGMA table_info("messages")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
 
   let rows = [];
-  if (hasCompanyIdCol && companyId) {
+  if (companyId) {
     if (chatId) {
       rows = db.prepare('SELECT * FROM messages WHERE company_id = ? AND chat_id = ? ORDER BY timestamp DESC LIMIT ?').all(companyId, chatId, limit);
     } else {
@@ -3067,15 +3184,16 @@ export function getTaxProfile(companyContextOrId) {
     }
   }
 
-  // Verificar si la tabla tiene ya la columna company_id (post-migración 007)
-  const cols = db.prepare('PRAGMA table_info("business_tax_profiles")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
+  // Verificar si la migración canónica 015 está aplicada
   let row = null;
-  if (hasCompanyIdCol && canonicalCompanyId) {
-    row = db.prepare('SELECT * FROM business_tax_profiles WHERE company_id = ?').get(canonicalCompanyId);
-  } else if (!hasCompanyIdCol && legacyPhone) {
-    row = db.prepare('SELECT * FROM business_tax_profiles WHERE business_id = ?').get(legacyPhone);
+  if (isMigration015Applied()) {
+    if (canonicalCompanyId) {
+      row = db.prepare('SELECT * FROM business_tax_profiles WHERE company_id = ?').get(canonicalCompanyId);
+    }
+  } else {
+    if (legacyPhone) {
+      row = db.prepare('SELECT * FROM business_tax_profiles WHERE business_id = ?').get(legacyPhone);
+    }
   }
 
   if (!row) {
@@ -3219,10 +3337,8 @@ export function saveTaxProfile(companyContextOrId, profileData = {}) {
     updatedAt: new Date().toISOString()
   };
 
-  const cols = db.prepare('PRAGMA table_info("business_tax_profiles")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
 
-  if (hasCompanyIdCol) {
+  if (!isMigration015Applied()) {
     const stmt = db.prepare(`
       INSERT INTO business_tax_profiles (
         company_id, business_id, legal_name, tax_id, legal_form, economic_activity, iae_code,
@@ -3285,16 +3401,15 @@ export function saveTaxProfile(companyContextOrId, profileData = {}) {
       updated.updatedAt
     );
   } else {
-    // Compatibilidad pre-migración 007
     const stmt = db.prepare(`
       INSERT INTO business_tax_profiles (
-        business_id, legal_name, tax_id, legal_form, economic_activity, iae_code,
+        company_id, legal_name, tax_id, legal_form, economic_activity, iae_code,
         tax_regime, vat_regime, income_tax_regime, vat_frequency, income_tax_frequency,
         irpf_withholding_applicable, default_irpf_rate, default_vat_rate,
         accounting_start_date, fiscal_year, current_invoice_series, verifactu_status,
         gestor_name, gestor_email, gestor_phone, gestor_notes, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(business_id) DO UPDATE SET
+      ON CONFLICT(company_id) DO UPDATE SET
         legal_name = excluded.legal_name,
         tax_id = excluded.tax_id,
         legal_form = excluded.legal_form,
@@ -3320,7 +3435,7 @@ export function saveTaxProfile(companyContextOrId, profileData = {}) {
     `);
 
     stmt.run(
-      updated.businessId,
+      updated.companyId,
       updated.legalName,
       updated.taxId,
       updated.legalForm,
@@ -3369,27 +3484,12 @@ export function deleteTaxProfile(companyContextOrId) {
   }
   if (!canonicalCompanyId) return false;
 
-  const cols = db.prepare('PRAGMA table_info("business_tax_profiles")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-  if (hasCompanyIdCol) {
-    const result = db.prepare('DELETE FROM business_tax_profiles WHERE company_id = ?').run(canonicalCompanyId);
-    return result.changes > 0;
-  } else {
-    const legacyPhone = resolveLegacyBusinessId(canonicalCompanyId);
-    if (!legacyPhone) return false;
-    const result = db.prepare('DELETE FROM business_tax_profiles WHERE business_id = ?').run(legacyPhone);
-    return result.changes > 0;
-  }
+  const result = db.prepare('DELETE FROM business_tax_profiles WHERE company_id = ?').run(canonicalCompanyId);
+  return result.changes > 0;
 }
 
 /**
  * Guarda o actualiza una Factura Recibida (Compra / Proveedor)
- * 
- * Tenant Hardening & Dual-Write:
- * - Requiere companyId (UUID) o authenticatedContext como autoridad canónica.
- * - Soporta adapter transitorio por teléfono legacy para compañías existentes.
- * - Inyección de modelo: cualquier company_id o business_id dentro de inv es ignorado.
- * - Dual-write: escribe company_id como autoridad y mantiene business_id sincronizado.
  */
 export function savePurchaseInvoice(companyContextOrId, inv = {}) {
   if (!companyContextOrId) {
@@ -3415,12 +3515,9 @@ export function savePurchaseInvoice(companyContextOrId, inv = {}) {
 
   const id = safeInv.id || `REC-${new Date().getFullYear()}-${Date.now().toString().slice(-4)}`;
 
-  const cols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
   if (safeInv.id) {
-    if (hasCompanyIdCol) {
-      const existing = db.prepare('SELECT company_id, business_id FROM purchase_invoices WHERE id = ?').get(safeInv.id);
+    if (isMigration015Applied()) {
+      const existing = db.prepare('SELECT company_id FROM purchase_invoices WHERE id = ?').get(safeInv.id);
       if (existing && existing.company_id !== companyId) {
         console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar factura recibida ${safeInv.id} de otro tenant.`);
         return null;
@@ -3461,7 +3558,8 @@ export function savePurchaseInvoice(companyContextOrId, inv = {}) {
   const deductibleVat = deductibilityStatus === 'NOT_DEDUCTIBLE' || safeInv.vatDeductible === false ? 0 : (vatAmount * (deductPercent / 100));
   const isAsset = Boolean(safeInv.isInvestmentAsset || base >= 3005.06 || total >= 3005.06);
 
-  if (hasCompanyIdCol) {
+
+  if (!isMigration015Applied()) {
     const stmt = db.prepare(`
       INSERT INTO purchase_invoices (
         id, company_id, business_id, supplier_name, supplier_tax_id, invoice_number,
@@ -3529,10 +3627,9 @@ export function savePurchaseInvoice(companyContextOrId, inv = {}) {
       now
     );
   } else {
-    // Compatibilidad pre-migración 009
     const stmt = db.prepare(`
       INSERT INTO purchase_invoices (
-        id, business_id, supplier_name, supplier_tax_id, invoice_number,
+        id, company_id, supplier_name, supplier_tax_id, invoice_number,
         invoice_date, operation_date, description, taxable_base, vat_rate,
         vat_amount, total_amount, deductible_vat_amount, deductibility_status,
         income_tax_relevance, expense_category, payment_status, payment_method,
@@ -3540,7 +3637,7 @@ export function savePurchaseInvoice(companyContextOrId, inv = {}) {
         data_json, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        business_id = excluded.business_id,
+        company_id = excluded.company_id,
         supplier_name = excluded.supplier_name,
         supplier_tax_id = excluded.supplier_tax_id,
         invoice_number = excluded.invoice_number,
@@ -3568,7 +3665,7 @@ export function savePurchaseInvoice(companyContextOrId, inv = {}) {
 
     stmt.run(
       id,
-      cleanPhone,
+      companyId,
       safeInv.supplierName || 'Proveedor General',
       safeInv.supplierTaxId || null,
       safeInv.invoiceNumber || id,
@@ -3616,15 +3713,7 @@ export function getPurchaseInvoice(companyContextOrId, id) {
   }
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let row = null;
-  if (hasCompanyIdCol) {
-    row = db.prepare('SELECT * FROM purchase_invoices WHERE id = ? AND company_id = ?').get(id, companyId);
-  } else {
-    row = db.prepare('SELECT * FROM purchase_invoices WHERE id = ? AND business_id = ?').get(id, cleanPhone);
-  }
+  const row = db.prepare('SELECT * FROM purchase_invoices WHERE id = ? AND company_id = ?').get(id, companyId);
   if (!row) return null;
 
   return {
@@ -3672,19 +3761,8 @@ export function listPurchaseInvoices(companyContextOrId, { fiscalPeriod, startDa
   if (!tenant || !tenant.companyId) return [];
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let query = '';
-  const params = [];
-
-  if (hasCompanyIdCol) {
-    query = 'SELECT * FROM purchase_invoices WHERE company_id = ?';
-    params.push(companyId);
-  } else {
-    query = 'SELECT * FROM purchase_invoices WHERE business_id = ?';
-    params.push(cleanPhone);
-  }
+  let query = 'SELECT * FROM purchase_invoices WHERE company_id = ?';
+  const params = [companyId];
 
   if (fiscalPeriod) {
     const altPeriod = fiscalPeriod.includes('_') ? fiscalPeriod.replace('_', '-') : fiscalPeriod.replace('-', '_');
@@ -3755,15 +3833,7 @@ export function deletePurchaseInvoice(companyContextOrId, id) {
   }
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let res;
-  if (hasCompanyIdCol) {
-    res = db.prepare('DELETE FROM purchase_invoices WHERE id = ? AND company_id = ?').run(id, companyId);
-  } else {
-    res = db.prepare('DELETE FROM purchase_invoices WHERE id = ? AND business_id = ?').run(id, cleanPhone);
-  }
+  const res = db.prepare('DELETE FROM purchase_invoices WHERE id = ? AND company_id = ?').run(id, companyId);
   return res.changes > 0;
 }
 
@@ -3802,36 +3872,21 @@ export function saveExpensePayment(companyContextOrId, p = {}) {
   const id = safeP.id || `EXP-PAY-${Date.now()}`;
   const purchaseInvoiceId = safeP.purchaseInvoiceId || safeP.purchase_invoice_id || '';
 
-  const cols = db.prepare('PRAGMA table_info("expense_payments")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
 
   // Comprobar existencia y tenant en caso de actualización
   if (safeP.id) {
-    if (hasCompanyIdCol) {
-      const existing = db.prepare('SELECT company_id, business_id FROM expense_payments WHERE id = ?').get(safeP.id);
-      if (existing && existing.company_id !== companyId) {
-        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar pago de gasto ${safeP.id} de otro tenant.`);
-        return null;
-      }
-    } else {
-      const existing = db.prepare('SELECT business_id FROM expense_payments WHERE id = ?').get(safeP.id);
-      if (existing && existing.business_id !== cleanPhone) {
-        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar pago de gasto ${safeP.id} de otro tenant.`);
-        return null;
-      }
+    const existing = db.prepare('SELECT company_id, business_id FROM expense_payments WHERE id = ?').get(safeP.id);
+    if (existing && existing.company_id !== companyId) {
+      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar pago de gasto ${safeP.id} de otro tenant.`);
+      return null;
     }
   }
 
-  // Validación relacional: Si la factura de compra asociada existe, asegurar que pertenece al mismo tenant
   if (purchaseInvoiceId) {
-    const pinvCols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
-    const pinvHasCompanyId = pinvCols.some(c => c.name === 'company_id');
-    if (pinvHasCompanyId) {
-      const pinv = db.prepare('SELECT company_id FROM purchase_invoices WHERE id = ?').get(purchaseInvoiceId);
-      if (pinv && pinv.company_id !== companyId) {
-        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de asociar pago ${id} a factura ${purchaseInvoiceId} de otro tenant.`);
-        return null;
-      }
+    const pinv = db.prepare('SELECT company_id FROM purchase_invoices WHERE id = ?').get(purchaseInvoiceId);
+    if (pinv && pinv.company_id !== companyId) {
+      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de asociar pago ${id} a factura ${purchaseInvoiceId} de otro tenant.`);
+      return null;
     }
   }
 
@@ -3841,7 +3896,8 @@ export function saveExpensePayment(companyContextOrId, p = {}) {
   const paymentMethod = safeP.paymentMethod || safeP.payment_method || 'Transferencia';
   const reference = safeP.reference || null;
 
-  if (hasCompanyIdCol) {
+
+  if (!isMigration015Applied()) {
     const stmt = db.prepare(`
       INSERT INTO expense_payments (
         id, company_id, purchase_invoice_id, business_id, amount,
@@ -3869,15 +3925,14 @@ export function saveExpensePayment(companyContextOrId, p = {}) {
       now
     );
   } else {
-    // Compatibilidad pre-migración 010
     const stmt = db.prepare(`
       INSERT INTO expense_payments (
-        id, purchase_invoice_id, business_id, amount,
+        id, company_id, purchase_invoice_id, amount,
         payment_date, payment_method, reference, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
+        company_id = excluded.company_id,
         purchase_invoice_id = excluded.purchase_invoice_id,
-        business_id = excluded.business_id,
         amount = excluded.amount,
         payment_date = excluded.payment_date,
         payment_method = excluded.payment_method,
@@ -3886,8 +3941,8 @@ export function saveExpensePayment(companyContextOrId, p = {}) {
 
     stmt.run(
       id,
+      companyId,
       purchaseInvoiceId,
-      cleanPhone,
       amount,
       paymentDate,
       paymentMethod,
@@ -3916,15 +3971,7 @@ export function getExpensePayment(companyContextOrId, id) {
   }
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("expense_payments")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let row = null;
-  if (hasCompanyIdCol) {
-    row = db.prepare('SELECT * FROM expense_payments WHERE id = ? AND company_id = ?').get(id, companyId);
-  } else {
-    row = db.prepare('SELECT * FROM expense_payments WHERE id = ? AND business_id = ?').get(id, cleanPhone);
-  }
+  const row = db.prepare('SELECT * FROM expense_payments WHERE id = ? AND company_id = ?').get(id, companyId);
   if (!row) return null;
 
   return {
@@ -3949,19 +3996,8 @@ export function listExpensePayments(companyContextOrId, purchaseInvoiceId = null
   if (!tenant || !tenant.companyId) return [];
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("expense_payments")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let query = '';
-  const params = [];
-
-  if (hasCompanyIdCol) {
-    query = 'SELECT * FROM expense_payments WHERE company_id = ?';
-    params.push(companyId);
-  } else {
-    query = 'SELECT * FROM expense_payments WHERE business_id = ?';
-    params.push(cleanPhone);
-  }
+  let query = 'SELECT * FROM expense_payments WHERE company_id = ?';
+  const params = [companyId];
 
   if (purchaseInvoiceId) {
     query += ' AND purchase_invoice_id = ?';
@@ -4000,15 +4036,7 @@ export function deleteExpensePayment(companyContextOrId, id) {
   }
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("expense_payments")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let res;
-  if (hasCompanyIdCol) {
-    res = db.prepare('DELETE FROM expense_payments WHERE id = ? AND company_id = ?').run(id, companyId);
-  } else {
-    res = db.prepare('DELETE FROM expense_payments WHERE id = ? AND business_id = ?').run(id, cleanPhone);
-  }
+  const res = db.prepare('DELETE FROM expense_payments WHERE id = ? AND company_id = ?').run(id, companyId);
   return res.changes > 0;
 }
 
@@ -4048,36 +4076,21 @@ export function saveInvestmentAsset(companyContextOrId, asset = {}) {
   const id = safeAsset.id || `AST-${new Date().getFullYear()}-${Date.now().toString().slice(-4)}`;
   const purchaseInvoiceId = safeAsset.purchaseInvoiceId || safeAsset.purchase_invoice_id || null;
 
-  const cols = db.prepare('PRAGMA table_info("investment_assets")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
 
   // Comprobar existencia y tenant en caso de actualización
   if (safeAsset.id) {
-    if (hasCompanyIdCol) {
-      const existing = db.prepare('SELECT company_id, business_id FROM investment_assets WHERE id = ?').get(safeAsset.id);
-      if (existing && existing.company_id !== companyId) {
-        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar bien de inversión ${safeAsset.id} de otro tenant.`);
-        return null;
-      }
-    } else {
-      const existing = db.prepare('SELECT business_id FROM investment_assets WHERE id = ?').get(safeAsset.id);
-      if (existing && existing.business_id !== cleanPhone) {
-        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar bien de inversión ${safeAsset.id} de otro tenant.`);
-        return null;
-      }
+    const existing = db.prepare('SELECT company_id, business_id FROM investment_assets WHERE id = ?').get(safeAsset.id);
+    if (existing && existing.company_id !== companyId) {
+      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar bien de inversión ${safeAsset.id} de otro tenant.`);
+      return null;
     }
   }
 
-  // Validación relacional: Si la factura de compra asociada existe, asegurar que pertenece al mismo tenant
   if (purchaseInvoiceId) {
-    const pinvCols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
-    const pinvHasCompanyId = pinvCols.some(c => c.name === 'company_id');
-    if (pinvHasCompanyId) {
-      const pinv = db.prepare('SELECT company_id FROM purchase_invoices WHERE id = ?').get(purchaseInvoiceId);
-      if (pinv && pinv.company_id !== companyId) {
-        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de asociar activo ${id} a factura ${purchaseInvoiceId} de otro tenant.`);
-        return null;
-      }
+    const pinv = db.prepare('SELECT company_id FROM purchase_invoices WHERE id = ?').get(purchaseInvoiceId);
+    if (pinv && pinv.company_id !== companyId) {
+      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de asociar activo ${id} a factura ${purchaseInvoiceId} de otro tenant.`);
+      return null;
     }
   }
 
@@ -4093,7 +4106,8 @@ export function saveInvestmentAsset(companyContextOrId, asset = {}) {
   const description = safeAsset.description || 'Bien de inversión / maquinaria';
   const notes = safeAsset.notes || null;
 
-  if (hasCompanyIdCol) {
+
+  if (!isMigration015Applied()) {
     const stmt = db.prepare(`
       INSERT INTO investment_assets (
         id, company_id, business_id, purchase_invoice_id, description,
@@ -4134,25 +4148,30 @@ export function saveInvestmentAsset(companyContextOrId, asset = {}) {
       now
     );
   } else {
-    // Compatibilidad pre-migración 011
     const stmt = db.prepare(`
       INSERT INTO investment_assets (
-        id, business_id, purchase_invoice_id, description, purchase_date,
-        supplier_name, purchase_base, vat_amount, total_amount,
+        id, company_id, purchase_invoice_id, description,
+        purchase_date, supplier_name, purchase_base, vat_amount, total_amount,
         business_use_percentage, depreciation_method, depreciation_status, notes, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
+        company_id = excluded.company_id,
+        purchase_invoice_id = excluded.purchase_invoice_id,
         description = excluded.description,
+        purchase_date = excluded.purchase_date,
+        supplier_name = excluded.supplier_name,
         purchase_base = excluded.purchase_base,
         vat_amount = excluded.vat_amount,
         total_amount = excluded.total_amount,
         business_use_percentage = excluded.business_use_percentage,
+        depreciation_method = excluded.depreciation_method,
+        depreciation_status = excluded.depreciation_status,
         notes = excluded.notes
-      `);
+    `);
 
     stmt.run(
       id,
-      cleanPhone,
+      companyId,
       purchaseInvoiceId,
       description,
       purchaseDate,
@@ -4188,15 +4207,7 @@ export function getInvestmentAsset(companyContextOrId, id) {
   }
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("investment_assets")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let row = null;
-  if (hasCompanyIdCol) {
-    row = db.prepare('SELECT * FROM investment_assets WHERE id = ? AND company_id = ?').get(id, companyId);
-  } else {
-    row = db.prepare('SELECT * FROM investment_assets WHERE id = ? AND business_id = ?').get(id, cleanPhone);
-  }
+  const row = db.prepare('SELECT * FROM investment_assets WHERE id = ? AND company_id = ?').get(id, companyId);
   function mapInvestmentAssetRow(row, fallbackCompanyId, fallbackPhone) {
     if (!row) return null;
     const cid = row.company_id || fallbackCompanyId;
@@ -4250,15 +4261,7 @@ export function listInvestmentAssets(companyContextOrId) {
   if (!tenant || !tenant.companyId) return [];
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("investment_assets")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let rows = [];
-  if (hasCompanyIdCol) {
-    rows = db.prepare('SELECT * FROM investment_assets WHERE company_id = ? ORDER BY purchase_date ASC').all(companyId);
-  } else {
-    rows = db.prepare('SELECT * FROM investment_assets WHERE business_id = ? ORDER BY purchase_date ASC').all(cleanPhone);
-  }
+  const rows = db.prepare('SELECT * FROM investment_assets WHERE company_id = ? ORDER BY purchase_date ASC, created_at ASC').all(companyId);
 
   return rows.map(row => {
     const cid = row.company_id || companyId;
@@ -4318,15 +4321,7 @@ export function deleteInvestmentAsset(companyContextOrId, id) {
   }
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("investment_assets")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let res;
-  if (hasCompanyIdCol) {
-    res = db.prepare('DELETE FROM investment_assets WHERE id = ? AND company_id = ?').run(id, companyId);
-  } else {
-    res = db.prepare('DELETE FROM investment_assets WHERE id = ? AND business_id = ?').run(id, cleanPhone);
-  }
+  const res = db.prepare('DELETE FROM investment_assets WHERE id = ? AND company_id = ?').run(id, companyId);
   return res.changes > 0;
 }
 
@@ -4390,37 +4385,25 @@ export function getOrCreateFiscalPeriod(companyContextOrId, year, quarter) {
   const fiscalYear = Number(year);
   const q = Number(quarter);
 
-  const cols = db.prepare('PRAGMA table_info("fiscal_periods")').all();
-  const hasCompanyId = cols.some(c => c.name === 'company_id');
+  let period = db.prepare('SELECT * FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').get(companyId, fiscalYear, q);
 
-  let period = null;
-
-  if (hasCompanyId) {
-    period = db.prepare('SELECT * FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').get(companyId, fiscalYear, q);
-
-    if (!period) {
-      const now = new Date().toISOString();
-      const canonicalId = `${companyId}_${fiscalYear}_Q${q}`;
+  if (!period) {
+    const now = new Date().toISOString();
+    const canonicalId = `${companyId}_${fiscalYear}_Q${q}`;
+    if (!isMigration015Applied()) {
       db.prepare(`
         INSERT INTO fiscal_periods (
           id, company_id, business_id, fiscal_year, quarter, status, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?)
       `).run(canonicalId, companyId, cleanPhone || '', fiscalYear, q, now, now);
-      period = db.prepare('SELECT * FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').get(companyId, fiscalYear, q);
-    }
-  } else {
-    // Compatibilidad pre-migración 008
-    const id = `${cleanPhone}_${fiscalYear}_Q${q}`;
-    period = db.prepare('SELECT * FROM fiscal_periods WHERE id = ?').get(id);
-
-    if (!period) {
-      const now = new Date().toISOString();
+    } else {
       db.prepare(`
-        INSERT INTO fiscal_periods (id, business_id, fiscal_year, quarter, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'OPEN', ?, ?)
-      `).run(id, cleanPhone, fiscalYear, q, now, now);
-      period = db.prepare('SELECT * FROM fiscal_periods WHERE id = ?').get(id);
+        INSERT INTO fiscal_periods (
+          id, company_id, fiscal_year, quarter, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'OPEN', ?, ?)
+      `).run(canonicalId, companyId, fiscalYear, q, now, now);
     }
+    period = db.prepare('SELECT * FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').get(companyId, fiscalYear, q);
   }
 
   if (!period) return null;
@@ -4456,17 +4439,7 @@ export function getFiscalPeriod(companyContextOrId, year, quarter) {
   const fiscalYear = Number(year);
   const q = Number(quarter);
 
-  const cols = db.prepare('PRAGMA table_info("fiscal_periods")').all();
-  const hasCompanyId = cols.some(c => c.name === 'company_id');
-
-  let period = null;
-
-  if (hasCompanyId) {
-    period = db.prepare('SELECT * FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').get(companyId, fiscalYear, q);
-  } else {
-    const id = `${cleanPhone}_${fiscalYear}_Q${q}`;
-    period = db.prepare('SELECT * FROM fiscal_periods WHERE id = ? AND business_id = ?').get(id, cleanPhone);
-  }
+  const period = db.prepare('SELECT * FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').get(companyId, fiscalYear, q);
 
   if (!period) return null;
 
@@ -4508,8 +4481,6 @@ export function updateFiscalPeriodStatus(companyContextOrId, year, quarter, stat
   // Sanitización de extra: Ignorar cualquier intento de inyección de tenant
   const { companyId: _ignoredCid, businessId: _ignoredBid, ...safeExtra } = extra;
 
-  const cols = db.prepare('PRAGMA table_info("fiscal_periods")').all();
-  const hasCompanyId = cols.some(c => c.name === 'company_id');
   const now = new Date().toISOString();
 
   let query = 'UPDATE fiscal_periods SET status = ?, updated_at = ?';
@@ -4536,13 +4507,8 @@ export function updateFiscalPeriodStatus(companyContextOrId, year, quarter, stat
     params.push(safeExtra.lastQualityCheckAt);
   }
 
-  if (hasCompanyId) {
-    query += ' WHERE company_id = ? AND fiscal_year = ? AND quarter = ?';
-    params.push(companyId, fiscalYear, q);
-  } else {
-    query += ' WHERE id = ? AND business_id = ?';
-    params.push(`${cleanPhone}_${fiscalYear}_Q${q}`, cleanPhone);
-  }
+  query += ' WHERE company_id = ? AND fiscal_year = ? AND quarter = ?';
+  params.push(companyId, fiscalYear, q);
 
   db.prepare(query).run(...params);
   return getFiscalPeriod(companyContextOrId, fiscalYear, q);
@@ -4560,15 +4526,7 @@ export function deleteFiscalPeriod(companyContextOrId, year, quarter) {
   const fiscalYear = Number(year);
   const q = Number(quarter);
 
-  const cols = db.prepare('PRAGMA table_info("fiscal_periods")').all();
-  const hasCompanyId = cols.some(c => c.name === 'company_id');
-
-  let result;
-  if (hasCompanyId) {
-    result = db.prepare('DELETE FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').run(companyId, fiscalYear, q);
-  } else {
-    result = db.prepare('DELETE FROM fiscal_periods WHERE business_id = ? AND fiscal_year = ? AND quarter = ?').run(cleanPhone, fiscalYear, q);
-  }
+  const result = db.prepare('DELETE FROM fiscal_periods WHERE company_id = ? AND fiscal_year = ? AND quarter = ?').run(companyId, fiscalYear, q);
   return result.changes > 0;
 }
 
@@ -4612,51 +4570,28 @@ export function saveFiscalIncident(companyContextOrId, incident = {}) {
   const { companyId, phone: cleanPhone } = tenant;
   const id = incident.id || `INC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-  const cols = db.prepare('PRAGMA table_info("fiscal_incidents")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
 
   if (incident.id) {
-    if (hasCompanyIdCol) {
-      const existing = db.prepare('SELECT company_id, business_id FROM fiscal_incidents WHERE id = ?').get(incident.id);
-      if (existing && existing.company_id !== companyId && (!cleanPhone || existing.business_id !== cleanPhone)) {
-        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar incidencia fiscal ${incident.id} de otro tenant.`);
-        return null;
-      }
-    } else {
-      const existing = db.prepare('SELECT business_id FROM fiscal_incidents WHERE id = ?').get(incident.id);
-      if (existing && cleanPhone && existing.business_id !== cleanPhone) {
-        console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar incidencia fiscal ${incident.id} de otro tenant.`);
-        return null;
-      }
+    const existing = db.prepare('SELECT company_id, business_id FROM fiscal_incidents WHERE id = ?').get(incident.id);
+    if (existing && existing.company_id !== companyId) {
+      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de modificar incidencia fiscal ${incident.id} de otro tenant.`);
+      return null;
     }
   }
 
-  // Prevención cross-tenant contra entidades referenciadas
   if (incident.entityType === 'INVOICE' && incident.entityId) {
-    const invTableExists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='invoices'").get();
-    if (invTableExists) {
-      const invCols = db.prepare('PRAGMA table_info("invoices")').all();
-      if (invCols.some(c => c.name === 'company_id')) {
-        const inv = db.prepare('SELECT company_id FROM invoices WHERE id = ?').get(incident.entityId);
-        if (inv && inv.company_id && inv.company_id !== companyId) {
-          console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de asociar incidencia ${id} a factura emitida ${incident.entityId} de otro tenant.`);
-          return null;
-        }
-      }
+    const inv = db.prepare('SELECT company_id FROM invoices WHERE id = ?').get(incident.entityId);
+    if (inv && inv.company_id && inv.company_id !== companyId) {
+      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de asociar incidencia ${id} a factura emitida ${incident.entityId} de otro tenant.`);
+      return null;
     }
   }
 
   if (incident.entityType === 'PURCHASE_INVOICE' && incident.entityId) {
-    const pinvTableExists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='purchase_invoices'").get();
-    if (pinvTableExists) {
-      const pinvCols = db.prepare('PRAGMA table_info("purchase_invoices")').all();
-      if (pinvCols.some(c => c.name === 'company_id')) {
-        const pinv = db.prepare('SELECT company_id FROM purchase_invoices WHERE id = ?').get(incident.entityId);
-        if (pinv && pinv.company_id && pinv.company_id !== companyId) {
-          console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de asociar incidencia ${id} a factura recibida ${incident.entityId} de otro tenant.`);
-          return null;
-        }
-      }
+    const pinv = db.prepare('SELECT company_id FROM purchase_invoices WHERE id = ?').get(incident.entityId);
+    if (pinv && pinv.company_id && pinv.company_id !== companyId) {
+      console.warn(`🛑 [Seguridad Cross-Tenant] Intento no autorizado de asociar incidencia ${id} a factura recibida ${incident.entityId} de otro tenant.`);
+      return null;
     }
   }
 
@@ -4670,7 +4605,8 @@ export function saveFiscalIncident(companyContextOrId, incident = {}) {
   const resolutionStatus = incident.resolutionStatus || incident.resolution_status || 'OPEN';
   const createdAt = incident.createdAt || incident.created_at || now;
 
-  if (hasCompanyIdCol) {
+
+  if (!isMigration015Applied()) {
     db.prepare(`
       INSERT INTO fiscal_incidents (
         id, company_id, business_id, fiscal_period, entity_type, entity_id,
@@ -4702,11 +4638,11 @@ export function saveFiscalIncident(companyContextOrId, incident = {}) {
   } else {
     db.prepare(`
       INSERT INTO fiscal_incidents (
-        id, business_id, fiscal_period, entity_type, entity_id,
+        id, company_id, fiscal_period, entity_type, entity_id,
         severity, error_code, message, resolution_status, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        business_id = excluded.business_id,
+        company_id = excluded.company_id,
         fiscal_period = excluded.fiscal_period,
         entity_type = excluded.entity_type,
         entity_id = excluded.entity_id,
@@ -4716,7 +4652,7 @@ export function saveFiscalIncident(companyContextOrId, incident = {}) {
         resolution_status = excluded.resolution_status
     `).run(
       id,
-      cleanPhone,
+      companyId,
       fiscalPeriod,
       entityType,
       entityId,
@@ -4737,19 +4673,8 @@ export function listFiscalIncidents(companyContextOrId, fiscalPeriod = null, sta
   if (!tenant || !tenant.companyId) return [];
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("fiscal_incidents")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let query = '';
-  const params = [];
-
-  if (hasCompanyIdCol) {
-    query = 'SELECT * FROM fiscal_incidents WHERE company_id = ?';
-    params.push(companyId);
-  } else {
-    query = 'SELECT * FROM fiscal_incidents WHERE business_id = ?';
-    params.push(cleanPhone);
-  }
+  let query = 'SELECT * FROM fiscal_incidents WHERE company_id = ?';
+  const params = [companyId];
 
   if (fiscalPeriod) {
     const altPeriod = fiscalPeriod.includes('_') ? fiscalPeriod.replace('_', '-') : fiscalPeriod.replace('-', '_');
@@ -4783,19 +4708,11 @@ export function resolveFiscalIncident(companyContextOrId, incidentId) {
   }
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("fiscal_incidents")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let res;
-  if (hasCompanyIdCol) {
-    res = db.prepare(`
-      UPDATE fiscal_incidents 
-      SET resolution_status = 'RESOLVED' 
-      WHERE id = ? AND company_id = ?
-    `).run(incidentId, companyId);
-  } else {
-    res = db.prepare("UPDATE fiscal_incidents SET resolution_status = 'RESOLVED' WHERE id = ? AND business_id = ?").run(incidentId, cleanPhone);
-  }
+  const res = db.prepare(`
+    UPDATE fiscal_incidents 
+    SET resolution_status = 'RESOLVED' 
+    WHERE id = ? AND company_id = ?
+  `).run(incidentId, companyId);
   return res.changes > 0;
 }
 
@@ -4816,15 +4733,7 @@ export function getFiscalIncident(companyContextOrId, incidentId) {
   }
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("fiscal_incidents")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let row = null;
-  if (hasCompanyIdCol) {
-    row = db.prepare('SELECT * FROM fiscal_incidents WHERE id = ? AND company_id = ?').get(incidentId, companyId);
-  } else {
-    row = db.prepare('SELECT * FROM fiscal_incidents WHERE id = ? AND business_id = ?').get(incidentId, cleanPhone);
-  }
+  const row = db.prepare('SELECT * FROM fiscal_incidents WHERE id = ? AND company_id = ?').get(incidentId, companyId);
   return mapFiscalIncidentRow(row, companyId, cleanPhone);
 }
 
@@ -4845,15 +4754,7 @@ export function deleteFiscalIncident(companyContextOrId, incidentId) {
   }
   const { companyId, phone: cleanPhone } = tenant;
 
-  const cols = db.prepare('PRAGMA table_info("fiscal_incidents")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let res;
-  if (hasCompanyIdCol) {
-    res = db.prepare('DELETE FROM fiscal_incidents WHERE id = ? AND company_id = ?').run(incidentId, companyId);
-  } else {
-    res = db.prepare('DELETE FROM fiscal_incidents WHERE id = ? AND business_id = ?').run(incidentId, cleanPhone);
-  }
+  const res = db.prepare('DELETE FROM fiscal_incidents WHERE id = ? AND company_id = ?').run(incidentId, companyId);
   return res.changes > 0;
 }
 
@@ -4918,10 +4819,8 @@ export function recordAuditLog({
   const id = `LOG-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
   const now = new Date().toISOString();
 
-  const cols = db.prepare('PRAGMA table_info("audit_logs")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
 
-  if (hasCompanyIdCol) {
+  if (!isMigration015Applied()) {
     db.prepare(`
       INSERT INTO audit_logs (
         id, company_id, business_id, entity_type, entity_id,
@@ -4944,12 +4843,12 @@ export function recordAuditLog({
   } else {
     db.prepare(`
       INSERT INTO audit_logs (
-        id, business_id, entity_type, entity_id,
+        id, company_id, entity_type, entity_id,
         action, field_changed, old_value, new_value, changed_by, reason, timestamp
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
-      cleanPhone || resolvedCompanyId,
+      resolvedCompanyId,
       entityType || 'FISCAL_RECORD',
       entityId || '',
       action || 'UPDATE',
@@ -5003,19 +4902,8 @@ export function listAuditLogs(companyContextOrId, { entityType, entityId } = {})
 
   if (!resolvedCompanyId) return [];
 
-  const cols = db.prepare('PRAGMA table_info("audit_logs")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let query = '';
-  const params = [];
-
-  if (hasCompanyIdCol) {
-    query = 'SELECT * FROM audit_logs WHERE company_id = ?';
-    params.push(resolvedCompanyId);
-  } else {
-    query = 'SELECT * FROM audit_logs WHERE business_id = ?';
-    params.push(cleanPhone || resolvedCompanyId);
-  }
+  let query = 'SELECT * FROM audit_logs WHERE company_id = ?';
+  const params = [resolvedCompanyId];
 
   if (entityType) {
     query += ' AND entity_type = ?';
@@ -5095,16 +4983,7 @@ export function getAuditLog(companyContextOrId, logId) {
 
   if (!resolvedCompanyId) return null;
 
-  const cols = db.prepare('PRAGMA table_info("audit_logs")').all();
-  const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
-
-  let row = null;
-  if (hasCompanyIdCol) {
-    row = db.prepare('SELECT * FROM audit_logs WHERE id = ? AND company_id = ?').get(logId, resolvedCompanyId);
-  } else {
-    row = db.prepare('SELECT * FROM audit_logs WHERE id = ? AND business_id = ?').get(logId, cleanPhone || resolvedCompanyId);
-  }
-
+  const row = db.prepare('SELECT * FROM audit_logs WHERE id = ? AND company_id = ?').get(logId, resolvedCompanyId);
   if (!row) return null;
 
   return {

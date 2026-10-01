@@ -28,16 +28,18 @@ function getNowInTimezone(tz = 'Europe/Madrid') {
 function resolveSchedulerTargetJid(companyIdOrPhone, userSessions) {
   if (userSessions && typeof userSessions.entries === 'function') {
     const rawVal = String(companyIdOrPhone || '').trim();
-    const cleanPhone = rawVal.replace(/\D/g, '');
     for (const [activeJid, sess] of userSessions.entries()) {
       if (activeJid.includes('@g.us') || activeJid.includes('@broadcast') || activeJid.includes('@newsletter')) continue;
       if (sess?.companyId && sess.companyId === rawVal) {
         return activeJid;
       }
-      const sessPhone = String(sess?.phone || '').replace(/\D/g, '');
-      if (sessPhone && (sessPhone === cleanPhone || sessPhone === rawVal)) {
-        return activeJid;
-      }
+    }
+  }
+  if (companyIdOrPhone && String(companyIdOrPhone).includes('-')) {
+    const row = db.prepare('SELECT phone FROM companies WHERE id = ?').get(companyIdOrPhone);
+    if (row?.phone) {
+      const clean = String(row.phone).replace(/\D/g, '');
+      return `${clean}@s.whatsapp.net`;
     }
   }
   const clean = String(companyIdOrPhone || '').replace(/\D/g, '');
@@ -60,7 +62,7 @@ export async function runEveningBeforeReminderJob(sock, userSessions = new Map()
     WHERE date = ?
       AND status = 'CONFIRMED'
       AND reminder_day_sent_at IS NULL
-    ORDER BY COALESCE(company_id, company_phone) ASC, time ASC
+    ORDER BY company_id ASC, time ASC
   `);
 
   const rows = stmt.all(tomorrowStr);
@@ -69,14 +71,15 @@ export async function runEveningBeforeReminderJob(sock, userSessions = new Map()
   // Agrupar por profesional/empresa
   const byCompany = new Map();
   for (const r of rows) {
-    const key = r.company_id || r.company_phone;
-    if (!byCompany.has(key)) byCompany.set(key, { companyId: r.company_id, phone: r.company_phone, appointments: [] });
+    const key = r.company_id;
+    if (!key) continue;
+    if (!byCompany.has(key)) byCompany.set(key, { companyId: r.company_id, appointments: [] });
     byCompany.get(key).appointments.push(r);
   }
 
-  for (const [key, { companyId, phone, appointments }] of byCompany.entries()) {
+  for (const [companyId, { appointments }] of byCompany.entries()) {
     try {
-      const targetJid = resolveSchedulerTargetJid(companyId || phone, userSessions);
+      const targetJid = resolveSchedulerTargetJid(companyId, userSessions);
       const dateParts = tomorrowStr.split('-');
       const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}` : tomorrowStr;
 
@@ -133,7 +136,7 @@ export async function runMorningReminderJob(sock, userSessions = new Map(), botS
     WHERE date = ?
       AND status = 'CONFIRMED'
       AND reminder_morning_sent_at IS NULL
-    ORDER BY COALESCE(company_id, company_phone) ASC, time ASC
+    ORDER BY company_id ASC, time ASC
   `);
 
   const rows = stmt.all(dateStr);
@@ -141,15 +144,16 @@ export async function runMorningReminderJob(sock, userSessions = new Map(), botS
 
   const byCompany = new Map();
   for (const r of rows) {
-    const key = r.company_id || r.company_phone;
-    if (!byCompany.has(key)) byCompany.set(key, { companyId: r.company_id, phone: r.company_phone, appointments: [] });
+    const key = r.company_id;
+    if (!key) continue;
+    if (!byCompany.has(key)) byCompany.set(key, { companyId: r.company_id, appointments: [] });
     byCompany.get(key).appointments.push(r);
   }
 
-  for (const [key, { companyId, phone, appointments }] of byCompany.entries()) {
+  for (const [companyId, { appointments }] of byCompany.entries()) {
     try {
-      const targetJid = resolveSchedulerTargetJid(companyId || phone, userSessions);
-      const company = getCompany(companyId || phone);
+      const targetJid = resolveSchedulerTargetJid(companyId, userSessions);
+      const company = getCompany(companyId);
       const greetingName = company.ownerName || company.name ? ` ${company.ownerName || company.name}` : '';
 
       const lines = [
@@ -208,7 +212,7 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
     WHERE date = ?
       AND status = 'CONFIRMED'
       AND end_of_day_review_sent_at IS NULL
-    ORDER BY COALESCE(company_id, company_phone) ASC, time ASC
+    ORDER BY company_id ASC, time ASC
   `);
 
   const rows = stmt.all(dateStr);
@@ -216,14 +220,15 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
 
   const byCompany = new Map();
   for (const r of rows) {
-    const key = r.company_id || r.company_phone;
-    if (!byCompany.has(key)) byCompany.set(key, { companyId: r.company_id, phone: r.company_phone, appointments: [] });
+    const key = r.company_id;
+    if (!key) continue;
+    if (!byCompany.has(key)) byCompany.set(key, { companyId: r.company_id, appointments: [] });
     byCompany.get(key).appointments.push(r);
   }
 
-  for (const [key, { companyId, phone, appointments }] of byCompany.entries()) {
+  for (const [companyId, { appointments }] of byCompany.entries()) {
     try {
-      const targetJid = resolveSchedulerTargetJid(companyId || phone, userSessions);
+      const targetJid = resolveSchedulerTargetJid(companyId, userSessions);
       
       const lines = [
         '👋 *Antes de terminar la jornada:*',

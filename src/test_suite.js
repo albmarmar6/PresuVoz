@@ -8577,6 +8577,30 @@ assert(integrityResult47 && (integrityResult47.integrity_check === 'ok' || integ
 cleanupTest47(phone47A);
 cleanupTest47(phone47B);
 
+// ─── TEST 48: Validación Exhaustiva de Migración Estructural Canónica (Fase 3B) ───
+const { runTest48 } = await import('./test_48_structural.js');
+const test48Result = await runTest48();
+passedCount += test48Result.passed;
+totalCount += test48Result.total;
+
+// ─── TEST 49: Hardening Final de la Migración Estructural 015 (Fase 3B.1) ───
+const { runTest49 } = await import('./test_49_hardening.js');
+const test49Result = await runTest49();
+passedCount += test49Result.passed;
+totalCount += test49Result.total;
+
+// ─── TEST 50: Final Gate / Auditoría Definitiva de Migración Estructural 015 (Fase 3B.2) ───
+const { runTest50 } = await import('./test_50_final_gate.js');
+const test50Result = await runTest50();
+passedCount += test50Result.passed;
+totalCount += test50Result.total;
+
+// ─── TEST 51: Production Deployment Readiness / Auditoría Pre-Producción 015 (Fase 3B.3) ───
+const { runTest51 } = await import('./test_51_pre_production_readiness.js');
+const test51Result = await runTest51();
+passedCount += test51Result.passed;
+totalCount += test51Result.total;
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

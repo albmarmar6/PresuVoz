@@ -531,10 +531,8 @@ export function runFiscalQualityChecks(companyContextOrId, year = null, quarter 
 
     // Detección de Bien de Inversión (> 3.005,06 € en base imponible)
     if (pinv.taxBase > 3005.06) {
-      const cols = db.prepare('PRAGMA table_info("investment_assets")').all();
-      const hasCompanyIdCol = cols.some(c => c.name === 'company_id');
       const compId = quarterData.companyId || (resolveCompanyTenant(companyContextOrId)?.companyId);
-      const existingAsset = (hasCompanyIdCol && compId)
+      const existingAsset = compId
         ? db.prepare('SELECT id FROM investment_assets WHERE purchase_invoice_id = ? AND company_id = ?').get(pinv.id, compId)
         : db.prepare('SELECT id FROM investment_assets WHERE purchase_invoice_id = ?').get(pinv.id);
       if (!existingAsset) {
