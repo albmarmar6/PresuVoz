@@ -8631,6 +8631,12 @@ const test56Result = await runTest56();
 passedCount += test56Result.passed;
 totalCount += test56Result.total;
 
+// ─── TEST 57: Final Migration Integrity & Lock Gate (Fase 3C.2.2) ───
+const { runTest57 } = await import('./test_57_phase3c22_final_integrity_lock_gate.js');
+const test57Result = await runTest57();
+passedCount += test57Result.passed;
+totalCount += test57Result.total;
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
