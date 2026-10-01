@@ -8619,6 +8619,12 @@ const test54Result = await runTest54();
 passedCount += test54Result.passed;
 totalCount += test54Result.total;
 
+// ─── TEST 55: Final Production Deployment Gate & Pre-Flight (Fase 3C.2) ───
+const { runTest55 } = await import('./test_55_phase3c2_production_gate.js');
+const test55Result = await runTest55();
+passedCount += test55Result.passed;
+totalCount += test55Result.total;
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

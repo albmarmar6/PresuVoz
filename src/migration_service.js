@@ -153,12 +153,30 @@ export function isProductionDatabase(dbOrPath) {
 }
 
 /**
+ * Verifica que el linaje de migraciones sea estrictamente monotónico y sin huecos
+ * antes de aplicar una migración específica.
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {number} nextVersion
+ * @returns {boolean}
+ */
+export function verifyMigrationLineage(db, nextVersion) {
+  const applied = getAppliedMigrations(db).map(m => m.version);
+  const expected = Array.from({ length: nextVersion - 1 }, (_, i) => i + 1);
+  const isValid = applied.length === expected.length && applied.every((v, i) => v === expected[i]);
+  if (!isValid) {
+    throw new Error(`🛑 [LINEAGE GUARD] Infracción de linaje previa a migración ${nextVersion}: se esperaba [${expected.join(',')}], pero se encontró [${applied.join(',')}]`);
+  }
+  return true;
+}
+
+/**
  * Ejecuta todas las migraciones pendientes en estricto orden transaccional.
  * 
  * BARRERAS DE SEGURIDAD (FAIL-CLOSED):
  * - Ninguna importación o apertura accidental puede mutar la base de datos.
  * - Requiere autorización explícita (options.authorized === true || ALLOW_DATABASE_MIGRATIONS === 'true').
  * - Si es la base de datos de PRODUCCIÓN, requiere autorización de producción explícita (ALLOW_PRODUCTION_MIGRATIONS === 'true').
+ * - Soporte para barrera de linaje estricto (options.enforceLineage === true).
  * 
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {object} [options]
@@ -166,6 +184,7 @@ export function isProductionDatabase(dbOrPath) {
  * @param {number} [options.targetVersion] Versión máxima hasta la que migrar
  * @param {boolean} [options.authorized] Autorización explícita para ejecutar migraciones
  * @param {boolean} [options.allowProduction] Autorización explícita para ejecutar en producción
+ * @param {boolean} [options.enforceLineage] Exigir linaje estricto sin huecos
  * @returns {{ appliedCount: number, appliedVersions: number[] }}
  */
 export function runMigrations(db, options = {}) {
@@ -191,6 +210,10 @@ export function runMigrations(db, options = {}) {
   for (const m of pending) {
     if (options.targetVersion && m.version > options.targetVersion) {
       break;
+    }
+
+    if (options.enforceLineage) {
+      verifyMigrationLineage(db, m.version);
     }
 
     if (m.standaloneTransaction) {

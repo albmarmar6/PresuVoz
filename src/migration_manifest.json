@@ -1,0 +1,89 @@
+{
+  "manifestVersion": "1.0.0",
+  "generatedAt": "2026-10-01T18:57:00Z",
+  "targetRelease": "Phase 3D Production Canonical Migration",
+  "productionBaseline": {
+    "expectedSha256": "0D369E79DF8EB4205C849FBCC0DE67D9DE07EAADCAE2F58F0D8C9996EDEE16F1",
+    "expectedVersions": [1, 2, 3, 4, 5, 6],
+    "lastAppliedVersion": 6
+  },
+  "deploymentTarget": {
+    "finalVersion": 15,
+    "strategy": "001-006 -> 007-014 -> 015",
+    "expectedFinalVersions": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  },
+  "pendingChain": [
+    {
+      "version": 7,
+      "name": "007_business_tax_profiles_company_id",
+      "filename": "007_business_tax_profiles_company_id.js",
+      "sha256": "112814EB942886C3AB563A3483092DC8F540C5CA2BB56CA57D44DF9EEC136839",
+      "size": 9797,
+      "standaloneTransaction": false
+    },
+    {
+      "version": 8,
+      "name": "008_fiscal_periods_company_id",
+      "filename": "008_fiscal_periods_company_id.js",
+      "sha256": "CA5EF53D4EE1D095F3A5993D3361F66F5E9EE9DB598049C80BFF8B451BDC9D1F",
+      "size": 8921,
+      "standaloneTransaction": false
+    },
+    {
+      "version": 9,
+      "name": "009_purchase_invoices_company_id",
+      "filename": "009_purchase_invoices_company_id.js",
+      "sha256": "28907362A0C217F3822C1B5C9378788FBD97A9CCF1B3F7D10AF348795BA56D6B",
+      "size": 10360,
+      "standaloneTransaction": false
+    },
+    {
+      "version": 10,
+      "name": "010_expense_payments_company_id",
+      "filename": "010_expense_payments_company_id.js",
+      "sha256": "5BA3529D77AE877618D140629C4FBDF69F3A699A480427998E105470D9200930",
+      "size": 9103,
+      "standaloneTransaction": false
+    },
+    {
+      "version": 11,
+      "name": "011_investment_assets_company_id",
+      "filename": "011_investment_assets_company_id.js",
+      "sha256": "FF0FC8CE5DDB48D07093C90DD16FE36F9D92E98B02BA3AF5D399270338B2D7BD",
+      "size": 9930,
+      "standaloneTransaction": false
+    },
+    {
+      "version": 12,
+      "name": "012_fiscal_incidents_company_id",
+      "filename": "012_fiscal_incidents_company_id.js",
+      "sha256": "4035ACBDE16FC30EC0C2959608A2E4A0B280E4D04CD7ADAB9270249E3CD96036",
+      "size": 10795,
+      "standaloneTransaction": false
+    },
+    {
+      "version": 13,
+      "name": "013_audit_logs_company_id",
+      "filename": "013_audit_logs_company_id.js",
+      "sha256": "DA829169E31A84DAD7E96F3903CE52B2517723482F761787259DE5BAA7C197EA",
+      "size": 11678,
+      "standaloneTransaction": false
+    },
+    {
+      "version": 14,
+      "name": "014_messages_company_id",
+      "filename": "014_messages_company_id.js",
+      "sha256": "F643D4A9F1920DEB2AF1B9A7FB005892A9E759606016423697DCDE997FD9B00E",
+      "size": 9436,
+      "standaloneTransaction": false
+    },
+    {
+      "version": 15,
+      "name": "015_structural_canonical_company_id",
+      "filename": "015_structural_canonical_company_id.js",
+      "sha256": "F31C5B5FEBDA8938FEB2A24F2D49D97DDC8F1EEB8E66161D54E83A9A02B66C62",
+      "size": 45306,
+      "standaloneTransaction": true
+    }
+  ]
+}

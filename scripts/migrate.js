@@ -76,7 +76,8 @@ for (const m of pending) {
 const result = runMigrations(db, {
   authorized: true,
   allowProduction: allowProd,
-  migrations: MIGRATIONS_ALL
+  migrations: MIGRATIONS_ALL,
+  enforceLineage: true
 });
 
 db.close();
