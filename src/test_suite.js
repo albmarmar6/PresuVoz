@@ -8607,6 +8607,12 @@ const test52Result = await runTest52();
 passedCount += test52Result.passed;
 totalCount += test52Result.total;
 
+// ─── TEST 53: Migration Lineage / Future Migration Safety (Fase 3C.0) ───
+const { runTest53 } = await import('./test_53_migration_lineage.js');
+const test53Result = await runTest53();
+passedCount += test53Result.passed;
+totalCount += test53Result.total;
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
