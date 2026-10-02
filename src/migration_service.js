@@ -24,6 +24,7 @@ import { migration as fiscalIncidentsMigration } from './migrations/012_fiscal_i
 import { migration as auditLogsMigration } from './migrations/013_audit_logs_company_id.js';
 import { migration as messagesMigration } from './migrations/014_messages_company_id.js';
 import { migration as canonicalMigration } from './migrations/015_structural_canonical_company_id.js';
+import { migration as invoiceNumberingMigration } from './migrations/016_sequential_invoice_numbering.js';
 
 export const MIGRATIONS = [
   baselineMigration,
@@ -45,6 +46,13 @@ export const MIGRATIONS = [
 export const MIGRATIONS_ALL = [
   ...MIGRATIONS,
   canonicalMigration
+];
+
+export const MIGRATION_016 = invoiceNumberingMigration;
+
+export const MIGRATIONS_WITH_016 = [
+  ...MIGRATIONS_ALL,
+  invoiceNumberingMigration
 ];
 
 /**

@@ -42,6 +42,22 @@ export function resetMigration015Cache() {
   _cachedIs015 = null;
 }
 
+let _cachedIs016 = null;
+export function isMigration016Applied(targetDb = db) {
+  if (_cachedIs016 !== null && targetDb === db) return _cachedIs016;
+  try {
+    const row = targetDb.prepare("SELECT 1 FROM schema_migrations WHERE version = 16 OR name = '016_sequential_invoice_numbering'").get();
+    const res = !!row;
+    if (targetDb === db) _cachedIs016 = res;
+    return res;
+  } catch {
+    return false;
+  }
+}
+export function resetMigration016Cache() {
+  _cachedIs016 = null;
+}
+
 // NOTA DE SEGURIDAD CRÍTICA:
 // Opening/inspecting a database must NEVER mutate its schema.
 // Las migraciones NO se ejecutan automáticamente al importar db_service.js.
@@ -754,15 +770,16 @@ export async function syncPendingSignaturesFromCloud(companyContextOrId = null) 
   }
 }
 
-export function getBudget(companyContextOrIdOrPhone, id) {
+export function getBudget(companyContextOrIdOrPhone, id, options = {}) {
   // Manejo de llamada canónica tenant-scoped: getBudget(companyId, budgetId)
   if (id !== undefined && id !== null) {
     if (!companyContextOrIdOrPhone || !id) return null;
+    const targetDb = options.db || db;
     const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
     const companyId = tenant?.companyId;
     if (!companyId) return null;
 
-    const stmt = db.prepare('SELECT data_json, company_id FROM budgets WHERE id = ? AND company_id = ?');
+    const stmt = targetDb.prepare('SELECT data_json, company_id FROM budgets WHERE id = ? AND company_id = ?');
     const row = stmt.get(id, companyId);
 
     if (!row) return null;
@@ -793,12 +810,196 @@ export function listBudgets(companyContextOrIdOrPhone, limit = 20) {
 
 // ─── Métodos de Facturas ──────────────────────────────────────────────────────
 
-export function saveInvoice(companyContextOrIdOrPhone, invoice) {
+/**
+ * Formateador determinista del número visible de factura.
+ * Solo formatea. No incrementa, no accede a DB, no usa MAX.
+ */
+export function formatInvoiceNumber(series, year, invoiceNumber) {
+  const cleanSeries = String(series || 'FAC').trim();
+  const num = Number(invoiceNumber) || 1;
+  const yr = Number(year) || new Date().getFullYear();
+
+  // Si la serie ya contiene guión al final (ej: '2026-', 'F26-')
+  if (cleanSeries.endsWith('-') || cleanSeries.endsWith('/')) {
+    return `${cleanSeries}${String(num).padStart(3, '0')}`;
+  }
+  // Si la serie es 'FAC'
+  if (cleanSeries === 'FAC') {
+    return `FAC-${yr}-${String(num).padStart(4, '0')}`;
+  }
+  // Si la serie ya contiene el año (ej: 'F2026')
+  if (cleanSeries.includes(String(yr))) {
+    return `${cleanSeries}-${String(num).padStart(3, '0')}`;
+  }
+  // Serie estándar tipo 'F', 'R', 'FB'
+  return `${cleanSeries}-${yr}-${String(num).padStart(3, '0')}`;
+}
+
+/**
+ * Asignación atómica de número correlativo en invoice_sequences.
+ * Utiliza INSERT ... ON CONFLICT DO UPDATE ... RETURNING current_number.
+ * PROHIBIDO: SELECT MAX(), MAX() + 1, Math.random().
+ */
+export function allocateInvoiceNumber(companyContextOrIdOrPhone, rawSeries, rawYear, options = {}) {
+  const targetDb = options.db || db;
+  const tenant = ensureCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  if (!companyId) {
+    throw new Error("❌ [Tenant Boundary] allocateInvoiceNumber requiere un companyId autenticado obligatorio.");
+  }
+
+  // Resolver serie canónica limpia
+  let series = rawSeries;
+  if (!series) {
+    const compRow = targetDb.prepare('SELECT invoice_series FROM companies WHERE id = ?').get(companyId);
+    series = compRow?.invoice_series || tenant.invoiceSeries || 'FAC';
+  }
+  const cleanSeries = String(series).trim().replace(/-$/, '');
+  const year = Number(rawYear) || new Date().getFullYear();
+
+  const nowIso = new Date().toISOString();
+  const stmt = targetDb.prepare(`
+    INSERT INTO invoice_sequences (company_id, series, year, current_number, updated_at)
+    VALUES (?, ?, ?, 1, ?)
+    ON CONFLICT(company_id, series, year) DO UPDATE SET
+      current_number = invoice_sequences.current_number + 1,
+      updated_at = excluded.updated_at
+    RETURNING current_number;
+  `);
+
+  const row = stmt.get(companyId, cleanSeries, year, nowIso);
+  const currentNumber = row.current_number;
+  const visibleNumber = formatInvoiceNumber(cleanSeries, year, currentNumber);
+
+  return {
+    companyId,
+    series: cleanSeries,
+    year,
+    invoiceNumber: currentNumber,
+    visibleNumber
+  };
+}
+
+/**
+ * Emisión transaccional de facturas con idempotencia de negocio.
+ * Protege todo el ciclo de emisión bajo BEGIN IMMEDIATE ... COMMIT.
+ * Fuera de la transacción: PDFs, WhatsApp, Gemini.
+ */
+export function emitInvoice(companyContextOrIdOrPhone, invoicePayload, options = {}) {
+  if (!companyContextOrIdOrPhone) {
+    throw new Error("❌ [Tenant Boundary] emitInvoice requiere un companyId o contexto autenticado.");
+  }
+  const targetDb = options.db || db;
+  const tenant = ensureCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  if (!companyId) {
+    throw new Error("❌ [Tenant Boundary] emitInvoice requiere un companyId válido.");
+  }
+
+  const budgetId = (invoicePayload.budgetId || invoicePayload.budget_id || '').trim();
+  const invoiceType = (invoicePayload.type || invoicePayload.invoice_type || 'FINAL').toUpperCase();
+  const year = Number(options.year) || new Date().getFullYear();
+
+  // Iniciar transacción de escritura exclusiva inmediata
+  targetDb.exec('BEGIN IMMEDIATE;');
+  try {
+    // 1. Comprobación de Idempotencia de Negocio
+    if (budgetId) {
+      if (invoiceType === 'FINAL') {
+        const existing = targetDb.prepare(`
+          SELECT * FROM invoices 
+          WHERE company_id = ? AND budget_id = ? AND status != 'ANULADA'
+        `).all(companyId, budgetId);
+
+        for (const row of existing) {
+          let parsed = {};
+          try { parsed = JSON.parse(row.data_json || '{}'); } catch {}
+          const isAdvance = Boolean(parsed.is_advance || parsed.isAdvance || parsed.type === 'ANTICIPO');
+          const isRect = Boolean(row.rectifies_invoice_id || parsed.invoice_type === 'RECTIFICATIVA');
+          if (!isAdvance && !isRect) {
+            targetDb.exec('COMMIT;');
+            return { invoice: parsed, isDuplicate: true };
+          }
+        }
+      } else if (invoiceType === 'ANTICIPO') {
+        // Para anticipos, verificar si ya existe un anticipo con importe idéntico para el mismo presupuesto
+        const incomingAmount = Number(invoicePayload.totalAmount || invoicePayload.total_amount || invoicePayload.financials?.totalAmount || 0);
+        const existingAdv = targetDb.prepare(`
+          SELECT * FROM invoices 
+          WHERE company_id = ? AND budget_id = ? AND status != 'ANULADA'
+        `).all(companyId, budgetId);
+
+        for (const row of existingAdv) {
+          let parsed = {};
+          try { parsed = JSON.parse(row.data_json || '{}'); } catch {}
+          const isAdv = Boolean(parsed.is_advance || parsed.isAdvance || parsed.type === 'ANTICIPO');
+          const existingAmount = Number(parsed.totalAmount || parsed.total_amount || parsed.financials?.totalAmount || row.total_amount || 0);
+          if (isAdv && Math.abs(existingAmount - incomingAmount) < 0.01) {
+            targetDb.exec('COMMIT;');
+            return { invoice: parsed, isDuplicate: true };
+          }
+        }
+      }
+    }
+
+    // 2. Determinar serie canónica
+    let rawSeries = options.series || invoicePayload.series;
+    if (!rawSeries) {
+      const isRect = Boolean(invoicePayload.rectifies_invoice_id || invoicePayload.rectifiesInvoiceId || invoiceType === 'RECTIFICATIVA');
+      if (isRect) {
+        rawSeries = 'R';
+      } else {
+        const compRow = targetDb.prepare('SELECT invoice_series FROM companies WHERE id = ?').get(companyId);
+        rawSeries = compRow?.invoice_series || tenant.invoiceSeries || 'FAC';
+      }
+    }
+    const cleanSeries = String(rawSeries).trim().replace(/-$/, '');
+
+    // 3. Asignar número correlativo persistente atómicamente
+    const alloc = allocateInvoiceNumber(companyContextOrIdOrPhone, cleanSeries, year, { db: targetDb });
+    const assignedVisible = alloc.visibleNumber;
+
+    // 4. Preparar payload de factura con ID interno estable (UUID) y número fiscal visible independiente
+    const invoiceToSave = {
+      ...invoicePayload,
+      id: invoicePayload.id || crypto.randomUUID(),
+      companyId,
+      company_id: companyId,
+      series: alloc.series,
+      year: alloc.year,
+      invoice_number: alloc.invoiceNumber,
+      invoiceNumber: assignedVisible,
+      visibleNumber: assignedVisible,
+      status: invoicePayload.status || 'PENDIENTE_PAGO'
+    };
+
+    // 5. Persistir en invoices
+    const saved = saveInvoice(companyContextOrIdOrPhone, invoiceToSave, { db: targetDb, inTransaction: true });
+
+    // 6. Si es factura final y hay presupuesto asociado, marcar presupuesto como FACTURADO
+    if (budgetId && invoiceType === 'FINAL') {
+      try {
+        targetDb.prepare("UPDATE budgets SET status = 'FACTURADO', updated_at = datetime('now') WHERE id = ? AND company_id = ?").run(budgetId, companyId);
+      } catch (budErr) {
+        console.warn('⚠️ No se pudo actualizar estado del presupuesto a FACTURADO:', budErr.message);
+      }
+    }
+
+    targetDb.exec('COMMIT;');
+    return { invoice: saved, isDuplicate: false };
+  } catch (err) {
+    try { targetDb.exec('ROLLBACK;'); } catch {}
+    throw err;
+  }
+}
+
+export function saveInvoice(companyContextOrIdOrPhone, invoice, options = {}) {
   if (!invoice || !invoice.id) return null;
   if (!companyContextOrIdOrPhone) {
     throw new Error("❌ [Tenant Boundary] saveInvoice requiere un companyId o contexto autenticado obligatorio.");
   }
 
+  const targetDb = options.db || db;
   const tenant = ensureCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId || null;
   const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
@@ -824,7 +1025,7 @@ export function saveInvoice(companyContextOrIdOrPhone, invoice) {
   const budgetId = typeof rawBudgetId === 'string' ? rawBudgetId.trim() : '';
 
   if (budgetId) {
-    const linkedBudget = getBudget(companyContextOrIdOrPhone, budgetId);
+    const linkedBudget = getBudget(companyContextOrIdOrPhone, budgetId, { db: targetDb });
     if (!linkedBudget) {
       throw new Error(`❌ [Tenant Boundary] Violación de invariante: No se puede asociar la factura '${invoice.id}' al presupuesto '${budgetId}' porque no pertenece a la empresa autenticada o no existe.`);
     }
@@ -841,7 +1042,6 @@ export function saveInvoice(companyContextOrIdOrPhone, invoice) {
   const fiscalPeriod = invoice.fiscal_period || invoice.fiscalPeriod || null;
   const verifactuHash = invoice.verifactu_hash || invoice.verifactuHash || null;
 
-
   invoice.rectifiesInvoiceId = rectifiesId;
   invoice.fiscalPeriod = fiscalPeriod;
   invoice.verifactuHash = verifactuHash;
@@ -849,8 +1049,73 @@ export function saveInvoice(companyContextOrIdOrPhone, invoice) {
     invoice.isAdvance = Boolean(invoice.is_advance);
   }
 
-  if (!isMigration015Applied()) {
-    const stmt = db.prepare(`
+  if (isMigration016Applied(targetDb)) {
+    // Rama Migración 016: invoices con series, year, invoice_number estructurados
+    let series = invoice.series;
+    let year = invoice.year;
+    let invNum = invoice.invoice_number;
+
+    if (!series || !year || !invNum) {
+      const isRect = Boolean(rectifiesId || invoice.invoice_type === 'RECTIFICATIVA' || invoice.invoiceType === 'RECTIFICATIVA');
+      const defaultSeries = isRect ? 'R' : (tenant?.invoiceSeries || 'FAC');
+      const derivedSeries = String(invoice.invoiceSeries || defaultSeries).trim().replace(/-$/, '');
+      const derivedYear = invoice.created_at ? new Date(invoice.created_at).getFullYear() : new Date().getFullYear();
+      
+      const alloc = allocateInvoiceNumber(companyContextOrIdOrPhone, derivedSeries, derivedYear, { db: targetDb });
+      series = alloc.series;
+      year = alloc.year;
+      invNum = alloc.invoiceNumber;
+      if (!invoice.invoice_number && !invoice.invoiceNumber) {
+        invoice.invoice_number = alloc.visibleNumber;
+        invoice.invoiceNumber = alloc.visibleNumber;
+      }
+    }
+
+    invoice.series = series;
+    invoice.year = year;
+    invoice.invoice_number = invNum;
+
+    const stmt = targetDb.prepare(`
+      INSERT INTO invoices (
+        id, company_id, budget_id, client_name, total_amount, status,
+        data_json, rectifies_invoice_id, fiscal_period, verifactu_hash,
+        series, year, invoice_number, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        company_id = COALESCE(excluded.company_id, invoices.company_id),
+        budget_id = excluded.budget_id,
+        client_name = excluded.client_name,
+        total_amount = excluded.total_amount,
+        status = excluded.status,
+        data_json = excluded.data_json,
+        rectifies_invoice_id = excluded.rectifies_invoice_id,
+        fiscal_period = excluded.fiscal_period,
+        verifactu_hash = excluded.verifactu_hash,
+        series = excluded.series,
+        year = excluded.year,
+        invoice_number = excluded.invoice_number
+      WHERE invoices.company_id = excluded.company_id 
+         OR invoices.company_id IS NULL
+    `);
+
+    stmt.run(
+      invoice.id,
+      companyId,
+      budgetId,
+      invoice.client?.name || invoice.client_name || 'Cliente Particular',
+      total,
+      invoice.status || 'PENDIENTE_PAGO',
+      JSON.stringify(invoice),
+      rectifiesId,
+      fiscalPeriod,
+      verifactuHash,
+      series,
+      year,
+      invNum,
+      now
+    );
+  } else if (!isMigration015Applied(targetDb)) {
+    const stmt = targetDb.prepare(`
       INSERT INTO invoices (id, company_id, budget_id, company_phone, client_name, total_amount, status, data_json, rectifies_invoice_id, fiscal_period, verifactu_hash, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
@@ -884,7 +1149,7 @@ export function saveInvoice(companyContextOrIdOrPhone, invoice) {
       now
     );
   } else {
-    const stmt = db.prepare(`
+    const stmt = targetDb.prepare(`
       INSERT INTO invoices (id, company_id, budget_id, client_name, total_amount, status, data_json, rectifies_invoice_id, fiscal_period, verifactu_hash, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET

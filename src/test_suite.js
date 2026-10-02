@@ -8712,6 +8712,13 @@ console.log('TEST 61 RESULT:', { passed: test61Result.passed, total: test61Resul
 passedCount += test61Result.passed;
 totalCount += test61Result.total;
 
+// ─── TEST 62: Sequential, Atomic & Idempotent Invoice Numbering (Fase 4B) ───
+const { runTest62 } = await import('./test_62_phase4b_sequential_invoice_numbering.js');
+const test62Result = await runTest62();
+console.log('TEST 62 RESULT:', { passed: test62Result.passed, total: test62Result.total });
+passedCount += test62Result.passed;
+totalCount += test62Result.total;
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

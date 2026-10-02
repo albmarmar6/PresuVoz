@@ -45,6 +45,7 @@ import {
   saveBudget,
   getBudget,
   listBudgets,
+  emitInvoice,
   saveInvoice,
   getInvoice,
   listInvoices,
@@ -1944,20 +1945,22 @@ async function startWhatsAppGateway() {
 
     try {
       console.log(`🧾 Emitiendo factura legal para el presupuesto ${targetBudget.id}...`);
-      const invoice = engine.convertToInvoice(targetBudget, { clientNif, company: session.company });
+      const cleanPhone = session.phone || remoteJid.replace(/\D/g, '');
+      const tenantContext = session.companyId || cleanPhone;
+
+      // 1. Preparar payload de factura
+      const invoicePayload = engine.convertToInvoice(targetBudget, { clientNif, company: session.company });
+
+      // 2. Emitir atómicamente con asignación secuencial e idempotencia de negocio
+      const emitResult = emitInvoice(tenantContext, invoicePayload);
+      const invoice = emitResult.invoice;
 
       if (!session.invoices) session.invoices = new Map();
       session.invoices.set(invoice.id, invoice);
 
-      // Persistir factura en SQLite
-      const cleanPhone = session.phone || remoteJid.replace(/\D/g, '');
-      invoice.companyId = session.companyId;
-      invoice.company_id = session.companyId;
-      saveInvoice(session.companyId || cleanPhone, invoice);
-
-      // Generar PDF formal de Factura
+      // 3. Generar PDF formal de Factura (fuera del lock)
       const invoicePdfBuffer = await generateInvoicePDF(invoice);
-      const invoiceFileName = `Factura_${invoice.id}.pdf`;
+      const invoiceFileName = `Factura_${invoice.invoiceNumber || invoice.id}.pdf`;
 
       // Texto de resumen de factura para WhatsApp
       const fin = invoice.financials || {};
@@ -2075,22 +2078,23 @@ async function startWhatsAppGateway() {
         });
       }
 
-      const advanceInvoice = engine.createAdvanceInvoice(targetBudget, {
+      const rawAdvanceInvoice = engine.createAdvanceInvoice(targetBudget, {
         amount: advanceAmount,
         method: lastMethod,
         date: lastDate
       }, { clientNif, company: session.company });
 
+      // Emitir atómicamente con asignación secuencial e idempotencia
+      const emitResult = emitInvoice(session.companyId || cleanPhone, rawAdvanceInvoice);
+      const advanceInvoice = emitResult.invoice;
+
       if (!session.invoices) session.invoices = new Map();
       session.invoices.set(advanceInvoice.id, advanceInvoice);
 
-      advanceInvoice.companyId = session.companyId;
-      advanceInvoice.company_id = session.companyId;
-      saveInvoice(session.companyId || cleanPhone, advanceInvoice);
       saveBudget(session.companyId || cleanPhone, targetBudget);
 
       const invoicePdfBuffer = await generateInvoicePDF(advanceInvoice);
-      const invoiceFileName = `Factura_Anticipo_${advanceInvoice.id}.pdf`;
+      const invoiceFileName = `Factura_Anticipo_${advanceInvoice.invoiceNumber || advanceInvoice.id}.pdf`;
 
       const advFin = advanceInvoice.financials || {};
       const invoiceMsgLines = [
