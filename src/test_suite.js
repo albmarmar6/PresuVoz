@@ -8705,6 +8705,13 @@ console.log('TEST 60 RESULT:', { passed: test60Result.passed, total: test60Resul
 passedCount += test60Result.passed;
 totalCount += test60Result.total;
 
+// ─── TEST 61: Secure Onboarding for New Autonomous Users (Fase 4A) ───
+const { runTest61 } = await import('./test_61_phase4a_secure_onboarding.js');
+const test61Result = await runTest61();
+console.log('TEST 61 RESULT:', { passed: test61Result.passed, total: test61Result.total });
+passedCount += test61Result.passed;
+totalCount += test61Result.total;
+
 console.log("==========================================================");
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

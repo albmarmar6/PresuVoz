@@ -200,35 +200,194 @@ export function saveCompany(phone, data = {}) {
     defaultAdvance, onboardingStep, onboardingDataJson, now, now
   );
 
-  // Sincronizar automáticamente channel_identity, user y membership
-  try {
-    const chExisting = db.prepare('SELECT id FROM channel_identities WHERE channel = ? AND channel_identifier = ?').get('whatsapp', cleanPhone);
-    if (!chExisting) {
-      db.prepare(`
-        INSERT INTO channel_identities (id, company_id, channel, channel_identifier, is_active, created_at, updated_at)
-        VALUES (?, ?, 'whatsapp', ?, 1, ?, ?)
-      `).run(crypto.randomUUID(), companyId, cleanPhone, now, now);
-    }
+  // Sincronizar automáticamente channel_identity, user y membership ÚNICAMENTE si no está en onboarding
+  if (!onboardingStep) {
+    try {
+      const chExisting = db.prepare('SELECT id FROM channel_identities WHERE channel = ? AND channel_identifier = ?').get('whatsapp', cleanPhone);
+      if (!chExisting) {
+        db.prepare(`
+          INSERT INTO channel_identities (id, company_id, channel, channel_identifier, is_active, created_at, updated_at)
+          VALUES (?, ?, 'whatsapp', ?, 1, ?, ?)
+        `).run(crypto.randomUUID(), companyId, cleanPhone, now, now);
+      }
 
+      let user = db.prepare('SELECT id FROM users WHERE phone = ?').get(cleanPhone);
+      let userId = user ? user.id : null;
+      if (!userId) {
+        userId = crypto.randomUUID();
+        db.prepare(`
+          INSERT INTO users (id, name, email, phone, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?)
+        `).run(userId, ownerName || name || 'Propietario', email, cleanPhone, now, now);
+      }
+
+      const memExisting = db.prepare('SELECT id FROM memberships WHERE user_id = ? AND company_id = ?').get(userId, companyId);
+      if (!memExisting) {
+        db.prepare(`
+          INSERT INTO memberships (id, user_id, company_id, role, status, created_at, updated_at)
+          VALUES (?, ?, ?, 'OWNER', 'ACTIVE', ?, ?)
+        `).run(crypto.randomUUID(), userId, companyId, now, now);
+      }
+    } catch (syncErr) {
+      // Sincronización silenciosa en caso de que aún no existan las tablas (p. ej. pre-migración)
+    }
+  }
+
+  return getCompany(cleanPhone);
+}
+
+/**
+ * Completa el onboarding seguro para un nuevo usuario en una transacción ATÓMICA.
+ * Garantiza:
+ * 1. Generación de UUIDs estrictamente en el backend (crypto.randomUUID()).
+ * 2. Transacción BEGIN IMMEDIATE para prevenir TOCTOU y carreras de concurrencia.
+ * 3. Inserción simultánea de: companies (finalizada), users (OWNER), memberships (OWNER, ACTIVE),
+ *    channel_identities (whatsapp, identifier, is_active = 1), y audit_logs.
+ * 4. Si cualquier paso falla, se ejecuta ROLLBACK sin dejar registros huérfanos.
+ * 5. Idempotencia: si ya está finalizado o se reintenta, no produce duplicados ni errores fatales.
+ */
+export function completeSecureOnboarding(phone, onboardingData = {}, options = {}) {
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  if (!cleanPhone) {
+    throw new Error('Número de teléfono requerido para completar el onboarding.');
+  }
+
+  const existing = getCompany(cleanPhone) || {};
+  const companyId = (existing.id && isUuid(existing.id)) ? existing.id : crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  const data = onboardingData || {};
+  const ownerName = (data.ownerName || existing.ownerName || '').trim() || null;
+  const name = (data.companyName || data.name || ownerName || existing.name || 'Mi Empresa').trim();
+  const fiscalName = (data.fiscalName || name || ownerName || existing.fiscalName || null);
+  const cif = (data.cif || existing.cif || null);
+  const trade = (data.trade || existing.trade || 'Reformas y Construcción');
+  const address = (data.address || existing.address || null);
+  const city = (data.city || existing.city || null);
+  const workingHours = (data.workingHours || existing.workingHours || null);
+  const paymentTerms = (data.paymentTerms || existing.paymentTerms || null);
+  const quoteValidityDays = Number(data.quoteValidityDays || existing.quoteValidityDays || 15);
+  const entityType = (data.entityType || existing.entityType || 'autonomo');
+  const irpfRate = Number(data.irpfRate !== undefined ? data.irpfRate : (existing.irpfRate || 0));
+  const invoiceSeries = (data.invoiceSeries || existing.invoiceSeries || '2026-');
+  const defaultTaxRate = Number(data.defaultTaxRate !== undefined ? data.defaultTaxRate : (existing.defaultTaxRate || 10));
+  const defaultAdvance = data.defaultAdvance !== undefined && data.defaultAdvance !== null ? Number(data.defaultAdvance) : (existing.defaultAdvance || null);
+  const iban = (data.iban || existing.iban || null);
+  const bizum = (data.bizum || existing.bizum || null);
+  const email = (data.email || existing.email || null);
+  const phoneContact = (data.phoneContact || existing.phoneContact || cleanPhone);
+  const logoPath = existing.logoPath || null;
+  const gestoriaEmail = existing.gestoriaEmail || null;
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    // 1. Actualizar/insertar compañía finalizada
+    db.prepare(`
+      INSERT INTO companies (
+        id, phone, name, fiscal_name, owner_name, cif, trade, address, city, working_hours,
+        payment_terms, quote_validity_days, entity_type, irpf_rate, invoice_series,
+        phone_contact, email, iban, bizum, logo_path, gestoria_email, default_tax_rate,
+        default_advance, onboarding_step, onboarding_data_json, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+      ON CONFLICT(phone) DO UPDATE SET
+        id = COALESCE(companies.id, excluded.id),
+        name = excluded.name,
+        fiscal_name = excluded.fiscal_name,
+        owner_name = excluded.owner_name,
+        cif = excluded.cif,
+        trade = excluded.trade,
+        address = excluded.address,
+        city = excluded.city,
+        working_hours = excluded.working_hours,
+        payment_terms = excluded.payment_terms,
+        quote_validity_days = excluded.quote_validity_days,
+        entity_type = excluded.entity_type,
+        irpf_rate = excluded.irpf_rate,
+        invoice_series = excluded.invoice_series,
+        phone_contact = excluded.phone_contact,
+        email = excluded.email,
+        iban = excluded.iban,
+        bizum = excluded.bizum,
+        logo_path = excluded.logo_path,
+        gestoria_email = excluded.gestoria_email,
+        default_tax_rate = excluded.default_tax_rate,
+        default_advance = excluded.default_advance,
+        onboarding_step = NULL,
+        onboarding_data_json = NULL,
+        updated_at = excluded.updated_at
+    `).run(
+      companyId, cleanPhone, name, fiscalName, ownerName, cif, trade, address, city, workingHours,
+      paymentTerms, quoteValidityDays, entityType, irpfRate, invoiceSeries,
+      phoneContact, email, iban, bizum, logoPath, gestoriaEmail, defaultTaxRate,
+      defaultAdvance, now, now
+    );
+
+    const canonicalComp = db.prepare('SELECT id FROM companies WHERE phone = ?').get(cleanPhone);
+    const resolvedCompanyId = canonicalComp?.id || companyId;
+
+    // 2. Crear o actualizar usuario (OWNER)
     let user = db.prepare('SELECT id FROM users WHERE phone = ?').get(cleanPhone);
-    let userId = user ? user.id : null;
-    if (!userId) {
-      userId = crypto.randomUUID();
+    let userId = user ? user.id : crypto.randomUUID();
+    if (!user) {
       db.prepare(`
         INSERT INTO users (id, name, email, phone, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?)
       `).run(userId, ownerName || name || 'Propietario', email, cleanPhone, now, now);
+    } else {
+      db.prepare(`
+        UPDATE users SET name = COALESCE(?, name), updated_at = ? WHERE id = ?
+      `).run(ownerName || name || 'Propietario', now, userId);
     }
 
-    const memExisting = db.prepare('SELECT id FROM memberships WHERE user_id = ? AND company_id = ?').get(userId, companyId);
+    // 3. Crear o verificar membresía (OWNER, ACTIVE)
+    const memExisting = db.prepare('SELECT id, role, status FROM memberships WHERE user_id = ? AND company_id = ?').get(userId, resolvedCompanyId);
     if (!memExisting) {
       db.prepare(`
         INSERT INTO memberships (id, user_id, company_id, role, status, created_at, updated_at)
         VALUES (?, ?, ?, 'OWNER', 'ACTIVE', ?, ?)
-      `).run(crypto.randomUUID(), userId, companyId, now, now);
+      `).run(crypto.randomUUID(), userId, resolvedCompanyId, now, now);
+    } else if (memExisting.status !== 'ACTIVE' || memExisting.role !== 'OWNER') {
+      db.prepare(`
+        UPDATE memberships SET role = 'OWNER', status = 'ACTIVE', updated_at = ? WHERE id = ?
+      `).run(now, memExisting.id);
     }
-  } catch (syncErr) {
-    // Sincronización silenciosa en caso de que aún no existan las tablas (p. ej. pre-migración)
+
+    // 4. Crear o verificar channel_identity ('whatsapp', cleanPhone, is_active = 1)
+    const chExisting = db.prepare('SELECT id, company_id, is_active FROM channel_identities WHERE channel = ? AND channel_identifier = ?').get('whatsapp', cleanPhone);
+    if (!chExisting) {
+      db.prepare(`
+        INSERT INTO channel_identities (id, company_id, channel, channel_identifier, is_active, created_at, updated_at)
+        VALUES (?, ?, 'whatsapp', ?, 1, ?, ?)
+      `).run(crypto.randomUUID(), resolvedCompanyId, cleanPhone, now, now);
+    } else {
+      db.prepare(`
+        UPDATE channel_identities SET company_id = ?, is_active = 1, updated_at = ?
+        WHERE id = ?
+      `).run(resolvedCompanyId, now, chExisting.id);
+    }
+
+    // 5. Registrar en audit_logs si se requiere formalmente (options.auditLog)
+    if (options.auditLog) {
+      if (!isMigration015Applied()) {
+        db.prepare(`
+          INSERT INTO audit_logs (id, company_id, business_id, entity_type, entity_id, action, field_changed, old_value, new_value, changed_by, reason, timestamp)
+          VALUES (?, ?, ?, 'COMPANY', ?, 'ONBOARDING_COMPLETED', 'onboarding_step', 'BANK_ACCOUNT', NULL, ?, 'Secure onboarding completed via WhatsApp', ?)
+        `).run(crypto.randomUUID(), resolvedCompanyId, cleanPhone || resolvedCompanyId, resolvedCompanyId, userId, now);
+      } else {
+        db.prepare(`
+          INSERT INTO audit_logs (id, company_id, entity_type, entity_id, action, field_changed, old_value, new_value, changed_by, reason, timestamp)
+          VALUES (?, ?, 'COMPANY', ?, 'ONBOARDING_COMPLETED', 'onboarding_step', 'BANK_ACCOUNT', NULL, ?, 'Secure onboarding completed via WhatsApp', ?)
+        `).run(crypto.randomUUID(), resolvedCompanyId, resolvedCompanyId, userId, now);
+      }
+    }
+
+    db.exec('COMMIT;');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch (_) {}
+    throw err;
   }
 
   return getCompany(cleanPhone);

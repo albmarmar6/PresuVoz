@@ -1,4 +1,6 @@
-import { getCompany, saveCompany, DEFAULT_COMPANY } from './db_service.js';
+import { getCompany, saveCompany, completeSecureOnboarding, DEFAULT_COMPANY } from './db_service.js';
+
+export { completeSecureOnboarding };
 
 export const ONBOARDING_STEPS = [
   'OWNER_AND_COMPANY',
@@ -17,6 +19,106 @@ export const ONBOARDING_STEPS = [
   'INVOICE_SERIES',
   'BANK_ACCOUNT'
 ];
+
+export function getStepQuestion(step, data = {}) {
+  switch (step) {
+    case 'OWNER_AND_COMPANY':
+      return [
+        '👉 *¿Cómo te llamas y cómo se llama tu empresa o negocio?*',
+        '',
+        '_(Por ejemplo: «Me llamo Carlos y mi empresa es Reformas Carlos» o «Alberto, Instalaciones Sur»)_'
+      ].join('\n');
+    case 'TRADE':
+      return [
+        '👉 *¿A qué oficio o gremio te dedicas principalmente?*',
+        '',
+        '_(Por ejemplo: Electricidad, fontanería, albañilería, reformas integrales, carpintería, pintura, climatización...)_'
+      ].join('\n');
+    case 'CITY':
+      return [
+        '👉 *¿Por qué ciudad o zona sueles moverte habitualmente para los trabajos y obras?*',
+        '',
+        '_(Por ejemplo: Sevilla y alrededores, Madrid capital, Valencia y provincia...)_'
+      ].join('\n');
+    case 'WORKING_HOURS':
+      return [
+        '👉 *¿Cuál es tu horario habitual de trabajo o atención?*',
+        '',
+        '_(Por ejemplo: De lunes a viernes de 8:00 a 18:00, o de 7:30 a 15:30... O pon «luego» si prefieres)_'
+      ].join('\n');
+    case 'PAYMENT_TERMS':
+      return [
+        '👉 *¿Cómo sueles cobrar habitualmente a tus clientes?*',
+        '1️⃣ Al terminar',
+        '2️⃣ Por adelantado',
+        '3️⃣ 50% al empezar y 50% al acabar',
+        '4️⃣ Por hitos o fases de obra',
+        '5️⃣ Otro (escríbeme cómo lo haces tú o pon «luego»)'
+      ].join('\n');
+    case 'ADVANCE':
+      return [
+        '👉 *¿Sueles pedir algún anticipo al confirmar la obra o para compra de materiales? ¿De qué porcentaje suele ser?*',
+        '',
+        '_(Por ejemplo: 30%, 40%, 50%, o escribe «ninguno» o «luego»)_'
+      ].join('\n');
+    case 'QUOTE_VALIDITY':
+      return [
+        '👉 *¿Cuánto tiempo suelen ser válidos tus presupuestos antes de que caduquen?*',
+        '1️⃣ 7 días',
+        '2️⃣ 15 días',
+        '3️⃣ 30 días',
+        '4️⃣ Otro (indícame los días que quieras)'
+      ].join('\n');
+    case 'ENTITY_TYPE':
+      return '👉 *¿Eres autónomo o tienes una empresa (S.L., C.B., Sociedad Civil...)?*';
+    case 'FISCAL_NAME':
+      return [
+        '👉 *¿Cuál es tu nombre fiscal o razón social oficial para las facturas?*',
+        '',
+        '_(Si eres autónomo suele ser tu nombre y apellidos; si es sociedad, la razón social completa como figura en Hacienda)_'
+      ].join('\n');
+    case 'CIF_NIF':
+      return [
+        '👉 *¿Cuál es tu NIF o CIF?*',
+        '',
+        '_(DNI/NIE con letra si eres autónomo, o CIF empezando por letra si es empresa, ej: 12345678Z o B-12345678. O escribe «luego» si prefieres)_'
+      ].join('\n');
+    case 'FISCAL_ADDRESS':
+      return [
+        '👉 *¿Cuál es tu dirección fiscal completa?*',
+        '',
+        '_(Calle, número, código postal y localidad. O pon «luego» si prefieres)_'
+      ].join('\n');
+    case 'TAX_RATE':
+      return [
+        '👉 *¿Qué porcentaje de IVA sueles aplicar habitualmente en tus presupuestos?*',
+        '1️⃣ 21% (General)',
+        '2️⃣ 10% (Reducido de reformas)',
+        '3️⃣ Exento (0%)',
+        '4️⃣ Otro'
+      ].join('\n');
+    case 'IRPF_RATE':
+      return [
+        '👉 *¿Utilizas algún porcentaje de IRPF en tus facturas?*',
+        '',
+        '_(Por ejemplo: 15% general de profesional, 7% si eres nuevo autónomo, o escribe «no» / «0%» si facturas a particulares o como sociedad)_'
+      ].join('\n');
+    case 'INVOICE_SERIES':
+      return [
+        '👉 *¿Qué numeración o serie quieres utilizar para tus facturas?*',
+        '',
+        '_(Por ejemplo: 2026-001, 2026-002... o F26-001, FRA-001... Si no pones nada usaremos «2026-001»)_'
+      ].join('\n');
+    case 'BANK_ACCOUNT':
+      return [
+        '👉 *¿Tienes una cuenta bancaria (IBAN) o Bizum que quieras mostrar en las facturas y presupuestos para que te paguen?*',
+        '',
+        '_(Puedes pasarme el IBAN, el número para Bizum, o escribir «luego» si prefieres añadirlo más adelante)_'
+      ].join('\n');
+    default:
+      return '';
+  }
+}
 
 export function getOnboardingState(phone) {
   const company = getCompany(phone);
@@ -112,7 +214,7 @@ export function formatCompanySummary(comp) {
   ].join('\n');
 }
 
-export function processOnboardingStep(phone, rawInput) {
+export function processOnboardingStep(phone, rawInput, options = {}) {
   const input = String(rawInput || '').trim();
   const state = getOnboardingState(phone);
 
@@ -141,6 +243,21 @@ export function processOnboardingStep(phone, rawInput) {
     return {
       handled: true,
       message: welcomeMsg
+    };
+  }
+
+  // Detección de saludo repetido durante el onboarding (mantiene el estado y re-pregunta sin reiniciar ni crear empresas duplicadas)
+  const isRepeatedGreeting = /^(?:hola|buenas|buenos\s+d[ií]as|buenas\s+tardes|buenas\s+noches|hey|qu[eé]\s+tal)$/i.test(input);
+  if (isRepeatedGreeting) {
+    const currentStep = state.step;
+    const data = state.data || {};
+    return {
+      handled: true,
+      message: [
+        '👋 ¡Hola de nuevo! Seguimos justo donde lo dejamos con la configuración:',
+        '',
+        getStepQuestion(currentStep, data)
+      ].join('\n')
     };
   }
 
@@ -588,8 +705,9 @@ export function processOnboardingStep(phone, rawInput) {
       data.iban = iban || null;
       data.bizum = bizum || null;
 
-      // Finalizar Onboarding
-      const updated = saveCompany(phone, {
+      // Finalizar Onboarding de forma atómica y segura (transacción BEGIN IMMEDIATE)
+      const updated = completeSecureOnboarding(phone, {
+        ...data,
         name: data.companyName || data.ownerName || null,
         fiscalName: data.fiscalName || data.companyName || data.ownerName || null,
         ownerName: data.ownerName || null,
@@ -606,15 +724,14 @@ export function processOnboardingStep(phone, rawInput) {
         defaultTaxRate: data.defaultTaxRate !== null && data.defaultTaxRate !== undefined ? data.defaultTaxRate : 10,
         defaultAdvance: data.defaultAdvance !== null && data.defaultAdvance !== undefined ? data.defaultAdvance : null,
         iban: iban || null,
-        bizum: bizum || null,
-        onboardingStep: null,
-        onboardingDataJson: null
-      });
+        bizum: bizum || null
+      }, options);
 
       const summaryText = formatCompanySummary(updated);
       return {
         handled: true,
         completed: true,
+        company: updated,
         message: summaryText
       };
     }

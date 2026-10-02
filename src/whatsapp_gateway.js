@@ -169,6 +169,29 @@ export function setConversationState(remoteJid, state) {
 // Memoria multi-presupuesto y facturas por chat conectada a SQLite
 export const userSessions = new Map();
 export const botSentMessageIds = new Set();
+export const provisionalSessions = new Map();
+
+/**
+ * Obtiene o inicializa el contexto de sesión provisional para un usuario no autenticado en onboarding.
+ * Este contexto NO tiene acceso a ningún dato de negocio (presupuestos, facturas, clientes, etc.).
+ */
+export function getProvisionalSession(remoteJid, senderNumber) {
+  const canonicalIdentifier = extractCanonicalSenderIdentifier(remoteJid, senderNumber);
+  if (!canonicalIdentifier) return null;
+
+  if (provisionalSessions.has(remoteJid)) {
+    return provisionalSessions.get(remoteJid);
+  }
+
+  const provSession = {
+    provisional: true,
+    remoteJid,
+    phone: canonicalIdentifier,
+    createdAt: Date.now()
+  };
+  provisionalSessions.set(remoteJid, provSession);
+  return provSession;
+}
 
 /**
  * ─── EXTRACTION & CORRESPONDENCE GATE: Remitente e Identidad ───
@@ -345,6 +368,70 @@ export function getUserSession(remoteJid, senderNumber) {
     session.activeBudgetId = Array.from(session.budgets.keys())[0];
   }
   return session;
+}
+
+/**
+ * Procesa mensajes de remitentes no autenticados en el flujo de Onboarding Seguro Provisional.
+ * Garantiza:
+ * 1. Aislamiento absoluto: el usuario no autenticado no puede consultar presupuestos, facturas,
+ *    citas ni ningún dato de ningún tenant existente.
+ * 2. Creación atómica de company, user (OWNER), membership y channel_identity al completar.
+ * 3. Idempotencia y tolerancia a mensajes repetidos (saludos repetidos no duplican ni reinician).
+ */
+export async function handleSecurePreOnboarding(sock, remoteJid, senderNumber, item) {
+  const canonicalIdentifier = extractCanonicalSenderIdentifier(remoteJid, senderNumber);
+  if (!canonicalIdentifier) {
+    console.warn(`🛑 [Onboarding Seguro] Discrepancia o JID no válido para ${remoteJid} / ${senderNumber}. Rechazado.`);
+    return { handled: false, error: 'INVALID_CANONICAL_IDENTIFIER' };
+  }
+
+  // Verificar si ya está autenticado en channel_identities
+  const authContext = resolveAuthenticatedContext('whatsapp', canonicalIdentifier);
+  if (authContext) {
+    return { handled: false, alreadyAuthenticated: true };
+  }
+
+  const rawUserText = typeof item === 'string' ? item : (item?.rawUserText || '');
+  const onboardingState = getOnboardingState(canonicalIdentifier);
+
+  // 1. Si no ha iniciado el onboarding: cualquier mensaje inicial arranca el onboarding seguro
+  if (!onboardingState.step) {
+    const welcomeText = startOnboarding(canonicalIdentifier);
+    if (sock && typeof sock.sendMessage === 'function') {
+      const sent = await sock.sendMessage(remoteJid, { text: welcomeText });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    }
+    return {
+      handled: true,
+      started: true,
+      step: 'OWNER_AND_COMPANY',
+      message: welcomeText
+    };
+  }
+
+  // 2. Si ya está en medio del onboarding: procesar el paso actual
+  const stepResult = processOnboardingStep(canonicalIdentifier, rawUserText, { auditLog: true });
+  if (stepResult.handled) {
+    if (sock && typeof sock.sendMessage === 'function' && stepResult.message) {
+      const sent = await sock.sendMessage(remoteJid, { text: stepResult.message });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    }
+
+    if (stepResult.completed) {
+      console.log(`🎉 [Onboarding Seguro] Autónomo ${canonicalIdentifier} ha completado el onboarding atómico con éxito.`);
+      provisionalSessions.delete(remoteJid);
+    }
+
+    return {
+      handled: true,
+      completed: Boolean(stepResult.completed),
+      step: stepResult.completed ? null : getOnboardingState(canonicalIdentifier).step,
+      message: stepResult.message,
+      company: stepResult.company || null
+    };
+  }
+
+  return { handled: false, message: null };
 }
 
 function storeMessage(keyId, message) {
@@ -3319,7 +3406,18 @@ async function startWhatsAppGateway() {
     try {
       const session = getUserSession(remoteJid, senderNumber);
       if (!session || !session.authContext) {
-        console.warn(`⛔ [Auth] Mensaje rechazado de ${senderNumber} (${remoteJid}): Canal no autenticado / sin channel_identity activa.`);
+        // Remitente no autenticado: ejecutar flujo de Onboarding Seguro Provisional
+        const onboardingResult = await handleSecurePreOnboarding(sock, remoteJid, senderNumber, item);
+        if (onboardingResult.handled) {
+          isSuccess = true;
+          if (wamId) updateMessageStatus(wamId, 'DELIVERED');
+          if (allWamIds) {
+            allWamIds.forEach(id => updateMessageStatus(id, 'DELIVERED'));
+          }
+          return;
+        }
+
+        console.warn(`⛔ [Auth] Mensaje rechazado de ${senderNumber} (${remoteJid}): Canal no autenticado y fuera de onboarding.`);
         if (wamId) updateMessageStatus(wamId, 'REJECTED');
         if (allWamIds) {
           allWamIds.forEach(id => updateMessageStatus(id, 'REJECTED'));
@@ -4365,7 +4463,7 @@ async function startWhatsAppGateway() {
       activeProcessingJids.delete(remoteJid);
       const session = getUserSession(remoteJid, senderNumber);
       const onboardingState = getOnboardingState(senderNumber);
-      if (session && (session.pendingAction || onboardingState?.step || session.pendingDisambiguation)) {
+      if ((session && (session.pendingAction || session.pendingDisambiguation || onboardingState?.step)) || (!session && onboardingState?.step)) {
         setConversationState(remoteJid, 'WAITING_FOR_INPUT');
       } else {
         setConversationState(remoteJid, 'IDLE');
@@ -4519,16 +4617,18 @@ async function startWhatsAppGateway() {
         allWamIds: wamId ? [wamId] : []
       };
 
-      const session = getUserSession(remoteJid, senderNumber);
-      if (!session || !session.authContext) {
-        console.warn(`⛔ [Auth] Mensaje rechazado de ${senderNumber} (${remoteJid}): Canal no autenticado en channel_identities.`);
+      const canonicalIdentifier = extractCanonicalSenderIdentifier(remoteJid, senderNumber);
+      if (!canonicalIdentifier) {
+        console.warn(`⛔ [Auth] Mensaje rechazado de ${senderNumber} (${remoteJid}): Identificador canónico no válido o discrepancia.`);
         if (wamId) updateMessageStatus(wamId, 'REJECTED');
         setConversationState(remoteJid, 'IDLE');
         continue;
       }
-      const onboardingState = getOnboardingState(senderNumber);
+
+      const session = getUserSession(remoteJid, senderNumber);
+      const onboardingState = getOnboardingState(canonicalIdentifier);
       const isWaitingForInput = getConversationState(remoteJid) === 'WAITING_FOR_INPUT' ||
-        Boolean(session.pendingAction || onboardingState?.step || session.pendingDisambiguation);
+        Boolean((session && (session.pendingAction || session.pendingDisambiguation)) || onboardingState?.step);
       const isUrgentSingleWord = isText && /^(?:s[ií]|no|confirmar|cancelar|descartar|1|2|3|4|5|#nuevo|resumen|agenda|estado)$/i.test(rawUserText);
 
       // Si es audio, imagen, o estamos esperando una respuesta concreta (WAITING_FOR_INPUT), o es comando urgente:
