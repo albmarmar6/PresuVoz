@@ -960,9 +960,14 @@ export function emitInvoice(companyContextOrIdOrPhone, invoicePayload, options =
     const assignedVisible = alloc.visibleNumber;
 
     // 4. Preparar payload de factura con ID interno estable (UUID) y número fiscal visible independiente
+    const existingRow = invoicePayload.id ? targetDb.prepare('SELECT id, company_id FROM invoices WHERE id = ?').get(invoicePayload.id) : null;
+    const finalId = (!existingRow || (existingRow.company_id === companyId && invoicePayload.isUpdate)) 
+      ? (invoicePayload.id || crypto.randomUUID()) 
+      : crypto.randomUUID();
+
     const invoiceToSave = {
       ...invoicePayload,
-      id: invoicePayload.id || crypto.randomUUID(),
+      id: finalId,
       companyId,
       company_id: companyId,
       series: alloc.series,
@@ -1537,7 +1542,7 @@ export function getPayments(companyContextOrIdOrPhone, maybeBudgetId) {
 
 // ─── Métodos de Payment Allocations (Aplicación de Cobros a Facturas) ────────
 
-export function createPaymentAllocation(companyContextOrIdOrPhone, allocationData) {
+export function createPaymentAllocation(companyContextOrIdOrPhone, allocationData, options = {}) {
   if (!companyContextOrIdOrPhone) {
     throw new Error("❌ [Tenant Boundary] createPaymentAllocation requiere un companyId o contexto autenticado obligatorio.");
   }
@@ -1547,6 +1552,7 @@ export function createPaymentAllocation(companyContextOrIdOrPhone, allocationDat
     throw new Error("❌ [Tenant Boundary] No se pudo resolver companyId para la asignación.");
   }
 
+  const targetDb = options.db || db;
   const paymentId = allocationData.paymentId || allocationData.payment_id;
   const invoiceId = allocationData.invoiceId || allocationData.invoice_id;
   const amount = Number(allocationData.amount);
@@ -1559,7 +1565,7 @@ export function createPaymentAllocation(companyContextOrIdOrPhone, allocationDat
   // 2. Obtener y validar payment en el tenant autenticado
   const payment = getPayment(companyContextOrIdOrPhone, paymentId);
   if (!payment) {
-    const foreignPayment = db.prepare('SELECT id, company_id FROM payments WHERE id = ?').get(paymentId);
+    const foreignPayment = targetDb.prepare('SELECT id, company_id FROM payments WHERE id = ?').get(paymentId);
     if (foreignPayment && foreignPayment.company_id !== companyId) {
       throw new Error(`❌ [Tenant Boundary] Violación de aislamiento: El pago '${paymentId}' pertenece a otra empresa.`);
     }
@@ -1569,7 +1575,7 @@ export function createPaymentAllocation(companyContextOrIdOrPhone, allocationDat
   // 3. Obtener y validar invoice en el tenant autenticado
   const invoice = getInvoice(companyContextOrIdOrPhone, invoiceId);
   if (!invoice) {
-    const foreignInvoice = db.prepare('SELECT id, company_id FROM invoices WHERE id = ?').get(invoiceId);
+    const foreignInvoice = targetDb.prepare('SELECT id, company_id FROM invoices WHERE id = ?').get(invoiceId);
     if (foreignInvoice && foreignInvoice.company_id !== companyId) {
       throw new Error(`❌ [Tenant Boundary] Violación de aislamiento: La factura '${invoiceId}' pertenece a otra empresa.`);
     }
@@ -1585,7 +1591,7 @@ export function createPaymentAllocation(companyContextOrIdOrPhone, allocationDat
   }
 
   // 4. Validar suma de allocations <= payment.amount (utilizando aritmética entera en céntimos)
-  const existingAllocs = db.prepare(`
+  const existingAllocs = targetDb.prepare(`
     SELECT id, amount FROM payment_allocations 
     WHERE payment_id = ? AND company_id = ?
   `).all(paymentId, companyId);
@@ -1606,9 +1612,9 @@ export function createPaymentAllocation(companyContextOrIdOrPhone, allocationDat
   const now = new Date().toISOString();
   const allocatedAt = allocationData.allocatedAt || allocationData.allocated_at || now;
 
-  db.exec('BEGIN IMMEDIATE;');
+  targetDb.exec('BEGIN IMMEDIATE;');
   try {
-    insertPaymentAllocationInternal(db, {
+    insertPaymentAllocationInternal(targetDb, {
       id: allocId,
       paymentId,
       invoiceId,
@@ -1617,9 +1623,9 @@ export function createPaymentAllocation(companyContextOrIdOrPhone, allocationDat
       allocatedAt,
       now
     });
-    db.exec('COMMIT;');
+    targetDb.exec('COMMIT;');
   } catch (err) {
-    db.exec('ROLLBACK;');
+    targetDb.exec('ROLLBACK;');
     throw err;
   }
 
@@ -1635,14 +1641,15 @@ export function createPaymentAllocation(companyContextOrIdOrPhone, allocationDat
   };
 }
 
-export function getPaymentAllocation(companyContextOrIdOrPhone, id) {
+export function getPaymentAllocation(companyContextOrIdOrPhone, id, options = {}) {
   if (id !== undefined && id !== null) {
     if (!companyContextOrIdOrPhone || !id) return null;
     const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
     const companyId = tenant?.companyId;
     if (!companyId) return null;
 
-    const row = db.prepare('SELECT * FROM payment_allocations WHERE id = ? AND company_id = ?').get(id, companyId);
+    const targetDb = options.db || db;
+    const row = targetDb.prepare('SELECT * FROM payment_allocations WHERE id = ? AND company_id = ?').get(id, companyId);
     if (!row) return null;
     return {
       id: row.id,

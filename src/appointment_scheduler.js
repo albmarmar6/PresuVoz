@@ -36,6 +36,13 @@ function resolveSchedulerTargetJid(companyIdOrPhone, userSessions) {
     }
   }
   if (companyIdOrPhone && String(companyIdOrPhone).includes('-')) {
+    try {
+      const chan = db.prepare("SELECT channel_user_id FROM channel_identities WHERE company_id = ? AND channel = 'whatsapp' AND status = 'ACTIVE' ORDER BY created_at DESC LIMIT 1").get(companyIdOrPhone);
+      if (chan?.channel_user_id) {
+        const clean = String(chan.channel_user_id).replace(/\D/g, '');
+        return `${clean}@s.whatsapp.net`;
+      }
+    } catch (_) {}
     const row = db.prepare('SELECT phone FROM companies WHERE id = ?').get(companyIdOrPhone);
     if (row?.phone) {
       const clean = String(row.phone).replace(/\D/g, '');
@@ -49,12 +56,14 @@ function resolveSchedulerTargetJid(companyIdOrPhone, userSessions) {
 /**
  * Job 1: Recordatorio del día anterior (Víspera)
  */
-export async function runEveningBeforeReminderJob(sock, userSessions = new Map(), botSentMessageIds = new Set()) {
+export async function runEveningBeforeReminderJob(sock, userSessions = new Map(), botSentMessageIds = new Set(), options = {}) {
   if (!sock) return;
   const { tomorrowStr, hour, minute, nowIso } = getNowInTimezone('Europe/Madrid');
 
-  // Solo ejecuta en la ventana de las 19:30 a 19:35 (o cuando se invoque)
-  if (hour !== 19 || minute < 30 || minute > 35) return;
+  // Solo ejecuta en la ventana de las 19:30 a 19:35 (salvo que se pase ignoreTimeWindow para reconciliación o testing)
+  if (!options?.ignoreTimeWindow) {
+    if (hour !== 19 || minute < 30 || minute > 35) return;
+  }
 
   // Busca todas las visitas de mañana que no hayan recibido el recordatorio previo
   const stmt = db.prepare(`
@@ -100,7 +109,7 @@ export async function runEveningBeforeReminderJob(sock, userSessions = new Map()
 
       const sent = await sock.sendMessage(targetJid, { text: lines.join('\n').trim() });
       if (sent?.status === 'BLOCKED') {
-        console.warn(`🛡️ [Scheduler] Envío bloqueado por cortafuegos para ${phone || companyId}. No se actualizará SQLite.`);
+        console.warn(`🛡️ [Scheduler] Envío bloqueado por cortafuegos para ${targetJid || companyId}. No se actualizará SQLite.`);
         continue;
       }
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
@@ -114,9 +123,9 @@ export async function runEveningBeforeReminderJob(sock, userSessions = new Map()
         WHERE id IN (${placeholders})
       `).run(nowIso, nowIso, ...aptIds);
 
-      console.log(`📨 [Scheduler] Recordatorio de víspera enviado a ${phone || companyId} para ${appointments.length} visitas.`);
+      console.log(`📨 [Scheduler] Recordatorio de víspera enviado a ${targetJid || companyId} para ${appointments.length} visitas.`);
     } catch (err) {
-      console.error(`❌ [Scheduler] Error enviando recordatorio víspera a ${phone || companyId}:`, err.message);
+      console.error(`❌ [Scheduler] Error enviando recordatorio víspera a ${targetJid || companyId}:`, err.message);
     }
   }
 }
@@ -124,12 +133,14 @@ export async function runEveningBeforeReminderJob(sock, userSessions = new Map()
 /**
  * Job 2: Recordatorio de la mañana (Resumen del día)
  */
-export async function runMorningReminderJob(sock, userSessions = new Map(), botSentMessageIds = new Set()) {
+export async function runMorningReminderJob(sock, userSessions = new Map(), botSentMessageIds = new Set(), options = {}) {
   if (!sock) return;
   const { dateStr, hour, minute, nowIso } = getNowInTimezone('Europe/Madrid');
 
-  // Solo ejecuta en la ventana de las 07:30 a 07:35
-  if (hour !== 7 || minute < 30 || minute > 35) return;
+  // Solo ejecuta en la ventana de las 07:30 a 07:35 (salvo ignoreTimeWindow)
+  if (!options?.ignoreTimeWindow) {
+    if (hour !== 7 || minute < 30 || minute > 35) return;
+  }
 
   const stmt = db.prepare(`
     SELECT * FROM appointments
@@ -173,7 +184,7 @@ export async function runMorningReminderJob(sock, userSessions = new Map(), botS
 
       const sent = await sock.sendMessage(targetJid, { text: lines.join('\n').trim() });
       if (sent?.status === 'BLOCKED') {
-        console.warn(`🛡️ [Scheduler] Envío matinal bloqueado por cortafuegos para ${phone || companyId}.`);
+        console.warn(`🛡️ [Scheduler] Envío matinal bloqueado por cortafuegos para ${targetJid || companyId}.`);
         continue;
       }
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
@@ -186,9 +197,9 @@ export async function runMorningReminderJob(sock, userSessions = new Map(), botS
         WHERE id IN (${placeholders})
       `).run(nowIso, nowIso, ...aptIds);
 
-      console.log(`☀️ [Scheduler] Recordatorio matinal enviado a ${phone || companyId} para ${appointments.length} visitas.`);
+      console.log(`☀️ [Scheduler] Recordatorio matinal enviado a ${targetJid || companyId} para ${appointments.length} visitas.`);
     } catch (err) {
-      console.error(`❌ [Scheduler] Error enviando recordatorio matinal a ${phone || companyId}:`, err.message);
+      console.error(`❌ [Scheduler] Error enviando recordatorio matinal a ${targetJid || companyId}:`, err.message);
     }
   }
 }
@@ -200,12 +211,14 @@ export async function runMorningReminderJob(sock, userSessions = new Map(), botS
  * Si la hora ya pasó, no se marcan automáticamente como COMPLETED.
  * Se pide confirmación humana al profesional para que diga qué pasó.
  */
-export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSentMessageIds = new Set()) {
+export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSentMessageIds = new Set(), options = {}) {
   if (!sock) return;
   const { dateStr, hour, minute, nowIso } = getNowInTimezone('Europe/Madrid');
 
-  // Ventana de ejecución habitual a partir de las 20:30
-  if (hour < 20 || (hour === 20 && minute < 30)) return;
+  // Ventana de ejecución habitual a partir de las 20:30 (salvo ignoreTimeWindow)
+  if (!options?.ignoreTimeWindow) {
+    if (hour < 20 || (hour === 20 && minute < 30)) return;
+  }
 
   const stmt = db.prepare(`
     SELECT * FROM appointments
@@ -254,7 +267,7 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
 
       const sent = await sock.sendMessage(targetJid, { text: lines.join('\n').trim() });
       if (sent?.status === 'BLOCKED') {
-        console.warn(`🛡️ [Scheduler] Revisión de fin de jornada bloqueada por cortafuegos para ${phone || companyId}.`);
+        console.warn(`🛡️ [Scheduler] Revisión de fin de jornada bloqueada por cortafuegos para ${targetJid || companyId}.`);
         continue;
       }
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
@@ -279,19 +292,58 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
         };
       }
 
-      console.log(`📋 [Scheduler] Revisión de fin de jornada enviada a ${phone || companyId} para ${appointments.length} visitas.`);
+      console.log(`📋 [Scheduler] Revisión de fin de jornada enviada a ${targetJid || companyId} para ${appointments.length} visitas.`);
     } catch (err) {
-      console.error(`❌ [Scheduler] Error en revisión de fin de jornada para ${phone || companyId}:`, err.message);
+      console.error(`❌ [Scheduler] Error en revisión de fin de jornada para ${targetJid || companyId}:`, err.message);
     }
   }
 }
 
 /**
+ * Reconciliación en arranque tras reinicio del servicio (DEF-06):
+ * Comprueba visitas confirmadas no notificadas que se encuentren dentro de
+ * ventanas razonables del mismo día y las notifica sin duplicar mensajes
+ * gracias a las marcas en SQLite.
+ */
+export async function reconcilePendingSchedulerJobs(sock, userSessions = new Map(), botSentMessageIds = new Set(), options = {}) {
+  if (!sock) return { reconciled: false, reason: 'NO_SOCKET' };
+  const { hour, minute } = getNowInTimezone('Europe/Madrid');
+  const results = { morning: false, evening: false, endOfDay: false };
+
+  // 1. Recordatorio matinal: ventana válida si el bot arranca entre las 07:30 y las 14:00
+  if (options.ignoreTimeWindow || ((hour > 7 || (hour === 7 && minute >= 30)) && hour < 14)) {
+    await runMorningReminderJob(sock, userSessions, botSentMessageIds, { ignoreTimeWindow: true });
+    results.morning = true;
+  }
+
+  // 2. Recordatorio víspera: ventana válida si el bot arranca entre las 19:30 y las 23:59
+  if (options.ignoreTimeWindow || (hour > 19 || (hour === 19 && minute >= 30))) {
+    await runEveningBeforeReminderJob(sock, userSessions, botSentMessageIds, { ignoreTimeWindow: true });
+    results.evening = true;
+  }
+
+  // 3. Revisión de fin de jornada: ventana válida si el bot arranca entre las 20:30 y las 23:59
+  if (options.ignoreTimeWindow || (hour > 20 || (hour === 20 && minute >= 30))) {
+    await runEndOfDayReviewJob(sock, userSessions, botSentMessageIds, { ignoreTimeWindow: true });
+    results.endOfDay = true;
+  }
+
+  return { reconciled: true, results };
+}
+
+/**
  * Inicializador del Scheduler en segundo plano.
  * Corre cada 60 segundos ejecutando los 3 jobs con total idempotencia.
+ * En arranque, reconcilia automáticamente citas pendientes dentro de ventanas válidas (DEF-06).
  */
-export function initAppointmentScheduler(sock, userSessions = new Map(), botSentMessageIds = new Set()) {
+export function initAppointmentScheduler(sock, userSessions = new Map(), botSentMessageIds = new Set(), options = {}) {
   console.log('⏰ [Scheduler] Motor de visitas y recordatorios inicializado (Europe/Madrid).');
+
+  // Reconciliación en arranque: procesar recordatorios pendientes si estamos en ventana válida
+  if (!options?.skipStartupReconciliation) {
+    reconcilePendingSchedulerJobs(sock, userSessions, botSentMessageIds, options)
+      .catch(err => console.error('❌ [Scheduler] Error en reconciliación de arranque:', err.message));
+  }
 
   const intervalId = setInterval(async () => {
     try {

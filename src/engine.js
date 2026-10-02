@@ -571,7 +571,12 @@ export class PresuVozEngine {
     }
 
     const year = new Date().getFullYear();
-    const receiptId = `REC-${year}-${String(Math.floor(100 + Math.random() * 900))}`;
+    let receiptId = paymentData.id;
+    if (!receiptId) {
+      do {
+        receiptId = `REC-${year}-${String(Math.floor(100 + Math.random() * 900))}`;
+      } while (budget.payments.some(p => p.id === receiptId));
+    }
     const dateStr = paymentData.date || new Date().toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' });
 
     const receipt = {

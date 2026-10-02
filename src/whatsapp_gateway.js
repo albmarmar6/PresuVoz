@@ -40,6 +40,7 @@ import {
 } from './fiscal_service.js';
 import { resolveAuthenticatedContext } from './identity_service.js';
 import {
+  db,
   getCompany,
   saveCompany,
   saveBudget,
@@ -51,6 +52,8 @@ import {
   listInvoices,
   savePayment,
   getPayments,
+  createPaymentAllocation,
+  getPaymentAllocation,
   savePurchaseInvoice,
   saveExpensePayment,
   saveInvestmentAsset,
@@ -398,6 +401,7 @@ export async function handleSecurePreOnboarding(sock, remoteJid, senderNumber, i
   // 1. Si no ha iniciado el onboarding: cualquier mensaje inicial arranca el onboarding seguro
   if (!onboardingState.step) {
     const welcomeText = startOnboarding(canonicalIdentifier);
+    getProvisionalSession(remoteJid, senderNumber);
     if (sock && typeof sock.sendMessage === 'function') {
       const sent = await sock.sendMessage(remoteJid, { text: welcomeText });
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
@@ -483,18 +487,34 @@ export function shouldProcessIncomingMessage({ remoteJid, fromMe, myNumber, myLi
     return { process: false, reason: 'OUTGOING_THIRD_PARTY_IGNORED' };
   }
 
-  // 4. REGLA INMUTABLE PARA MENSAJES ENTRANTES DE TERCEROS (!fromMe):
-  // Solo se procesan si el número remitente está expresamente autorizado.
-  if (!isFromMe) {
-    const isAllowed = allowedNumbers.some(num => num && remoteUser === String(num).replace(/\D/g, ''));
-    if (!isAllowed) {
-      return { process: false, reason: 'UNAUTHORIZED_INCOMING_SENDER' };
-    }
+  // 4. Self-chat autorizado
+  if (isSelfChat) {
+    return { process: true, reason: 'SELF_CHAT', senderNumber: cleanMyNum || remoteUser };
+  }
+
+  // 5. REGLAS PARA MENSAJES ENTRANTES DE TERCEROS (!fromMe):
+  // a) Autorizado por lista explícita ALLOWED_NUMBERS (ej. testers/admin)
+  const isAllowed = allowedNumbers.some(num => num && remoteUser === String(num).replace(/\D/g, ''));
+  if (isAllowed) {
     return { process: true, reason: 'AUTHORIZED_EXTERNAL_SENDER', senderNumber: remoteUser };
   }
 
-  // 5. Self-chat autorizado
-  return { process: true, reason: 'SELF_CHAT', senderNumber: cleanMyNum || remoteUser };
+  // b) Canal ya registrado y autenticado en SQLite (channel_identities)
+  try {
+    const authContext = resolveAuthenticatedContext('whatsapp', remoteUser);
+    if (authContext && authContext.companyId) {
+      return { process: true, reason: 'AUTHENTICATED_CHANNEL', senderNumber: remoteUser };
+    }
+  } catch (e) {}
+
+  // c) Remitente 1:1 nuevo o en onboarding (candidato a onboarding seguro - DEF-01)
+  // Debe ser un JID individual legítimo de WhatsApp (@s.whatsapp.net, @c.us o número plano)
+  const isDirectIndividualChat = remoteJid.includes('@s.whatsapp.net') || remoteJid.includes('@c.us') || !remoteJid.includes('@');
+  if (isDirectIndividualChat && remoteUser.length >= 7) {
+    return { process: true, reason: 'ONBOARDING_ELIGIBLE_SENDER', senderNumber: remoteUser };
+  }
+
+  return { process: false, reason: 'UNAUTHORIZED_INCOMING_SENDER' };
 }
 
 /**
@@ -528,6 +548,25 @@ export function isAuthorizedEgressRecipient(targetJid, { myNumber, myLid, allowe
   if (isAllowed) {
     return { allowed: true, reason: 'AUTHORIZED_NUMBER' };
   }
+
+  // 4. Si el canal está autenticado en channel_identities (tenant registrado en el sistema)
+  try {
+    const authContext = resolveAuthenticatedContext('whatsapp', targetUser);
+    if (authContext && authContext.companyId) {
+      return { allowed: true, reason: 'AUTHENTICATED_CHANNEL' };
+    }
+  } catch (e) {}
+
+  // 5. Si está en proceso activo o provisional de onboarding (DEF-01)
+  if (provisionalSessions.has(targetJid)) {
+    return { allowed: true, reason: 'PROVISIONAL_ONBOARDING_RECIPIENT' };
+  }
+  try {
+    const obState = getOnboardingState(targetUser);
+    if (obState?.step) {
+      return { allowed: true, reason: 'ACTIVE_ONBOARDING_RECIPIENT' };
+    }
+  } catch (e) {}
 
   return { allowed: false, reason: 'UNAUTHORIZED_TARGET' };
 }
@@ -1677,6 +1716,543 @@ export async function handleClearShoppingList(sock, remoteJid, session) {
   return { success: true };
 }
 
+export function findBudgetInSession(session, query) {
+  if (!query || query.trim() === '') {
+    if (session.activeBudgetId && session.budgets.has(session.activeBudgetId)) {
+      return session.budgets.get(session.activeBudgetId);
+    }
+    if (session.budgets.size === 1) {
+      return Array.from(session.budgets.values())[0];
+    }
+    return null;
+  }
+  const q = query.toLowerCase().trim();
+  for (const [id, b] of session.budgets.entries()) {
+    if (id.toLowerCase().includes(q)) return b;
+    if (b.client?.name && b.client.name.toLowerCase().includes(q)) return b;
+  }
+  if (session.activeBudgetId && session.budgets.has(session.activeBudgetId)) {
+    return session.budgets.get(session.activeBudgetId);
+  }
+  return null;
+}
+
+export async function emitInvoiceForBudget(sock, remoteJid, session, targetBudget, clientNif = null) {
+  if (!targetBudget) {
+    const sentErr = await sock.sendMessage(remoteJid, {
+      text: '⚠️ *No se encontró el presupuesto para facturar.*\n\nPor favor, indica el nombre del cliente o el número de presupuesto (ej: *"facturar presupuesto PRE-2026-5129"* o *"factura de José Luis"*).'
+    });
+    if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    return;
+  }
+
+  try {
+    console.log(`🧾 Emitiendo factura legal para el presupuesto ${targetBudget.id}...`);
+    const cleanPhone = session.phone || remoteJid.replace(/\D/g, '');
+    const tenantContext = session.companyId || cleanPhone;
+
+    // 1. Preparar payload de factura
+    const invoicePayload = engine.convertToInvoice(targetBudget, { clientNif, company: session.company });
+
+    // 2. Emitir atómicamente con asignación secuencial e idempotencia de negocio
+    const emitResult = emitInvoice(tenantContext, invoicePayload);
+    const invoice = emitResult.invoice;
+
+    if (!session.invoices) session.invoices = new Map();
+    session.invoices.set(invoice.id, invoice);
+
+    // Vincular cobros no asignados de este presupuesto mediante payment_allocations (DEF-02)
+    try {
+      const invTotal = Number(invoice.financials?.totalAmount || 0);
+      const allocRow = db.prepare(`
+        SELECT COALESCE(SUM(amount), 0) AS totalAllocated
+        FROM payment_allocations
+        WHERE company_id = ? AND invoice_id = ?
+      `).get(session.companyId, invoice.id);
+
+      let invBalance = Math.round((invTotal - Number(allocRow?.totalAllocated || 0)) * 100) / 100;
+
+      if (invBalance > 0) {
+        const budgetPayments = db.prepare(`
+          SELECT id, amount FROM payments
+          WHERE company_id = ? AND budget_id = ?
+          ORDER BY created_at ASC
+        `).all(session.companyId, targetBudget.id);
+
+        for (const pay of budgetPayments) {
+          if (invBalance <= 0) break;
+          const payAllocRow = db.prepare(`
+            SELECT COALESCE(SUM(amount), 0) AS totalAllocated
+            FROM payment_allocations
+            WHERE company_id = ? AND payment_id = ?
+          `).get(session.companyId, pay.id);
+
+          const payAvailable = Math.round((Number(pay.amount) - Number(payAllocRow?.totalAllocated || 0)) * 100) / 100;
+          if (payAvailable > 0) {
+            const toAlloc = Math.min(payAvailable, invBalance);
+            createPaymentAllocation(session.companyId, {
+              paymentId: pay.id,
+              invoiceId: invoice.id,
+              amount: toAlloc
+            });
+            invBalance = Math.round((invBalance - toAlloc) * 100) / 100;
+          }
+        }
+
+        if (invBalance <= 0) {
+          invoice.status = 'PAGADA';
+          const nowIso = new Date().toISOString();
+          invoice.paidAt = nowIso;
+          db.prepare('UPDATE invoices SET status = ? WHERE id = ? AND company_id = ?')
+            .run('PAGADA', invoice.id, session.companyId);
+        }
+      }
+    } catch (allocErr) {
+      console.error('⚠️ [Payment Allocation] Error al imputar cobros a factura:', allocErr.message);
+    }
+
+    // 3. Generar PDF formal de Factura (fuera del lock)
+    const invoicePdfBuffer = await generateInvoicePDF(invoice);
+    const invoiceFileName = `Factura_${invoice.invoiceNumber || invoice.id}.pdf`;
+
+    // Texto de resumen de factura para WhatsApp
+    const fin = invoice.financials || {};
+    const advance = fin.advanceAmount || 0;
+    const remaining = fin.remainingAmount !== undefined ? fin.remainingAmount : (fin.totalAmount || 0);
+    const isSettlement = Boolean(invoice.advanceDeductions && invoice.advanceDeductions.length > 0);
+    const title = isSettlement ? `🧾 *FACTURA OFICIAL DE LIQUIDACIÓN: ${invoice.id}*` : `🧾 *FACTURA OFICIAL EMITIDA: ${invoice.id}*`;
+
+    const invoiceMsgLines = [
+      title,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `👤 *Cliente:* ${invoice.client.name}`,
+      `📍 *Dirección:* ${invoice.client.address}`,
+      `📄 *Presupuesto de origen:* ${invoice.budgetId}`,
+      `📅 *Fecha emisión:* ${invoice.issueDate}`,
+      ''
+    ];
+
+    if (isSettlement) {
+      invoiceMsgLines.push(`💰 *Base Imponible total obra:* ${fin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+      invoice.advanceDeductions.forEach(adv => {
+        invoiceMsgLines.push(`📉 *Menos Anticipo (Factura ${adv.id}):* -${adv.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+      });
+      const netBase = Math.max(0, fin.taxableBase - (fin.advanceTaxableBase || 0));
+      const netTax = Math.max(0, fin.taxAmount - (fin.advanceTaxAmount || 0));
+      invoiceMsgLines.push(`💵 *Base Imponible a liquidar:* ${netBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+      invoiceMsgLines.push(`📊 *IVA liquidado (${fin.taxRatePercentage}%):* ${netTax.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+      invoiceMsgLines.push(`🏷️ *TOTAL A PAGAR LIQUIDACIÓN:* *${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
+    } else {
+      invoiceMsgLines.push(`💰 *Base Imponible:* ${fin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+      invoiceMsgLines.push(`📊 *IVA (${fin.taxRatePercentage}%):* ${fin.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+      invoiceMsgLines.push(`🏷️ *TOTAL FACTURA:* *${fin.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
+      if (advance > 0) {
+        invoiceMsgLines.push(`💵 *Anticipo abonado:* -${advance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+        invoiceMsgLines.push(`💳 *TOTAL PENDIENTE DE COBRO:* *${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
+      }
+    }
+
+    invoiceMsgLines.push('');
+    invoiceMsgLines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+    invoiceMsgLines.push('🏦 *Datos bancarios para cobro:*');
+    if (session.company?.iban) {
+      invoiceMsgLines.push(`• IBAN: *${session.company.iban}*`);
+    }
+    if (session.company?.bizum) {
+      invoiceMsgLines.push(`• Bizum profesional: *${session.company.bizum}*`);
+    }
+
+    const sentSummary = await sock.sendMessage(remoteJid, { text: invoiceMsgLines.join('\n') });
+    if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
+
+    // Enviar documento PDF de factura adjunto
+    const sentDoc = await sock.sendMessage(remoteJid, {
+      document: invoicePdfBuffer,
+      mimetype: 'application/pdf',
+      fileName: invoiceFileName,
+      caption: `🧾 *${invoiceFileName}*\nFactura legal formal conforme al RD 1619/2012 con validez fiscal ante Hacienda.`
+    });
+    if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
+
+    console.log(`✅ Factura ${invoice.id} (${invoicePdfBuffer.length} bytes) enviada por WhatsApp.`);
+
+    // Opciones posteriores
+    const followUpText = [
+      '👉 *Opciones disponibles:*',
+      '• Si quieres ver todos tus presupuestos y facturas responde *1*.',
+      '• Para consultar tus números para la gestoría di *"gestoría"*.',
+      '• Si quieres un presupuesto nuevo manda un audio o texto diciendo *presupuesto nuevo*.'
+    ].join('\n');
+
+    const sentOpts = await sock.sendMessage(remoteJid, { text: followUpText });
+    if (sentOpts?.key?.id) botSentMessageIds.add(sentOpts.key.id);
+
+  } catch (invErr) {
+    console.error('❌ Error generando factura:', invErr.message);
+    const sentErr = await sock.sendMessage(remoteJid, {
+      text: `⚠️ *No se pudo generar la factura:* ${invErr.message}`
+    });
+    if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+  }
+}
+
+export async function handleAdvanceInvoice(sock, remoteJid, session, targetBudget, clientNif = null, explicitPaymentInfo = null, sendSigningLink = false) {
+  if (!targetBudget) {
+    const sentErr = await sock.sendMessage(remoteJid, {
+      text: '⚠️ *No se encontró el presupuesto para emitir la factura de anticipo.*\n\nPor favor, indica el nombre del cliente o número de obra (ej: *"factura de anticipo de Juan"*).'
+    });
+    if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    return;
+  }
+
+  try {
+    const fin = targetBudget.financials || {};
+    const paidSoFar = targetBudget.paymentSummary?.totalPaid || 0;
+    const customAmount = explicitPaymentInfo?.amount;
+    const advanceAmount = (customAmount && customAmount > 0)
+      ? customAmount
+      : (paidSoFar > 0 ? paidSoFar : (fin.advanceAmount || (fin.totalAmount ? Number((fin.totalAmount * 0.3).toFixed(2)) : 300)));
+    
+    const payments = targetBudget.payments || [];
+    const lastMethod = explicitPaymentInfo?.method || (payments.length > 0 ? payments[payments.length - 1].method : 'Transferencia bancaria / Bizum');
+    const lastDate = explicitPaymentInfo?.date || (payments.length > 0 ? payments[payments.length - 1].date : new Date().toLocaleDateString('es-ES'));
+
+    console.log(`🧾 Emitiendo Factura Legal de Anticipo (${advanceAmount} €) para ${targetBudget.id}...`);
+
+    const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+
+    // Registrar también el cobro en el presupuesto si se indicó un importe explícito y no estaba registrado
+    if (customAmount && customAmount > 0 && paidSoFar < customAmount) {
+      const { receipt } = engine.registerPayment(targetBudget, {
+        amount: advanceAmount,
+        method: lastMethod,
+        date: lastDate,
+        concept: 'Anticipo para inicio de obra'
+      });
+      savePayment(session.companyId || cleanPhone, receipt);
+    }
+
+    const rawAdvanceInvoice = engine.createAdvanceInvoice(targetBudget, {
+      amount: advanceAmount,
+      method: lastMethod,
+      date: lastDate
+    }, { clientNif, company: session.company, id: `INV-ADV-${targetBudget.id || Date.now()}` });
+
+    // Emitir atómicamente con asignación secuencial e idempotencia
+    const emitResult = emitInvoice(session.companyId || cleanPhone, rawAdvanceInvoice);
+    const advanceInvoice = emitResult.invoice;
+
+    if (!session.invoices) session.invoices = new Map();
+    session.invoices.set(advanceInvoice.id, advanceInvoice);
+
+    if (!targetBudget.advanceInvoices) targetBudget.advanceInvoices = [];
+    if (!targetBudget.advanceInvoices.some(a => a.id === advanceInvoice.id)) {
+      targetBudget.advanceInvoices.push(advanceInvoice);
+    }
+
+    saveBudget(session.companyId || cleanPhone, targetBudget);
+
+    // Vincular cobros del presupuesto a la factura de anticipo mediante payment_allocations (DEF-02)
+    try {
+      const advTotal = Number(advanceInvoice.financials?.totalAmount || advanceAmount);
+      const allocRow = db.prepare(`
+        SELECT COALESCE(SUM(amount), 0) AS totalAllocated
+        FROM payment_allocations
+        WHERE company_id = ? AND invoice_id = ?
+      `).get(session.companyId, advanceInvoice.id);
+
+      let advBalance = Math.round((advTotal - Number(allocRow?.totalAllocated || 0)) * 100) / 100;
+
+      if (advBalance > 0) {
+        const budgetPayments = db.prepare(`
+          SELECT id, amount FROM payments
+          WHERE company_id = ? AND budget_id = ?
+          ORDER BY created_at ASC
+        `).all(session.companyId, targetBudget.id);
+
+        for (const pay of budgetPayments) {
+          if (advBalance <= 0) break;
+          const payAllocRow = db.prepare(`
+            SELECT COALESCE(SUM(amount), 0) AS totalAllocated
+            FROM payment_allocations
+            WHERE company_id = ? AND payment_id = ?
+          `).get(session.companyId, pay.id);
+
+          const payAvailable = Math.round((Number(pay.amount) - Number(payAllocRow?.totalAllocated || 0)) * 100) / 100;
+          if (payAvailable > 0) {
+            const toAlloc = Math.min(payAvailable, advBalance);
+            createPaymentAllocation(session.companyId, {
+              paymentId: pay.id,
+              invoiceId: advanceInvoice.id,
+              amount: toAlloc
+            });
+            advBalance = Math.round((advBalance - toAlloc) * 100) / 100;
+          }
+        }
+
+        if (advBalance <= 0) {
+          advanceInvoice.status = 'PAGADA';
+          const nowIso = new Date().toISOString();
+          advanceInvoice.paidAt = nowIso;
+          db.prepare('UPDATE invoices SET status = ? WHERE id = ? AND company_id = ?')
+            .run('PAGADA', advanceInvoice.id, session.companyId);
+        }
+      }
+    } catch (allocErr) {
+      console.error('⚠️ [Payment Allocation] Error al imputar anticipo:', allocErr.message);
+    }
+
+    const invoicePdfBuffer = await generateInvoicePDF(advanceInvoice);
+    const invoiceFileName = `Factura_Anticipo_${advanceInvoice.invoiceNumber || advanceInvoice.id}.pdf`;
+
+    const advFin = advanceInvoice.financials || {};
+    const invoiceMsgLines = [
+      `🧾 *FACTURA OFICIAL DE ANTICIPO: ${advanceInvoice.id}*`,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `👤 *Cliente:* ${advanceInvoice.client.name}`,
+      `📍 *Dirección:* ${advanceInvoice.client.address}`,
+      `📄 *Presupuesto de referencia:* ${advanceInvoice.budgetId}`,
+      `📅 *Fecha emisión / devengo:* ${advanceInvoice.issueDate}`,
+      '',
+      `💰 *Base Imponible Anticipo:* ${advFin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
+      `📊 *IVA (${advFin.taxRatePercentage}%):* ${advFin.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
+      `🏷️ *TOTAL FACTURA ANTICIPO:* *${advFin.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
+      '',
+      '⚖️ _Factura emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA (devengo anticipado) y RD 1619/2012. Esta base e IVA se deducirán automáticamente al emitir la factura final de liquidación._',
+      '━━━━━━━━━━━━━━━━━━━━━━━━━'
+    ];
+
+    const sentSummary = await sock.sendMessage(remoteJid, { text: invoiceMsgLines.join('\n') });
+    if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
+
+    const sentDoc = await sock.sendMessage(remoteJid, {
+      document: invoicePdfBuffer,
+      mimetype: 'application/pdf',
+      fileName: invoiceFileName,
+      caption: `🧾 *${invoiceFileName}*\nFactura legal de anticipo lista para entregar al cliente o deducir en gestoría.`
+    });
+    if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
+
+    console.log(`✅ Factura de anticipo ${advanceInvoice.id} enviada por WhatsApp.`);
+
+    // Si además se solicitó el enlace para firmar
+    if (sendSigningLink) {
+      const signingUrl = generateSigningUrl(targetBudget, session.company, cleanPhone);
+      const sentSig = await sock.sendMessage(remoteJid, {
+        text: `✍️ *Enlace para firma del cliente — Presupuesto ${targetBudget.id}:*\n${signingUrl}\n\n📲 _Puedes reenviárselo a ${targetBudget.client?.name || 'tu cliente'} para que lo firme y acepte las condiciones de la obra._`
+      });
+      if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
+    }
+
+    const followUpText = [
+      '👉 *Opciones disponibles:*',
+      '• Para emitir la factura final de liquidación cuando acaben los trabajos di *"facturar"*.',
+      '• Para consultar tus números para la gestoría di *"gestoría"*.',
+      '• Para un nuevo trabajo di *"presupuesto nuevo"*.'
+    ].join('\n');
+
+    const sentOpts = await sock.sendMessage(remoteJid, { text: followUpText });
+    if (sentOpts?.key?.id) botSentMessageIds.add(sentOpts.key.id);
+
+  } catch (advErr) {
+    console.error('❌ Error emitiendo factura de anticipo:', advErr.message);
+    const sentErr = await sock.sendMessage(remoteJid, {
+      text: `⚠️ *No se pudo generar la factura de anticipo:* ${advErr.message}`
+    });
+    if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+  }
+}
+
+export async function handlePaymentRegistration(sock, remoteJid, session, targetBudget, paymentInfo = {}) {
+  if (!targetBudget) {
+    const sentErr = await sock.sendMessage(remoteJid, {
+      text: '⚠️ *No se encontró el presupuesto para registrar el cobro.*\n\nPor favor, indica el nombre del cliente o número de obra (ej: *"cobro 1.500€ de José Luis"* o *"apunta pago de 800€ para PRE-2026-..."*).'
+    });
+    if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    return;
+  }
+
+  const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+  let amount = Number(paymentInfo.amount);
+
+  const remainingBalance = targetBudget.paymentSummary?.remainingBalance !== undefined
+    ? targetBudget.paymentSummary.remainingBalance
+    : (targetBudget.financials?.totalAmount || 0);
+
+  // Si no se detectó un importe explícito (ej: el usuario dijo "pago recibido", "pago completo", "factura pagada", etc.)
+  if (!amount || isNaN(amount) || amount <= 0) {
+    if (remainingBalance > 0) {
+      amount = remainingBalance;
+      paymentInfo.amount = remainingBalance;
+      paymentInfo.concept = paymentInfo.concept || 'Liquidación final de obra y factura';
+    } else {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: '⚠️ *Importe de cobro no detectado o el presupuesto ya está liquidado.*\n\nPor favor, especifica la cantidad que te han pagado (ej: *"Alberto me ha pagado 1.500€"*).'
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      return;
+    }
+  }
+
+  try {
+    console.log(`💰 Registrando cobro de ${amount} € para el presupuesto ${targetBudget.id}...`);
+    const { receipt } = engine.registerPayment(targetBudget, paymentInfo);
+
+    // Persistir cobro y asegurar que el presupuesto pasa a estado FINALIZADO (si saldo es 0) o ACEPTADO
+    targetBudget.status = receipt.remainingBalance <= 0 ? 'FINALIZADO' : 'ACEPTADO';
+    savePayment(session.companyId || cleanPhone, receipt);
+    saveBudget(session.companyId || cleanPhone, targetBudget);
+
+    // Conectar con payment_allocations (DEF-02):
+    // Imputar cobro a facturas pendientes del presupuesto mediante payment_allocations
+    try {
+      const candidateInvoices = db.prepare(`
+        SELECT id, total_amount, status, data_json 
+        FROM invoices 
+        WHERE company_id = ? AND budget_id = ? AND status != 'ANULADA'
+        ORDER BY created_at ASC
+      `).all(session.companyId, targetBudget.id);
+
+      let remainingToAllocate = Number(receipt.amount || 0);
+
+      for (const inv of candidateInvoices) {
+        if (remainingToAllocate <= 0) break;
+
+        let parsed = {};
+        try { parsed = JSON.parse(inv.data_json || '{}'); } catch {}
+        const advanceDeducted = (parsed.advanceDeductions || []).reduce((sum, d) => sum + (Number(d.total) || 0), 0);
+
+        const allocRow = db.prepare(`
+          SELECT COALESCE(SUM(amount), 0) AS totalAllocated
+          FROM payment_allocations
+          WHERE company_id = ? AND invoice_id = ?
+        `).get(session.companyId, inv.id);
+
+        const invTotal = Number(inv.total_amount || 0);
+        const invPayable = Math.max(0, invTotal - advanceDeducted);
+        const invBalance = Math.round((invPayable - Number(allocRow?.totalAllocated || 0)) * 100) / 100;
+
+        if (invBalance > 0) {
+          // Verificar si este pago ya tiene una asignación para esta factura (estricta idempotencia)
+          const existingForPayment = db.prepare(`
+            SELECT id, amount FROM payment_allocations
+            WHERE company_id = ? AND payment_id = ? AND invoice_id = ?
+          `).get(session.companyId, receipt.id, inv.id);
+
+          if (!existingForPayment) {
+            const allocAmount = Math.min(remainingToAllocate, invBalance);
+            createPaymentAllocation(session.companyId, {
+              paymentId: receipt.id,
+              invoiceId: inv.id,
+              amount: allocAmount
+            });
+
+            remainingToAllocate = Math.round((remainingToAllocate - allocAmount) * 100) / 100;
+
+            // Si la factura queda totalmente cubierta por allocations, marcar como PAGADA
+            const updatedAllocRow = db.prepare(`
+              SELECT COALESCE(SUM(amount), 0) AS totalAllocated
+              FROM payment_allocations
+              WHERE company_id = ? AND invoice_id = ?
+            `).get(session.companyId, inv.id);
+
+            if (Number(updatedAllocRow?.totalAllocated || 0) >= invPayable) {
+              inv.status = 'PAGADA';
+              const nowIso = new Date().toISOString();
+              db.prepare('UPDATE invoices SET status = ? WHERE id = ? AND company_id = ?')
+                .run('PAGADA', inv.id, session.companyId);
+              if (session.invoices && session.invoices.has(inv.id)) {
+                const cached = session.invoices.get(inv.id);
+                cached.status = 'PAGADA';
+                cached.paidAt = nowIso;
+              }
+            }
+          }
+        }
+      }
+    } catch (allocErr) {
+      console.error('⚠️ [Payment Allocation] Error al imputar cobro a facturas:', allocErr.message);
+    }
+
+    // Si la obra queda liquidada o se cubre el saldo, actualizar las facturas pendientes a 'PAGADA'
+    if (receipt.remainingBalance <= 0) {
+      const allInvoices = listInvoices(session.companyId || cleanPhone, 50);
+      for (const inv of allInvoices) {
+        if (inv.budgetId === targetBudget.id && inv.status !== 'PAGADA') {
+          inv.status = 'PAGADA';
+          inv.paidAt = new Date().toISOString();
+          saveInvoice(session.companyId || cleanPhone, inv);
+          if (session.invoices && session.invoices.has(inv.id)) {
+            session.invoices.set(inv.id, inv);
+          }
+          console.log(`✅ Factura ${inv.id} actualizada automáticamente a estado 'PAGADA' en SQLite y sesión.`);
+        }
+      }
+    }
+
+    // Generar PDF formal del recibo
+    const receiptPdfBuffer = await generateReceiptPDF(receipt);
+    const receiptFileName = `Recibo_${receipt.id}.pdf`;
+
+    const isSettled = receipt.status === 'LIQUIDADO';
+    const statusEmoji = isSettled ? '✅' : '⏳';
+    const statusTitle = isSettled ? '*¡OBRA TOTALMENTE LIQUIDADA Y COBRADA!*' : '*ANTICIPO / PAGO A CUENTA REGISTRADO*';
+
+    const paymentMsgLines = [
+      `💰 ${statusTitle}`,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `👤 *Cliente:* ${receipt.client?.name || 'Cliente'}`,
+      `📍 *Dirección:* ${receipt.client?.address || 'Ubicación de obra'}`,
+      `📄 *Presupuesto:* ${receipt.budgetId} (🟢 *Estado:* Aceptado)`,
+      `💵 *Importe recibido:* *+${receipt.amount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
+      `💳 *Método de pago:* ${receipt.method}`,
+      `📝 *Concepto:* ${receipt.concept}`,
+      `📅 *Fecha valor:* ${receipt.date}`,
+      '',
+      '📊 *ESTADO ACTUAL DE LA CUENTA:*',
+      `• Total obra presupuestado: ${receipt.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
+      `• Total cobrado acumulado: ${receipt.totalPaid.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
+      `• ${statusEmoji} *SALDO PENDIENTE:* *${receipt.remainingBalance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      '📄 _Se adjunta el Justificante Oficial de Cobro en PDF (no requiere firma del cliente, es emitido formalmente por tu empresa)._'
+    ];
+
+    const sentSummary = await sock.sendMessage(remoteJid, { text: paymentMsgLines.join('\n') });
+    if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
+
+    // Enviar documento PDF del recibo
+    const sentDoc = await sock.sendMessage(remoteJid, {
+      document: receiptPdfBuffer,
+      mimetype: 'application/pdf',
+      fileName: receiptFileName,
+      caption: `📄 *${receiptFileName}*\nJustificante oficial de cobro expedido por ${receipt.company?.name || 'la empresa'}.`
+    });
+    if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
+
+    console.log(`✅ Recibo ${receipt.id} (${receiptPdfBuffer.length} bytes) enviado por WhatsApp.`);
+
+    // Opciones posteriores
+    const followUpText = [
+      '👉 *Opciones disponibles:*',
+      '• Si deseas emitir la *Factura Oficial de Anticipo* con IVA desglosado responde *"factura de anticipo"*.',
+      '• Si quieres ver el resumen de todas tus cuentas responde *1*.',
+      '• Para emitir la factura final di *"facturar"*.',
+      '• Si quieres un presupuesto nuevo di *presupuesto nuevo*.'
+    ].join('\n');
+
+    const sentOpts = await sock.sendMessage(remoteJid, { text: followUpText });
+    if (sentOpts?.key?.id) botSentMessageIds.add(sentOpts.key.id);
+
+  } catch (payErr) {
+    console.error('❌ Error registrando cobro:', payErr.message);
+    const sentErr = await sock.sendMessage(remoteJid, {
+      text: `⚠️ *No se pudo registrar el cobro:* ${payErr.message}`
+    });
+    if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+  }
+}
+
+
 async function startWhatsAppGateway() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
   const { version } = await fetchLatestBaileysVersion();
@@ -1911,365 +2487,6 @@ async function startWhatsAppGateway() {
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
       '💡 _Para reiniciar el cuestionario guiado di: "configurar todo" o "empezar de nuevo"._\n💡 _Para cambiar oficio rápido di: "Soy electricista", "Soy fontanero", etc._'
     ].join('\n');
-  }
-
-  function findBudgetInSession(session, query) {
-    if (!query || query.trim() === '') {
-      if (session.activeBudgetId && session.budgets.has(session.activeBudgetId)) {
-        return session.budgets.get(session.activeBudgetId);
-      }
-      if (session.budgets.size === 1) {
-        return Array.from(session.budgets.values())[0];
-      }
-      return null;
-    }
-    const q = query.toLowerCase().trim();
-    for (const [id, b] of session.budgets.entries()) {
-      if (id.toLowerCase().includes(q)) return b;
-      if (b.client?.name && b.client.name.toLowerCase().includes(q)) return b;
-    }
-    if (session.activeBudgetId && session.budgets.has(session.activeBudgetId)) {
-      return session.budgets.get(session.activeBudgetId);
-    }
-    return null;
-  }
-
-  async function emitInvoiceForBudget(sock, remoteJid, session, targetBudget, clientNif = null) {
-    if (!targetBudget) {
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: '⚠️ *No se encontró el presupuesto para facturar.*\n\nPor favor, indica el nombre del cliente o el número de presupuesto (ej: *"facturar presupuesto PRE-2026-5129"* o *"factura de José Luis"*).'
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-      return;
-    }
-
-    try {
-      console.log(`🧾 Emitiendo factura legal para el presupuesto ${targetBudget.id}...`);
-      const cleanPhone = session.phone || remoteJid.replace(/\D/g, '');
-      const tenantContext = session.companyId || cleanPhone;
-
-      // 1. Preparar payload de factura
-      const invoicePayload = engine.convertToInvoice(targetBudget, { clientNif, company: session.company });
-
-      // 2. Emitir atómicamente con asignación secuencial e idempotencia de negocio
-      const emitResult = emitInvoice(tenantContext, invoicePayload);
-      const invoice = emitResult.invoice;
-
-      if (!session.invoices) session.invoices = new Map();
-      session.invoices.set(invoice.id, invoice);
-
-      // 3. Generar PDF formal de Factura (fuera del lock)
-      const invoicePdfBuffer = await generateInvoicePDF(invoice);
-      const invoiceFileName = `Factura_${invoice.invoiceNumber || invoice.id}.pdf`;
-
-      // Texto de resumen de factura para WhatsApp
-      const fin = invoice.financials || {};
-      const advance = fin.advanceAmount || 0;
-      const remaining = fin.remainingAmount !== undefined ? fin.remainingAmount : (fin.totalAmount || 0);
-      const isSettlement = Boolean(invoice.advanceDeductions && invoice.advanceDeductions.length > 0);
-      const title = isSettlement ? `🧾 *FACTURA OFICIAL DE LIQUIDACIÓN: ${invoice.id}*` : `🧾 *FACTURA OFICIAL EMITIDA: ${invoice.id}*`;
-
-      const invoiceMsgLines = [
-        title,
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        `👤 *Cliente:* ${invoice.client.name}`,
-        `📍 *Dirección:* ${invoice.client.address}`,
-        `📄 *Presupuesto de origen:* ${invoice.budgetId}`,
-        `📅 *Fecha emisión:* ${invoice.issueDate}`,
-        ''
-      ];
-
-      if (isSettlement) {
-        invoiceMsgLines.push(`💰 *Base Imponible total obra:* ${fin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-        invoice.advanceDeductions.forEach(adv => {
-          invoiceMsgLines.push(`📉 *Menos Anticipo (Factura ${adv.id}):* -${adv.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-        });
-        const netBase = Math.max(0, fin.taxableBase - (fin.advanceTaxableBase || 0));
-        const netTax = Math.max(0, fin.taxAmount - (fin.advanceTaxAmount || 0));
-        invoiceMsgLines.push(`💵 *Base Imponible a liquidar:* ${netBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-        invoiceMsgLines.push(`📊 *IVA liquidado (${fin.taxRatePercentage}%):* ${netTax.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-        invoiceMsgLines.push(`🏷️ *TOTAL A PAGAR LIQUIDACIÓN:* *${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
-      } else {
-        invoiceMsgLines.push(`💰 *Base Imponible:* ${fin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-        invoiceMsgLines.push(`📊 *IVA (${fin.taxRatePercentage}%):* ${fin.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-        invoiceMsgLines.push(`🏷️ *TOTAL FACTURA:* *${fin.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
-        if (advance > 0) {
-          invoiceMsgLines.push(`💵 *Anticipo abonado:* -${advance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-          invoiceMsgLines.push(`💳 *TOTAL PENDIENTE DE COBRO:* *${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
-        }
-      }
-
-      invoiceMsgLines.push('');
-      invoiceMsgLines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
-      invoiceMsgLines.push('🏦 *Datos bancarios para cobro:*');
-      if (session.company?.iban) {
-        invoiceMsgLines.push(`• IBAN: *${session.company.iban}*`);
-      }
-      if (session.company?.bizum) {
-        invoiceMsgLines.push(`• Bizum profesional: *${session.company.bizum}*`);
-      }
-
-      const sentSummary = await sock.sendMessage(remoteJid, { text: invoiceMsgLines.join('\n') });
-      if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
-
-      // Enviar documento PDF de factura adjunto
-      const sentDoc = await sock.sendMessage(remoteJid, {
-        document: invoicePdfBuffer,
-        mimetype: 'application/pdf',
-        fileName: invoiceFileName,
-        caption: `🧾 *${invoiceFileName}*\nFactura legal formal conforme al RD 1619/2012 con validez fiscal ante Hacienda.`
-      });
-      if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
-
-      console.log(`✅ Factura ${invoice.id} (${invoicePdfBuffer.length} bytes) enviada por WhatsApp.`);
-
-      // Opciones posteriores
-      const followUpText = [
-        '👉 *Opciones disponibles:*',
-        '• Si quieres ver todos tus presupuestos y facturas responde *1*.',
-        '• Para consultar tus números para la gestoría di *"gestoría"*.',
-        '• Si quieres un presupuesto nuevo manda un audio o texto diciendo *presupuesto nuevo*.'
-      ].join('\n');
-
-      const sentOpts = await sock.sendMessage(remoteJid, { text: followUpText });
-      if (sentOpts?.key?.id) botSentMessageIds.add(sentOpts.key.id);
-
-    } catch (invErr) {
-      console.error('❌ Error generando factura:', invErr.message);
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *No se pudo generar la factura:* ${invErr.message}`
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-    }
-  }
-
-  async function handleAdvanceInvoice(sock, remoteJid, session, targetBudget, clientNif = null, explicitPaymentInfo = null, sendSigningLink = false) {
-    if (!targetBudget) {
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: '⚠️ *No se encontró el presupuesto para emitir la factura de anticipo.*\n\nPor favor, indica el nombre del cliente o número de obra (ej: *"factura de anticipo de Juan"*).'
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-      return;
-    }
-
-    try {
-      const fin = targetBudget.financials || {};
-      const paidSoFar = targetBudget.paymentSummary?.totalPaid || 0;
-      const customAmount = explicitPaymentInfo?.amount;
-      const advanceAmount = (customAmount && customAmount > 0)
-        ? customAmount
-        : (paidSoFar > 0 ? paidSoFar : (fin.advanceAmount || (fin.totalAmount ? Number((fin.totalAmount * 0.3).toFixed(2)) : 300)));
-      
-      const payments = targetBudget.payments || [];
-      const lastMethod = explicitPaymentInfo?.method || (payments.length > 0 ? payments[payments.length - 1].method : 'Transferencia bancaria / Bizum');
-      const lastDate = explicitPaymentInfo?.date || (payments.length > 0 ? payments[payments.length - 1].date : new Date().toLocaleDateString('es-ES'));
-
-      console.log(`🧾 Emitiendo Factura Legal de Anticipo (${advanceAmount} €) para ${targetBudget.id}...`);
-
-      const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-
-      // Registrar también el cobro en el presupuesto si se indicó un importe explícito
-      if (customAmount && customAmount > 0) {
-        engine.registerPayment(targetBudget, {
-          amount: advanceAmount,
-          method: lastMethod,
-          date: lastDate,
-          concept: 'Anticipo para inicio de obra'
-        });
-      }
-
-      const rawAdvanceInvoice = engine.createAdvanceInvoice(targetBudget, {
-        amount: advanceAmount,
-        method: lastMethod,
-        date: lastDate
-      }, { clientNif, company: session.company });
-
-      // Emitir atómicamente con asignación secuencial e idempotencia
-      const emitResult = emitInvoice(session.companyId || cleanPhone, rawAdvanceInvoice);
-      const advanceInvoice = emitResult.invoice;
-
-      if (!session.invoices) session.invoices = new Map();
-      session.invoices.set(advanceInvoice.id, advanceInvoice);
-
-      saveBudget(session.companyId || cleanPhone, targetBudget);
-
-      const invoicePdfBuffer = await generateInvoicePDF(advanceInvoice);
-      const invoiceFileName = `Factura_Anticipo_${advanceInvoice.invoiceNumber || advanceInvoice.id}.pdf`;
-
-      const advFin = advanceInvoice.financials || {};
-      const invoiceMsgLines = [
-        `🧾 *FACTURA OFICIAL DE ANTICIPO: ${advanceInvoice.id}*`,
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        `👤 *Cliente:* ${advanceInvoice.client.name}`,
-        `📍 *Dirección:* ${advanceInvoice.client.address}`,
-        `📄 *Presupuesto de referencia:* ${advanceInvoice.budgetId}`,
-        `📅 *Fecha emisión / devengo:* ${advanceInvoice.issueDate}`,
-        '',
-        `💰 *Base Imponible Anticipo:* ${advFin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
-        `📊 *IVA (${advFin.taxRatePercentage}%):* ${advFin.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
-        `🏷️ *TOTAL FACTURA ANTICIPO:* *${advFin.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
-        '',
-        '⚖️ _Factura emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA (devengo anticipado) y RD 1619/2012. Esta base e IVA se deducirán automáticamente al emitir la factura final de liquidación._',
-        '━━━━━━━━━━━━━━━━━━━━━━━━━'
-      ];
-
-      const sentSummary = await sock.sendMessage(remoteJid, { text: invoiceMsgLines.join('\n') });
-      if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
-
-      const sentDoc = await sock.sendMessage(remoteJid, {
-        document: invoicePdfBuffer,
-        mimetype: 'application/pdf',
-        fileName: invoiceFileName,
-        caption: `🧾 *${invoiceFileName}*\nFactura legal de anticipo lista para entregar al cliente o deducir en gestoría.`
-      });
-      if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
-
-      console.log(`✅ Factura de anticipo ${advanceInvoice.id} enviada por WhatsApp.`);
-
-      // Si además se solicitó el enlace para firmar
-      if (sendSigningLink) {
-        const signingUrl = generateSigningUrl(targetBudget, session.company, cleanPhone);
-        const sentSig = await sock.sendMessage(remoteJid, {
-          text: `✍️ *Enlace para firma del cliente — Presupuesto ${targetBudget.id}:*\n${signingUrl}\n\n📲 _Puedes reenviárselo a ${targetBudget.client?.name || 'tu cliente'} para que lo firme y acepte las condiciones de la obra._`
-        });
-        if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
-      }
-
-      const followUpText = [
-        '👉 *Opciones disponibles:*',
-        '• Para emitir la factura final de liquidación cuando acaben los trabajos di *"facturar"*.',
-        '• Para consultar tus números para la gestoría di *"gestoría"*.',
-        '• Para un nuevo trabajo di *"presupuesto nuevo"*.'
-      ].join('\n');
-
-      const sentOpts = await sock.sendMessage(remoteJid, { text: followUpText });
-      if (sentOpts?.key?.id) botSentMessageIds.add(sentOpts.key.id);
-
-    } catch (advErr) {
-      console.error('❌ Error emitiendo factura de anticipo:', advErr.message);
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *No se pudo generar la factura de anticipo:* ${advErr.message}`
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-    }
-  }
-
-  async function handlePaymentRegistration(sock, remoteJid, session, targetBudget, paymentInfo = {}) {
-    if (!targetBudget) {
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: '⚠️ *No se encontró el presupuesto para registrar el cobro.*\n\nPor favor, indica el nombre del cliente o número de obra (ej: *"cobro 1.500€ de José Luis"* o *"apunta pago de 800€ para PRE-2026-..."*).'
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-      return;
-    }
-
-    const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
-    let amount = Number(paymentInfo.amount);
-
-    const remainingBalance = targetBudget.paymentSummary?.remainingBalance !== undefined
-      ? targetBudget.paymentSummary.remainingBalance
-      : (targetBudget.financials?.totalAmount || 0);
-
-    // Si no se detectó un importe explícito (ej: el usuario dijo "pago recibido", "pago completo", "factura pagada", etc.)
-    if (!amount || isNaN(amount) || amount <= 0) {
-      if (remainingBalance > 0) {
-        amount = remainingBalance;
-        paymentInfo.amount = remainingBalance;
-        paymentInfo.concept = paymentInfo.concept || 'Liquidación final de obra y factura';
-      } else {
-        const sentErr = await sock.sendMessage(remoteJid, {
-          text: '⚠️ *Importe de cobro no detectado o el presupuesto ya está liquidado.*\n\nPor favor, especifica la cantidad que te han pagado (ej: *"Alberto me ha pagado 1.500€"*).'
-        });
-        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-        return;
-      }
-    }
-
-    try {
-      console.log(`💰 Registrando cobro de ${amount} € para el presupuesto ${targetBudget.id}...`);
-      const { receipt } = engine.registerPayment(targetBudget, paymentInfo);
-
-      // Persistir cobro y asegurar que el presupuesto pasa a estado FINALIZADO (si saldo es 0) o ACEPTADO
-      targetBudget.status = receipt.remainingBalance <= 0 ? 'FINALIZADO' : 'ACEPTADO';
-      savePayment(session.companyId || cleanPhone, receipt);
-      saveBudget(session.companyId || cleanPhone, targetBudget);
-
-      // Si la obra queda liquidada o se cubre el saldo, actualizar las facturas pendientes a 'PAGADA'
-      if (receipt.remainingBalance <= 0) {
-        const allInvoices = listInvoices(session.companyId || cleanPhone, 50);
-        for (const inv of allInvoices) {
-          if (inv.budgetId === targetBudget.id && inv.status !== 'PAGADA') {
-            inv.status = 'PAGADA';
-            inv.paidAt = new Date().toISOString();
-            saveInvoice(session.companyId || cleanPhone, inv);
-            if (session.invoices && session.invoices.has(inv.id)) {
-              session.invoices.set(inv.id, inv);
-            }
-            console.log(`✅ Factura ${inv.id} actualizada automáticamente a estado 'PAGADA' en SQLite y sesión.`);
-          }
-        }
-      }
-
-      // Generar PDF formal del recibo
-      const receiptPdfBuffer = await generateReceiptPDF(receipt);
-      const receiptFileName = `Recibo_${receipt.id}.pdf`;
-
-      const isSettled = receipt.status === 'LIQUIDADO';
-      const statusEmoji = isSettled ? '✅' : '⏳';
-      const statusTitle = isSettled ? '*¡OBRA TOTALMENTE LIQUIDADA Y COBRADA!*' : '*ANTICIPO / PAGO A CUENTA REGISTRADO*';
-
-      const paymentMsgLines = [
-        `💰 ${statusTitle}`,
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        `👤 *Cliente:* ${receipt.client?.name || 'Cliente'}`,
-        `📍 *Dirección:* ${receipt.client?.address || 'Ubicación de obra'}`,
-        `📄 *Presupuesto:* ${receipt.budgetId} (🟢 *Estado:* Aceptado)`,
-        `💵 *Importe recibido:* *+${receipt.amount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
-        `💳 *Método de pago:* ${receipt.method}`,
-        `📝 *Concepto:* ${receipt.concept}`,
-        `📅 *Fecha valor:* ${receipt.date}`,
-        '',
-        '📊 *ESTADO ACTUAL DE LA CUENTA:*',
-        `• Total obra presupuestado: ${receipt.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
-        `• Total cobrado acumulado: ${receipt.totalPaid.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
-        `• ${statusEmoji} *SALDO PENDIENTE:* *${receipt.remainingBalance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        '📄 _Se adjunta el Justificante Oficial de Cobro en PDF (no requiere firma del cliente, es emitido formalmente por tu empresa)._'
-      ];
-
-      const sentSummary = await sock.sendMessage(remoteJid, { text: paymentMsgLines.join('\n') });
-      if (sentSummary?.key?.id) botSentMessageIds.add(sentSummary.key.id);
-
-      // Enviar documento PDF del recibo
-      const sentDoc = await sock.sendMessage(remoteJid, {
-        document: receiptPdfBuffer,
-        mimetype: 'application/pdf',
-        fileName: receiptFileName,
-        caption: `📄 *${receiptFileName}*\nJustificante oficial de cobro expedido por ${receipt.company?.name || 'la empresa'}.`
-      });
-      if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
-
-      console.log(`✅ Recibo ${receipt.id} (${receiptPdfBuffer.length} bytes) enviado por WhatsApp.`);
-
-      // Opciones posteriores
-      const followUpText = [
-        '👉 *Opciones disponibles:*',
-        '• Si deseas emitir la *Factura Oficial de Anticipo* con IVA desglosado responde *"factura de anticipo"*.',
-        '• Si quieres ver el resumen de todas tus cuentas responde *1*.',
-        '• Para emitir la factura final di *"facturar"*.',
-        '• Si quieres un presupuesto nuevo di *presupuesto nuevo*.'
-      ].join('\n');
-
-      const sentOpts = await sock.sendMessage(remoteJid, { text: followUpText });
-      if (sentOpts?.key?.id) botSentMessageIds.add(sentOpts.key.id);
-
-    } catch (payErr) {
-      console.error('❌ Error registrando cobro:', payErr.message);
-      const sentErr = await sock.sendMessage(remoteJid, {
-        text: `⚠️ *No se pudo registrar el cobro:* ${payErr.message}`
-      });
-      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
-    }
   }
 
   async function handleQueryBalance(sock, remoteJid, session, targetBudget) {
