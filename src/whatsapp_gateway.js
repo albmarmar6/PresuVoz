@@ -1075,7 +1075,33 @@ export async function checkDisambiguation(sock, remoteJid, session, clientQuery,
   if (!clientQuery) return false;
   const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
   const tenantContext = session.authContext || (session.companyId ? { companyId: session.companyId, phone: session.phone } : cleanPhone);
-  const candidates = findClientsByName(tenantContext, clientQuery);
+  
+  const dbCandidates = findClientsByName(tenantContext, clientQuery) || [];
+  const candidateIds = new Set(dbCandidates.map(c => c.id));
+  const candidates = [...dbCandidates];
+
+  if (session?.budgets) {
+    const qLower = clientQuery.toLowerCase().trim();
+    for (const b of session.budgets.values()) {
+      if (b?.id && !candidateIds.has(b.id)) {
+        const cName = (b.client?.name || '').toLowerCase();
+        const cAddr = (b.client?.address || '').toLowerCase();
+        if (cName.includes(qLower) || cAddr.includes(qLower) || b.id.toLowerCase() === qLower) {
+          candidateIds.add(b.id);
+          candidates.push({
+            id: b.id,
+            clientName: b.client?.name || 'Cliente',
+            clientAddress: b.client?.address || 'Sin dirección registrada',
+            clientPhone: b.client?.phone || null,
+            totalAmount: b.financials?.totalAmount || 0,
+            status: b.status || 'PENDIENTE_ACEPTACION',
+            createdAt: b.createdAt || new Date().toISOString(),
+            updatedAt: b.updatedAt || new Date().toISOString()
+          });
+        }
+      }
+    }
+  }
 
   if (candidates && candidates.length > 1) {
     session.pendingDisambiguation = {
@@ -1085,7 +1111,7 @@ export async function checkDisambiguation(sock, remoteJid, session, clientQuery,
       originalPayload
     };
 
-    const text = formatDisambiguationPrompt(clientQuery, candidates);
+    const text = formatDisambiguationPrompt(clientQuery, candidates, actionType);
     if (sock?.sendMessage) {
       const sent = await sock.sendMessage(remoteJid, { text });
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
@@ -1093,6 +1119,95 @@ export async function checkDisambiguation(sock, remoteJid, session, clientQuery,
     return true;
   }
   return false;
+}
+
+/**
+ * Resuelve la elección de desambiguación del usuario de forma robusta (HIGH-01).
+ * Soporta números ("1", "2", "el 1"), ordinales ("el primero", "el segundo"),
+ * apellidos/nombres ("el de Pérez", "García"), direcciones ("el de Triana") o combinaciones.
+ * @param {string} rawText - Texto de respuesta del usuario
+ * @param {Array} candidates - Lista de candidatos
+ * @returns {object|null} - Candidato seleccionado o null si no se pudo determinar
+ */
+export function resolveDisambiguationChoice(rawText, candidates) {
+  if (!rawText || !candidates || candidates.length === 0) return null;
+  const raw = rawText.trim();
+  const n = raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+
+  // 1. Ordinales en español
+  const ordinals = [
+    { regex: /^(?:el\s+)?primer[oa]?\b|^(?:la\s+)?primera\b|^1[ºªa]?\b/i, index: 0 },
+    { regex: /^(?:el\s+)?segund[oa]\b|^(?:la\s+)?segunda\b|^2[ºªa]?\b/i, index: 1 },
+    { regex: /^(?:el\s+)?tercer[oa]?\b|^(?:la\s+)?tercera\b|^3[ºªa]?\b/i, index: 2 },
+    { regex: /^(?:el\s+)?cuart[oa]\b|^(?:la\s+)?cuarta\b|^4[ºªa]?\b/i, index: 3 },
+    { regex: /^(?:el\s+)?quint[oa]\b|^(?:la\s+)?quinta\b|^5[ºªa]?\b/i, index: 4 },
+    { regex: /^(?:el\s+)?(?:[uú]ltim[oa])\b/i, index: candidates.length - 1 }
+  ];
+  for (const ord of ordinals) {
+    if (ord.regex.test(n) && ord.index < candidates.length) {
+      return candidates[ord.index];
+    }
+  }
+
+  // 2. Dígitos o números explícitos: '1', 'el 1', 'la 2', 'opcion 2', 'numero 1'
+  const numMatch = n.match(/^(?:el\s+|la\s+|opcion\s+|numero\s+|n[ºo]\s*)?([1-9]\d*)$/i);
+  if (numMatch) {
+    const idx = parseInt(numMatch[1], 10) - 1;
+    if (idx >= 0 && idx < candidates.length) {
+      return candidates[idx];
+    }
+  }
+
+  // Limpiar conectores como 'el de', 'la de', 'a', etc.
+  const cleaned = n.replace(/^(?:el\s+de\s+|la\s+de\s+|a\s+|el\s+|la\s+)/i, '').trim();
+
+  // 3. Coincidencia por ID exacto o contenido
+  for (const c of candidates) {
+    if (c.id && (n === c.id.toLowerCase() || n.includes(c.id.toLowerCase()))) {
+      return c;
+    }
+  }
+
+  // 4. Coincidencia por Nombre, Apellidos o Dirección
+  let bestCandidate = null;
+  let highestScore = 0;
+
+  for (const c of candidates) {
+    let score = 0;
+    const cName = (c.clientName || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const cAddr = (c.clientAddress || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+    // Nombre completo exacto
+    if (cName === cleaned || cName === n) score += 10;
+    else if (cName.includes(cleaned) && cleaned.length > 2) score += 5;
+    else if (cleaned.includes(cName) && cName.length > 2) score += 5;
+
+    // Palabras individuales del nombre (ej. apellidos: 'Pérez', 'García')
+    const nameWords = cName.split(/\s+/).filter(w => w.length > 2);
+    for (const nw of nameWords) {
+      if (cleaned.includes(nw)) score += 3;
+    }
+
+    // Dirección
+    if (cAddr && cleaned.length > 2) {
+      if (cAddr.includes(cleaned)) score += 4;
+      const addrWords = cAddr.split(/[\s,.-]+/).filter(w => w.length > 3 && !['calle', 'avenida', 'plaza'].includes(w));
+      for (const aw of addrWords) {
+        if (cleaned.includes(aw)) score += 3;
+      }
+    }
+
+    if (score > highestScore) {
+      highestScore = score;
+      bestCandidate = c;
+    }
+  }
+
+  if (highestScore >= 3) {
+    return bestCandidate;
+  }
+
+  return null;
 }
 
 export async function handleRenameClient(sock, remoteJid, session, targetQuery, newName) {
@@ -2994,6 +3109,8 @@ async function startWhatsAppGateway() {
 
       let target = null;
       if (query && query.trim() !== '') {
+        const isDis = await checkDisambiguation(sock, remoteJid, session, query.trim(), 'send_signing_link', {});
+        if (isDis) return;
         target = findBudgetInSession(session, query);
       }
       if (!target && session.activeBudgetId) {
@@ -3110,6 +3227,16 @@ async function startWhatsAppGateway() {
 
     // 1. Factura de anticipo
     if (aiResult?.action === 'advance_invoice') {
+      const clientQuery = aiResult.clientName || aiResult.targetBudgetId;
+      if (clientQuery) {
+        const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'advance_invoice', {
+          clientNif: aiResult.clientNif,
+          paymentInfo: aiResult.paymentInfo,
+          sendSigningLink: Boolean(aiResult.sendSigningLink || /firm|enlace/i.test(taskData.rawUserText || ''))
+        });
+        if (isDis) return;
+      }
+
       const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
         || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
         || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
@@ -3129,6 +3256,14 @@ async function startWhatsAppGateway() {
 
     // 2. Facturación general / liquidación
     if (aiResult?.action === 'invoice' || aiResult?.isInvoice) {
+      const clientQuery = aiResult.clientName || aiResult.targetBudgetId;
+      if (clientQuery) {
+        const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'invoice', {
+          clientNif: aiResult.clientNif
+        });
+        if (isDis) return;
+      }
+
       const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
         || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
         || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
@@ -3140,6 +3275,12 @@ async function startWhatsAppGateway() {
 
     // 3. Registro de cobro o anticipo
     if (aiResult?.action === 'payment') {
+      const clientQuery = aiResult.clientName || aiResult.targetBudgetId;
+      if (clientQuery) {
+        const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'payment', aiResult.paymentInfo || {});
+        if (isDis) return;
+      }
+
       const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
         || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
         || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
@@ -3170,6 +3311,12 @@ async function startWhatsAppGateway() {
 
     // 4. Consulta de saldo o deuda
     if (aiResult?.action === 'query_balance') {
+      const clientQuery = aiResult.clientName || aiResult.targetBudgetId;
+      if (clientQuery) {
+        const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'query_balance', {});
+        if (isDis) return;
+      }
+
       const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
         || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
         || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
@@ -3381,6 +3528,12 @@ async function startWhatsAppGateway() {
 
     // 12. Aceptar presupuesto
     if (aiResult?.action === 'accept_budget') {
+      const clientQuery = aiResult.clientName || aiResult.targetBudgetId;
+      if (clientQuery) {
+        const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'accept_budget', {});
+        if (isDis) return;
+      }
+
       const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
         || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
         || (session.activeBudgetId && session.budgets.get(session.activeBudgetId))
@@ -3814,23 +3967,12 @@ async function startWhatsAppGateway() {
           }
         }
 
-        // 3. Identificar candidato por número (1, 2, 3...) o por texto (dirección o ID)
+        // 3. Identificar candidato por número (1, 2, 3...), ordinal, nombre, dirección o ID
         let selectedCandidate = null;
-        const numMatch = rawUserText.match(/^([1-9]\d*)$/);
-        if (numMatch) {
-          const idx = parseInt(numMatch[1], 10) - 1;
-          if (idx >= 0 && idx < dis.candidates.length) {
-            selectedCandidate = dis.candidates[idx];
-          }
-        } else if (renameTargetCandidate) {
+        if (renameTargetCandidate) {
           selectedCandidate = renameTargetCandidate;
         } else {
-          // Búsqueda por coincidencia en ID o dirección
-          selectedCandidate = dis.candidates.find(c =>
-            norm.includes(c.id.toLowerCase()) ||
-            (c.clientAddress && norm.includes(c.clientAddress.toLowerCase())) ||
-            (c.clientAddress && c.clientAddress.toLowerCase().includes(norm))
-          );
+          selectedCandidate = resolveDisambiguationChoice(rawUserText, dis.candidates);
         }
 
         if (selectedCandidate) {
@@ -3845,6 +3987,16 @@ async function startWhatsAppGateway() {
               text: `🏷️ *Cliente renombrado a "${renameNewName}"* para diferenciarlo.`
             });
             if (sentRen?.key?.id) botSentMessageIds.add(sentRen.key.id);
+          }
+
+          const tenantContext = session.authContext || (session.companyId ? { companyId: session.companyId, phone: session.phone } : (session.phone || remoteJid));
+          let target = session.budgets.get(selectedCandidate.id);
+          if (!target) {
+            target = getBudget(tenantContext, selectedCandidate.id);
+            if (target) session.budgets.set(selectedCandidate.id, target);
+          }
+          if (target) {
+            session.activeBudgetId = target.id;
           }
 
           // Ejecutar la acción original con el presupuesto específico del cliente seleccionado
@@ -3868,10 +4020,53 @@ async function startWhatsAppGateway() {
               await handleRenameClient(sock, remoteJid, session, selectedCandidate.id, dis.originalPayload.newName);
             }
             return;
+          } else if (dis.actionType === 'query_balance') {
+            await handleQueryBalance(sock, remoteJid, session, target);
+            return;
+          } else if (dis.actionType === 'payment') {
+            await handlePaymentRegistration(sock, remoteJid, session, target, dis.originalPayload || {});
+            return;
+          } else if (dis.actionType === 'accept_budget') {
+            await handleAcceptBudget(sock, remoteJid, session, target);
+            return;
+          } else if (dis.actionType === 'advance_invoice') {
+            await handleAdvanceInvoice(sock, remoteJid, session, target, dis.originalPayload?.clientNif, dis.originalPayload?.paymentInfo, dis.originalPayload?.sendSigningLink);
+            return;
+          } else if (dis.actionType === 'invoice') {
+            await emitInvoiceForBudget(sock, remoteJid, session, target, dis.originalPayload?.clientNif);
+            return;
+          } else if (dis.actionType === 'send_signing_link') {
+            await handleSendSigningLink(sock, remoteJid, session, selectedCandidate.id);
+            return;
+          } else if (dis.actionType === 'pdf_recovery') {
+            if (target) {
+              try {
+                const pdfBuffer = await generateBudgetPDF(target);
+                const pdfFileName = `Presupuesto_${target.id || 'Obra'}.pdf`;
+                const sentDoc = await sock.sendMessage(remoteJid, {
+                  document: pdfBuffer,
+                  mimetype: 'application/pdf',
+                  fileName: pdfFileName,
+                  caption: `📄 *${pdfFileName}*\nPresupuesto formal en PDF listo para enviar a tu cliente.`
+                });
+                if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
+                try {
+                  const signingUrl = generateSigningUrl(target, session.company, cleanPhone);
+                  const sentSig = await sock.sendMessage(remoteJid, {
+                    text: `✍️ *Enlace de Aceptación y Firma Digital:*\n${signingUrl}\n\n📲 _Compártelo con tu cliente para que firme desde su móvil._`
+                  });
+                  if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
+                } catch (sigErr) {}
+              } catch (pdfErr) {
+                console.error('Error enviando PDF en desambiguación:', pdfErr.message);
+              }
+            }
+            return;
           }
         } else {
+          const maxNum = dis.candidates?.length || 2;
           const sentClarify = await sock.sendMessage(remoteJid, {
-            text: `⚠️ No he podido identificar tu elección. Por favor, responde con el número (*1* o *${dis.candidates.length}*) o escribe *"cancelar"*.`
+            text: `⚠️ No he podido identificar tu elección. Por favor, responde con el número (del *1* al *${maxNum}*), el nombre/dirección o escribe *"cancelar"*.`
           });
           if (sentClarify?.key?.id) botSentMessageIds.add(sentClarify.key.id);
           return;
@@ -4237,7 +4432,12 @@ async function startWhatsAppGateway() {
       // Comando directo para obtener el enlace de firma digital de un presupuesto: ej. "enlace alberto", "enlace PRE-2026-6136", "link"
       const signingLinkMatch = rawUserText.match(/^(?:enlace|link|url|firma|firmar)(?:\s+(?:de|del)?\s*(.+))?$/i);
       if (signingLinkMatch && !/^(?:firmar|firma)\s+(?:presupuesto|obra)$/i.test(rawUserText)) {
-        await handleSendSigningLink(sock, remoteJid, session, signingLinkMatch[1] || '');
+        const query = (signingLinkMatch[1] || '').trim();
+        if (query) {
+          const isDis = await checkDisambiguation(sock, remoteJid, session, query, 'send_signing_link', {});
+          if (isDis) return;
+        }
+        await handleSendSigningLink(sock, remoteJid, session, query);
         return;
       }
 
@@ -4245,6 +4445,10 @@ async function startWhatsAppGateway() {
       const pdfRecoveryMatch = rawUserText.match(/^(?:pdf|reenviar\s+pdf|enviar\s+pdf|mandar\s+pdf|volver\s+a\s+enviar\s+pdf)(?:\s+(?:de|del)?\s*(.+))?$/i);
       if (pdfRecoveryMatch) {
         const query = (pdfRecoveryMatch[1] || '').trim();
+        if (query) {
+          const isDis = await checkDisambiguation(sock, remoteJid, session, query, 'pdf_recovery', {});
+          if (isDis) return;
+        }
         const budgetList = [...session.budgets.values()];
         let target = null;
         if (query) {
@@ -4324,6 +4528,16 @@ async function startWhatsAppGateway() {
         else if (/bizum/i.test(rest)) method = 'Bizum';
 
         const cleanQuery = rest.replace(/bizum|transferencia|efectivo|met[aá]lico|en\s+mano/gi, '').trim();
+
+        if (cleanQuery) {
+          const isDis = await checkDisambiguation(sock, remoteJid, session, cleanQuery, 'payment', {
+            amount,
+            method,
+            concept: 'Entrega a cuenta de trabajos'
+          });
+          if (isDis) return;
+        }
+
         const target = findBudgetInSession(session, cleanQuery);
 
         await handlePaymentRegistration(sock, remoteJid, session, target, {
@@ -4338,6 +4552,10 @@ async function startWhatsAppGateway() {
       const balanceCmdMatch = rawUserText.match(/^(?:[¿?]?(?:cu[aá]nto\s+me\s+debe|deuda|saldo|pagos|estado\s+de\s+cuenta)\s*(?:de\s+)?(.+)?)$/i);
       if (balanceCmdMatch) {
         const query = (balanceCmdMatch[1] || '').replace(/[?¿]/g, '').trim();
+        if (query) {
+          const isDis = await checkDisambiguation(sock, remoteJid, session, query, 'query_balance', {});
+          if (isDis) return;
+        }
         const target = findBudgetInSession(session, query);
         await handleQueryBalance(sock, remoteJid, session, target);
         return;
@@ -4347,6 +4565,10 @@ async function startWhatsAppGateway() {
       const acceptCmdMatch = rawUserText.match(/^(?:aceptar|aceptado|firmado|aprobar|confirmar)\s*(?:el\s+)?(?:presupuesto)?(?:\s+(?:de\s+)?(.+))?$/i);
       if (acceptCmdMatch && !/^(?:citas|visitas|agenda)/i.test(rawUserText)) {
         const query = (acceptCmdMatch[1] || '').trim();
+        if (query) {
+          const isDis = await checkDisambiguation(sock, remoteJid, session, query, 'accept_budget', {});
+          if (isDis) return;
+        }
         const target = findBudgetInSession(session, query);
         await handleAcceptBudget(sock, remoteJid, session, target);
         return;
@@ -4364,6 +4586,10 @@ async function startWhatsAppGateway() {
         }
 
         const query = advanceInvCmdMatch[1] ? advanceInvCmdMatch[1].trim() : '';
+        if (query) {
+          const isDis = await checkDisambiguation(sock, remoteJid, session, query, 'advance_invoice', {});
+          if (isDis) return;
+        }
         const target = findBudgetInSession(session, query);
         await handleAdvanceInvoice(sock, remoteJid, session, target);
         return;
@@ -4381,6 +4607,10 @@ async function startWhatsAppGateway() {
         }
 
         const query = invoiceCmdMatch[1] ? invoiceCmdMatch[1].trim() : '';
+        if (query) {
+          const isDis = await checkDisambiguation(sock, remoteJid, session, query, 'invoice', {});
+          if (isDis) return;
+        }
         const target = findBudgetInSession(session, query);
         await emitInvoiceForBudget(sock, remoteJid, session, target);
         return;
@@ -4490,7 +4720,8 @@ async function startWhatsAppGateway() {
 
       // 3. Router de Intenciones Determinístico (Resuelve con SQLite sin pasar por Gemini)
       if (!isAudio && rawUserText) {
-        const detected = detectIntent(rawUserText);
+        const knownNames = Array.from(session.budgets.values()).map(b => b.client?.name).filter(Boolean);
+        const detected = detectIntent(rawUserText, { knownNames });
         if (detected) {
           console.log(`⚡ [IntentRouter] Intención detectada: ${detected.intent}`, detected.params);
 

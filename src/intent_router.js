@@ -33,6 +33,10 @@ import {
   formatQuarterWhatsAppSummary
 } from './fiscal_service.js';
 
+import {
+  formatDisambiguationPrompt
+} from './secretary_service.js';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // UTILIDADES INTERNAS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -83,6 +87,85 @@ function extractClientName(text) {
     if (lastWords.length > 2) return lastWords;
   }
   return null;
+}
+
+/**
+ * Extrae de forma limpia el nombre del cliente en consultas coloquiales de deuda (HIGH-02).
+ * Elimina adverbios temporales ("todavía", "aún", "ahora"), artículos, preposiciones y coletillas de obra.
+ * @param {string} text - Texto del mensaje del usuario
+ * @param {string[]} knownNames - Lista opcional de nombres conocidos en el tenant para match exacto
+ * @returns {string|null} - Nombre limpio del cliente o null si no se refiere a un cliente concreto
+ */
+export function extractDebtClient(text, knownNames = []) {
+  if (!text || typeof text !== 'string') return null;
+  const n = norm(text);
+
+  // 1. Coincidencia prioritaria con nombres conocidos del tenant (de mayor a menor longitud)
+  if (knownNames && knownNames.length > 0) {
+    const sortedKnown = [...knownNames].sort((a, b) => b.length - a.length);
+    for (const kn of sortedKnown) {
+      const knNorm = norm(kn);
+      if (knNorm.length < 2) continue;
+      const re = new RegExp('\\b' + knNorm.replace(/\s+/g, '\\s+') + '\\b', 'i');
+      if (re.test(n)) {
+        return kn;
+      }
+    }
+  }
+
+  // 2. Descartar consultas de deuda global (estas van a ALL_DEBTS)
+  if (/(?:quien\s+me\s+debe|que\s+me\s+deben|cuanto\s+(?:dinero\s+)?(?:me\s+)?deben|total\s+(?:de\s+)?deudas|cuanto\s+(?:me\s+)?queda\s+por\s+cobrar|deudas?\s+pendientes|cobros?\s+pendientes|pasta)/i.test(n)) {
+    return null;
+  }
+
+  // 3. Patrones sintácticos para consultas de deuda hacia clientes
+  const leadPatterns = [
+    /(?:cuanto\s+(?:todavia\s+|aun\s+|ahora\s+)?me\s+debe|que\s+(?:todavia\s+|aun\s+|ahora\s+)?me\s+debe|dime\s+(?:lo\s+que\s+)?(?:todavia\s+|aun\s+|ahora\s+)?(?:me\s+)?debe|deuda\s+de|saldo\s+de)\s+(.+)/i,
+    /(?:cuanto\s+(?:le\s+)?queda\s+por\s+(?:pagar|cobrar)(?:\s+a)?)\s+(.+)/i,
+    /(?:cuanto\s+falta\s+por\s+(?:cobrarle|pagar)(?:\s+a)?)\s+(.+)/i,
+    /^(?!dime\b|sabes\b|mira\b|oye\b|cuanto\b|que\b|quien\b)(.+?)\s+(?:todavia|aun|ahora)?\s*me\s+debe(?:n)?/i,
+    /lo\s+de\s+(.+)/i
+  ];
+
+  let rawSubject = null;
+  for (const p of leadPatterns) {
+    const m = n.match(p);
+    if (m && m[1]) {
+      rawSubject = m[1].trim();
+      break;
+    }
+  }
+
+  if (!rawSubject) return null;
+
+  // 4. Limpieza de adverbios iniciales, artículos, tratamientos y preposiciones
+  let cleaned = rawSubject
+    .replace(/^(?:todavia|aun|ahora|actualmente|por\s+ahora)\s+/i, '')
+    .replace(/^(?:a\s+|el\s+|la\s+|don\s+|dona\s+|cliente\s+|el\s+cliente\s+)/i, '')
+    .replace(/^(?:todavia|aun|ahora)\s+/i, '')
+    .trim();
+
+  // 5. Limpieza de coletillas de obra circunstanciales (ej. 'de la cocina', 'del baño', 'de la obra')
+  cleaned = cleaned
+    .replace(/\s+(?:de\s+la\s+|del?\s+|en\s+la\s+|en\s+el\s+|para\s+la\s+)(?:cocina|obra|piso|reforma|bano|casa|vivienda|local|chalet|centro|triana|sevilla|edificio)(?:\s+[\w\s]+)?$/i, '')
+    .replace(/\s+(?:todavia|aun|ahora)\s+me\s+debe.*$/i, '')
+    .replace(/\s+(?:500|1000|\d+).*$/i, '')
+    .replace(/\s*(?:no|verdad|cierto)\s*$/i, '')
+    .trim();
+
+  // 6. Filtro de palabras no-nombre y falsos positivos
+  const nonNames = [
+    'todavia', 'aun', 'ahora', 'dinero', 'total', 'todo', 'algo', 'nada', 'cobrar', 'pagar',
+    'euros', 'euro', 'de la cocina', 'la cocina', 'el piso', 'la obra', 'reforma',
+    'el de la cocina', 'el cliente', 'el cliente de la obra', 'cliente', 'obra', 'cocina', 'piso',
+    'cuanto dinero', 'cuanto', 'quien', 'pasta'
+  ];
+  if (!cleaned || nonNames.includes(cleaned) || cleaned.length < 2) {
+    return null;
+  }
+
+  // Devolver el nombre limpio con mayúscula inicial
+  return cleaned.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
 
 /** Extrae mes y año de un texto en español */
@@ -148,7 +231,7 @@ function extractQuarterYear(text) {
  * @param {string} text - Mensaje del profesional
  * @returns {{ intent: string, params: object } | null}
  */
-export function detectIntent(text) {
+export function detectIntent(text, context = {}) {
   if (!text || typeof text !== 'string') return null;
   const n = norm(text);
 
@@ -213,17 +296,11 @@ export function detectIntent(text) {
     return { intent: 'ALL_DEBTS', params: {} };
   }
 
-  // ── DEUDA DE UN CLIENTE CONCRETO ──────────────────────────────────────────
-  // "cuánto me debe Juan", "deuda de García", "qué me debe María"
-  const debtClientMatch = n.match(
-    /(?:cuanto\s+me\s+debe|que\s+me\s+debe|deuda\s+(?:de|del?)|debe\s+(?:el|la)?)\s+(\w[\w\s]{1,30}?)(?:\s*$|\?|,|\.)/ 
-  );
-  if (debtClientMatch && debtClientMatch[1]) {
-    const clientName = debtClientMatch[1].trim();
-    // Evitar falsos positivos con palabras clave como "dinero", "total", "todo"
-    if (!/^(?:dinero|total|todo|algo|cobrar|pagar|euros?)$/.test(clientName)) {
-      return { intent: 'DEBT_BY_CLIENT', params: { clientName } };
-    }
+  // ── DEUDA DE UN CLIENTE CONCRETO (HIGH-02) ───────────────────────────────
+  // Extrae limpiamente el cliente sin adverbios ni coletillas de obra
+  const debtClient = extractDebtClient(text, context?.knownNames || []);
+  if (debtClient) {
+    return { intent: 'DEBT_BY_CLIENT', params: { clientName: debtClient } };
   }
 
   // ── ESTADÍSTICAS MENSUALES ────────────────────────────────────────────────
@@ -389,35 +466,42 @@ function formatAllDebts(unpaidInvoices) {
 }
 
 /** Formatea la deuda de un cliente concreto */
-function formatDebtByClient(clientName, unpaidInvoices, allMatches) {
-  if (!allMatches || allMatches.length === 0) {
-    return `✅ *${clientName}* no tiene ninguna factura pendiente contigo. ¡Todo cobrado!`;
+function formatDebtByClient(clientName, unpaidInvoices = [], resolvedCandidate = null, work = null) {
+  const hasInvoices = unpaidInvoices && unpaidInvoices.length > 0;
+  const hasWorkDebt = work && work.remainingBalance > 0;
+
+  if (!hasInvoices && !hasWorkDebt) {
+    return `✅ *${clientName}* está al corriente de pago. No tiene facturas ni presupuestos con saldo pendiente.`;
   }
 
-  const totalDebt = allMatches.reduce((sum, inv) => {
-    const invoiceData = inv.invoice;
-    const total = inv.totalAmount || 0;
-    const advance = invoiceData?.financials?.advanceAmount || 0;
-    const remaining = invoiceData?.financials?.remainingAmount ?? Math.max(0, total - advance);
-    return sum + remaining;
-  }, 0);
-
   const lines = [
-    `💸 *Deuda de ${allMatches[0].clientName}*`,
+    `💸 *Deuda de ${clientName}*`,
     '━━━━━━━━━━━━━━━━━━━━━━━━━'
   ];
 
-  for (const inv of allMatches) {
-    const invoiceData = inv.invoice;
-    const total = inv.totalAmount || 0;
-    const advance = invoiceData?.financials?.advanceAmount || 0;
-    const remaining = invoiceData?.financials?.remainingAmount ?? Math.max(0, total - advance);
-    lines.push(`📄 ${inv.id} · Total: ${fmt(total)} € · Anticipo: ${fmt(advance)} € · *Pendiente: ${fmt(remaining)} €*`);
-    if (inv.daysPending > 0) lines.push(`   ⏱️ Lleva ${inv.daysPending} días sin pagar`);
+  let totalDebt = 0;
+
+  if (hasInvoices) {
+    for (const inv of unpaidInvoices) {
+      const invoiceData = inv.invoice;
+      const total = inv.totalAmount || 0;
+      const advance = invoiceData?.financials?.advanceAmount || 0;
+      const remaining = invoiceData?.financials?.remainingAmount ?? Math.max(0, total - advance);
+      totalDebt += remaining;
+      lines.push(`📄 Factura *${inv.id}* · Total: ${fmt(total)} € · Anticipo: ${fmt(advance)} € · *Pendiente: ${fmt(remaining)} €*`);
+      if (inv.daysPending > 0) lines.push(`   ⏱️ Lleva ${inv.daysPending} días sin pagar`);
+    }
+  }
+
+  if (hasWorkDebt && (!hasInvoices || work.budgetId !== unpaidInvoices[0]?.budgetId)) {
+    totalDebt += work.remainingBalance;
+    lines.push(`📋 Presupuesto *${work.budgetId}* · Total obra: ${fmt(work.totalAmount)} € · Cobrado: ${fmt(work.totalPaid)} € · *Pendiente: ${fmt(work.remainingBalance)} €*`);
   }
 
   lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
   lines.push(`💰 *Total que te debe: ${fmt(totalDebt)} €*`);
+  lines.push('');
+  lines.push(`💡 _Di "cobro [importe] ${clientName}" para registrar un pago, o "factura ${clientName}" para emitir._`);
 
   return lines.join('\n');
 }
@@ -710,12 +794,37 @@ export async function resolveIntent(intentResult, phone, session) {
 
       case 'DEBT_BY_CLIENT': {
         const { clientName } = params;
+        const candidates = findClientsByName(tenantContext, clientName);
+
+        // Si hay homónimos (más de 1 candidato), activar desambiguación interactiva (HIGH-01)
+        if (candidates && candidates.length > 1) {
+          if (session) {
+            session.pendingDisambiguation = {
+              actionType: 'query_balance',
+              clientQuery: clientName,
+              candidates,
+              originalPayload: { clientName }
+            };
+          }
+          return formatDisambiguationPrompt(clientName, candidates, 'query_balance');
+        }
+
         const allUnpaid = getUnpaidInvoices(cleanPhone);
         const qNorm = norm(clientName);
         const clientMatches = allUnpaid.filter(inv =>
           norm(inv.clientName).includes(qNorm) || qNorm.includes(norm(inv.clientName))
         );
-        return formatDebtByClient(clientName, allUnpaid, clientMatches);
+
+        // Si no existe ningún presupuesto/cliente ni factura impagada (HIGH-02: nunca decir falsamente "todo cobrado")
+        if ((!candidates || candidates.length === 0) && clientMatches.length === 0) {
+          return `🔍 No encontré ningún cliente ni presupuesto para *"${clientName}"*.\n\n💡 _Verifica el nombre o di "mis presupuestos" para ver la lista de obras registradas._`;
+        }
+
+        const resolvedCandidate = candidates && candidates.length === 1 ? candidates[0] : null;
+        const effectiveName = resolvedCandidate ? resolvedCandidate.clientName : (clientMatches[0]?.clientName || clientName);
+        const work = getWorkMemory(tenantContext, resolvedCandidate?.id || clientName);
+
+        return formatDebtByClient(effectiveName, clientMatches, resolvedCandidate, work);
       }
 
       case 'MONTHLY_STATS': {

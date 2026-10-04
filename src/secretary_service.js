@@ -337,25 +337,67 @@ export function buildInvoiceFollowUpProposal(unpaidInvoiceItem, company = {}) {
 /**
  * Genera el mensaje interactivo para desambiguar cuando hay varios clientes con el mismo nombre.
  */
-export function formatDisambiguationPrompt(clientQuery, candidates) {
+export function formatDisambiguationPrompt(clientQuery, candidates, actionType = null) {
+  const count = candidates?.length || 0;
+  const countText = count === 2 ? '2 clientes/obras' : `${count} clientes/obras`;
   const lines = [
-    `🔍 *He encontrado ${candidates.length} clientes/obras para "${clientQuery}":*`,
+    `🔍 *He encontrado ${countText} para "${clientQuery}":*`,
     '━━━━━━━━━━━━━━━━━━━━━━━━━'
   ];
 
   candidates.forEach((c, idx) => {
-    const numEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣'][idx] || `${idx + 1}️⃣`;
-    const totalStr = (Number(c.totalAmount) || 0).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
-    lines.push(`${numEmoji} *${c.clientName}*`);
-    lines.push(`   📍 ${c.clientAddress}`);
+    const numEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'][idx] || `${idx + 1}️⃣`;
+    const totalVal = Number(c.totalAmount) || 0;
+    const totalStr = totalVal.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+    lines.push(`${numEmoji} *${c.clientName || 'Cliente'}*`);
+    lines.push(`   📍 ${c.clientAddress || c.address || 'Sin dirección registrada'}`);
     lines.push(`   📁 Presupuesto: *${c.id}* · Importe: *${totalStr}*`);
   });
 
   lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
-  lines.push('👉 *¿A cuál de los dos te refieres?*');
-  lines.push(`Responde con el número (*1* o *${candidates.length}*) o el nombre de la calle.`);
+
+  let questionText = '👉 *¿A cuál de ellos te refieres?*';
+  if (count === 2) {
+    if (actionType === 'payment') {
+      questionText = '👉 *¿A cuál de los dos corresponde este cobro?*';
+    } else if (actionType === 'query_balance') {
+      questionText = '👉 *¿De cuál de los dos deseas consultar el saldo?*';
+    } else if (actionType === 'invoice') {
+      questionText = '👉 *¿A cuál de los dos deseas emitirle la factura?*';
+    } else if (actionType === 'advance_invoice') {
+      questionText = '👉 *¿Para cuál de los dos deseas generar la factura de anticipo?*';
+    } else if (actionType === 'accept_budget') {
+      questionText = '👉 *¿Cuál de los dos presupuestos deseas dar por aceptado?*';
+    } else if (actionType === 'send_signing_link') {
+      questionText = '👉 *¿De cuál de los dos deseas enviar el enlace de firma?*';
+    } else {
+      questionText = '👉 *¿A cuál de los dos te refieres?*';
+    }
+  } else {
+    if (actionType === 'payment') {
+      questionText = '👉 *¿A cuál de ellos corresponde este cobro?*';
+    } else if (actionType === 'query_balance') {
+      questionText = '👉 *¿De cuál deseas consultar el saldo?*';
+    } else if (actionType === 'invoice') {
+      questionText = '👉 *¿A cuál deseas emitirle la factura?*';
+    } else if (actionType === 'advance_invoice') {
+      questionText = '👉 *¿Para cuál deseas generar la factura de anticipo?*';
+    } else if (actionType === 'accept_budget') {
+      questionText = '👉 *¿Cuál de los presupuestos deseas dar por aceptado?*';
+    } else if (actionType === 'send_signing_link') {
+      questionText = '👉 *¿De cuál deseas enviar el enlace de firma?*';
+    } else {
+      questionText = '👉 *¿A cuál de ellos te refieres?*';
+    }
+  }
+  lines.push(questionText);
+  if (count === 2) {
+    lines.push('Responde con el número (*1* o *2*), el nombre o la dirección.');
+  } else {
+    lines.push(`Responde con el número (del *1* al *${count}*), el nombre o la dirección.`);
+  }
   lines.push('');
-  lines.push(`💡 _Consejo: Puedes añadirle un distintivo diciendo: "Renombrar el 1 a ${candidates[0]?.clientName || clientQuery} (Centro)"._`);
+  lines.push(`💡 _Consejo: Puedes responder con el número, el apellido o la calle (o decir "cancelar")._`);
 
   return lines.join('\n');
 }
