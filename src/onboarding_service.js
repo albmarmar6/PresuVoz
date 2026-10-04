@@ -214,6 +214,76 @@ export function formatCompanySummary(comp) {
   ].join('\n');
 }
 
+export function cleanBusinessName(str) {
+  if (!str) return '';
+  let s = str.trim();
+  s = s.replace(/^["'«»]+|["'«»]+$/g, '').trim();
+  s = s.replace(/\s+(?:y\s+somos\b|y\s+hacemos\b|y\s+nos\s+dedicamos\b|dedicada\s+a\b|especialistas\s+en\b|hacemos\b).*$/i, '').trim();
+  s = s.replace(/[.,;:]+$/, '').trim();
+  return s;
+}
+
+export function cleanPersonName(str) {
+  if (!str) return '';
+  let s = str.trim();
+  s = s.replace(/^(?:me\s+llamo|soy|mi\s+nombre\s+es)\s+/i, '').trim();
+  s = s.replace(/[.,;:]+$/, '').trim();
+  return s;
+}
+
+export function extractOwnerAndCompany(input) {
+  if (!input || typeof input !== 'string') return { owner: '', company: '' };
+  const raw = input.trim();
+
+  // Patrón conector para empresa/negocio
+  const companyPattern = /(?:mi\s+negocio\s+se\s+llama|mi\s+empresa\s+se\s+llama|el\s+negocio\s+se\s+llama|la\s+empresa\s+se\s+llama|tengo\s+un(?:a)?\s+(?:empresa|negocio)\s+que\s+se\s+llama|mi\s+empresa\s+es|mi\s+negocio\s+es|la\s+empresa\s+es|el\s+negocio\s+es|nombre\s+del\s+negocio\s*:?|nombre\s+de\s+la\s+empresa\s*:?|se\s+llama|empresa\s*:?|negocio\s*:?)/i;
+
+  // 1. Caso: Persona antes del conector de empresa (ej: 'Antonio García y mi negocio se llama Reformas García')
+  const splitMatch = raw.match(new RegExp('^(.*?)(?:,|\\s+y\\s+|\\s+con\\s+)\\s*' + companyPattern.source + '\\s+(.+)$', 'i'));
+  if (splitMatch) {
+    const owner = cleanPersonName(splitMatch[1]);
+    const company = cleanBusinessName(splitMatch[2]);
+    return { owner: owner || company, company };
+  }
+
+  // 2. Caso: Empresa antes de la persona (invertido: 'Mi empresa se llama Reformas García y soy Antonio García')
+  const invertedMatch = raw.match(new RegExp('^' + companyPattern.source + '\\s+(.*?)(?:,|\\s+y\\s+)(?:me\\s+llamo|soy|mi\\s+nombre\\s+es)\\s+(.+)$', 'i'));
+  if (invertedMatch) {
+    const company = cleanBusinessName(invertedMatch[1]);
+    const owner = cleanPersonName(invertedMatch[2]);
+    return { owner: owner || company, company };
+  }
+
+  // 3. Caso: Solo empresa con prefijo explícito (ej: 'Mi negocio se llama Reformas García', 'Se llama Reformas García')
+  const directCompanyMatch = raw.match(new RegExp('^' + companyPattern.source + '\\s+(.+)$', 'i'));
+  if (directCompanyMatch) {
+    const company = cleanBusinessName(directCompanyMatch[1]);
+    return { owner: company, company };
+  }
+
+  // 4. Caso: Formato con coma 'Nombre, Empresa' (ej: 'Alberto, Instalaciones Sur')
+  if (raw.includes(',')) {
+    const parts = raw.split(',');
+    const owner = cleanPersonName(parts[0]);
+    const company = cleanBusinessName(parts.slice(1).join(','));
+    if (owner && company) {
+      return { owner, company };
+    }
+  }
+
+  // 5. Caso simple sin conector de empresa (ej: 'Reformas García' o 'Antonio García')
+  const cleaned = cleanPersonName(raw);
+  const isTradeName = /\b(?:reformas?|instalaciones|pinturas?|construcciones|servicios|fontaner[ií]a|electricidad|clima|multiservicios|obras?|talleres?)\b/i.test(cleaned);
+  if (isTradeName) {
+    return { owner: cleaned, company: cleaned };
+  }
+
+  return {
+    owner: cleaned,
+    company: cleaned.includes(' ') ? cleaned : `${cleaned} Reformas`
+  };
+}
+
 export function processOnboardingStep(phone, rawInput, options = {}) {
   const input = String(rawInput || '').trim();
   const state = getOnboardingState(phone);
@@ -268,26 +338,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
   switch (currentStep) {
     // 1. Nombre propio y nombre de la empresa
     case 'OWNER_AND_COMPANY': {
-      let owner = '';
-      let company = '';
-
-      const matchBoth = input.match(/(?:(?:me llamo|soy)\s+)?([^,;\n]+?)(?:,|\s+y\s+|\s+con\s+)(?:mi empresa es|la empresa se llama|empresa|negocio)\s+([^,;\n]+)/i);
-      const matchInverted = input.match(/(?:(?:la\s+)?empresa|negocio)\s+([^,;\n]+?)(?:,|\s+y\s+)(?:me llamo|soy)\s+([^,;\n]+)/i);
-
-      if (matchBoth) {
-        owner = matchBoth[1].trim();
-        company = matchBoth[2].trim();
-      } else if (matchInverted) {
-        company = matchInverted[1].trim();
-        owner = matchInverted[2].trim();
-      } else if (input.includes(',')) {
-        const parts = input.split(',');
-        owner = parts[0].trim();
-        company = parts.slice(1).join(',').trim();
-      } else {
-        owner = input.replace(/^(?:me llamo|soy)\s+/i, '').trim();
-        company = owner.includes(' ') ? `${owner}` : `${owner} Reformas`;
-      }
+      const { owner, company } = extractOwnerAndCompany(input);
 
       data.ownerName = owner;
       data.companyName = company;

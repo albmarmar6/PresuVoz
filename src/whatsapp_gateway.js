@@ -962,29 +962,22 @@ export function formatWorkMemoryForWhatsApp(workMem, onlyMissing = false) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function formatAppointmentForWhatsApp(app, company) {
-  const query = app.clientAddress ? `${app.clientAddress}` : (app.clientName || 'Ubicación');
-  const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
-
   const dateParts = (app.date || '').split('-');
   const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : app.date;
 
   const lines = [
-    '📅 *VISITA TÉCNICA AGENDADA*',
-    '━━━━━━━━━━━━━━━━━━━━━━━━━',
-    `🆔 *Ref:* ${app.id}`,
-    `👤 *Cliente:* ${app.clientName}`,
-    app.clientPhone ? `📞 *Teléfono:* ${app.clientPhone}` : null,
-    `📍 *Dirección:* ${app.clientAddress || 'Por concretar'}`,
-    `🗓️ *Fecha:* ${formattedDate}`,
-    `⏰ *Hora:* ${app.time} h`,
-    `📝 *Motivo:* ${app.notes}`,
-    '━━━━━━━━━━━━━━━━━━━━━━━━━',
-    '🗺️ *Abrir ruta en Google Maps:*',
-    mapsUrl,
-    '',
-    '💬 *Mensaje listo para reenviar a tu cliente:*',
-    `_"Hola ${app.clientName.split(' ')[0]}, te confirmamos la visita técnica para valorar los trabajos el ${formattedDate} a las ${app.time} h${app.clientAddress ? ` en ${app.clientAddress}` : ''}. ¡Nos vemos entonces! (${company?.name || 'El técnico'})"_`
+    `📅 *Visita agendada:* ${app.clientName}`,
+    `🗓️ ${formattedDate} a las ${app.time} h`,
+    app.clientAddress ? `📍 ${app.clientAddress}` : null,
+    app.clientPhone ? `📞 ${app.clientPhone}` : null,
+    app.notes ? `📝 ${app.notes}` : null,
+    `🆔 Ref: ${app.id}`
   ].filter(Boolean);
+
+  if (app.clientAddress) {
+    const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(app.clientAddress)}`;
+    lines.push(`🗺️ ${mapsUrl}`);
+  }
 
   return lines.join('\n');
 }
@@ -1935,46 +1928,39 @@ export async function emitInvoiceForBudget(sock, remoteJid, session, targetBudge
     const advance = fin.advanceAmount || 0;
     const remaining = fin.remainingAmount !== undefined ? fin.remainingAmount : (fin.totalAmount || 0);
     const isSettlement = Boolean(invoice.advanceDeductions && invoice.advanceDeductions.length > 0);
-    const title = isSettlement ? `🧾 *FACTURA OFICIAL DE LIQUIDACIÓN: ${invoice.id}*` : `🧾 *FACTURA OFICIAL EMITIDA: ${invoice.id}*`;
+    const title = isSettlement ? `🧾 *Factura de liquidación ${invoice.id} emitida*` : `🧾 *Factura ${invoice.id} emitida*`;
 
     const invoiceMsgLines = [
       title,
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
       `👤 *Cliente:* ${invoice.client.name}`,
-      `📍 *Dirección:* ${invoice.client.address}`,
-      `📄 *Presupuesto de origen:* ${invoice.budgetId}`,
-      `📅 *Fecha emisión:* ${invoice.issueDate}`,
+      `📄 Presupuesto: ${invoice.budgetId} · Fecha: ${invoice.issueDate}`,
       ''
     ];
 
     if (isSettlement) {
-      invoiceMsgLines.push(`💰 *Base Imponible total obra:* ${fin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+      invoiceMsgLines.push(`💰 Base imponible obra: ${fin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
       invoice.advanceDeductions.forEach(adv => {
-        invoiceMsgLines.push(`📉 *Menos Anticipo (Factura ${adv.id}):* -${adv.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+        invoiceMsgLines.push(`📉 Menos anticipo (${adv.id}): -${adv.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
       });
       const netBase = Math.max(0, fin.taxableBase - (fin.advanceTaxableBase || 0));
       const netTax = Math.max(0, fin.taxAmount - (fin.advanceTaxAmount || 0));
-      invoiceMsgLines.push(`💵 *Base Imponible a liquidar:* ${netBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-      invoiceMsgLines.push(`📊 *IVA liquidado (${fin.taxRatePercentage}%):* ${netTax.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-      invoiceMsgLines.push(`🏷️ *TOTAL A PAGAR LIQUIDACIÓN:* *${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
+      invoiceMsgLines.push(`💵 Base liquidada: ${netBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+      invoiceMsgLines.push(`📊 IVA (${fin.taxRatePercentage}%): ${netTax.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+      invoiceMsgLines.push(`🏷️ *TOTAL A PAGAR: ${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
     } else {
-      invoiceMsgLines.push(`💰 *Base Imponible:* ${fin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-      invoiceMsgLines.push(`📊 *IVA (${fin.taxRatePercentage}%):* ${fin.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-      invoiceMsgLines.push(`🏷️ *TOTAL FACTURA:* *${fin.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
+      invoiceMsgLines.push(`💰 Base: ${fin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+      invoiceMsgLines.push(`📊 IVA (${fin.taxRatePercentage}%): ${fin.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+      invoiceMsgLines.push(`🏷️ *TOTAL FACTURA: ${fin.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
       if (advance > 0) {
-        invoiceMsgLines.push(`💵 *Anticipo abonado:* -${advance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
-        invoiceMsgLines.push(`💳 *TOTAL PENDIENTE DE COBRO:* *${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
+        invoiceMsgLines.push(`💵 Anticipo abonado: -${advance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`);
+        invoiceMsgLines.push(`💳 *TOTAL PENDIENTE: ${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`);
       }
     }
 
-    invoiceMsgLines.push('');
-    invoiceMsgLines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
-    invoiceMsgLines.push('🏦 *Datos bancarios para cobro:*');
-    if (session.company?.iban) {
-      invoiceMsgLines.push(`• IBAN: *${session.company.iban}*`);
-    }
-    if (session.company?.bizum) {
-      invoiceMsgLines.push(`• Bizum profesional: *${session.company.bizum}*`);
+    if (session.company?.iban || session.company?.bizum) {
+      invoiceMsgLines.push('');
+      if (session.company?.iban) invoiceMsgLines.push(`🏦 IBAN: *${session.company.iban}*`);
+      if (session.company?.bizum) invoiceMsgLines.push(`📱 Bizum: *${session.company.bizum}*`);
     }
 
     const sentSummary = await sock.sendMessage(remoteJid, { text: invoiceMsgLines.join('\n') });
@@ -1985,22 +1971,11 @@ export async function emitInvoiceForBudget(sock, remoteJid, session, targetBudge
       document: invoicePdfBuffer,
       mimetype: 'application/pdf',
       fileName: invoiceFileName,
-      caption: `🧾 *${invoiceFileName}*\nFactura legal formal conforme al RD 1619/2012 con validez fiscal ante Hacienda.`
+      caption: `📄 Factura ${invoice.invoiceNumber || invoice.id}`
     });
     if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
 
     console.log(`✅ Factura ${invoice.id} (${invoicePdfBuffer.length} bytes) enviada por WhatsApp.`);
-
-    // Opciones posteriores
-    const followUpText = [
-      '👉 *Opciones disponibles:*',
-      '• Si quieres ver todos tus presupuestos y facturas responde *1*.',
-      '• Para consultar tus números para la gestoría di *"gestoría"*.',
-      '• Si quieres un presupuesto nuevo manda un audio o texto diciendo *presupuesto nuevo*.'
-    ].join('\n');
-
-    const sentOpts = await sock.sendMessage(remoteJid, { text: followUpText });
-    if (sentOpts?.key?.id) botSentMessageIds.add(sentOpts.key.id);
 
   } catch (invErr) {
     console.error('❌ Error generando factura:', invErr.message);
@@ -2122,19 +2097,9 @@ export async function handleAdvanceInvoice(sock, remoteJid, session, targetBudge
 
     const advFin = advanceInvoice.financials || {};
     const invoiceMsgLines = [
-      `🧾 *FACTURA OFICIAL DE ANTICIPO: ${advanceInvoice.id}*`,
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      `👤 *Cliente:* ${advanceInvoice.client.name}`,
-      `📍 *Dirección:* ${advanceInvoice.client.address}`,
-      `📄 *Presupuesto de referencia:* ${advanceInvoice.budgetId}`,
-      `📅 *Fecha emisión / devengo:* ${advanceInvoice.issueDate}`,
-      '',
-      `💰 *Base Imponible Anticipo:* ${advFin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
-      `📊 *IVA (${advFin.taxRatePercentage}%):* ${advFin.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
-      `🏷️ *TOTAL FACTURA ANTICIPO:* *${advFin.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
-      '',
-      '⚖️ _Factura emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA (devengo anticipado) y RD 1619/2012. Esta base e IVA se deducirán automáticamente al emitir la factura final de liquidación._',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━'
+      `🧾 *Factura de anticipo ${advanceInvoice.id} emitida*`,
+      `👤 *Cliente:* ${advanceInvoice.client.name} · Presupuesto: ${advanceInvoice.budgetId}`,
+      `💰 *Total anticipo:* *${advFin.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €* (Base: ${advFin.taxableBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} € + IVA: ${advFin.taxAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €)`
     ];
 
     const sentSummary = await sock.sendMessage(remoteJid, { text: invoiceMsgLines.join('\n') });
@@ -2144,7 +2109,7 @@ export async function handleAdvanceInvoice(sock, remoteJid, session, targetBudge
       document: invoicePdfBuffer,
       mimetype: 'application/pdf',
       fileName: invoiceFileName,
-      caption: `🧾 *${invoiceFileName}*\nFactura legal de anticipo lista para entregar al cliente o deducir en gestoría.`
+      caption: `📄 Factura Anticipo ${advanceInvoice.invoiceNumber || advanceInvoice.id}`
     });
     if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
 
@@ -2154,20 +2119,10 @@ export async function handleAdvanceInvoice(sock, remoteJid, session, targetBudge
     if (sendSigningLink) {
       const signingUrl = generateSigningUrl(targetBudget, session.company, cleanPhone);
       const sentSig = await sock.sendMessage(remoteJid, {
-        text: `✍️ *Enlace para firma del cliente — Presupuesto ${targetBudget.id}:*\n${signingUrl}\n\n📲 _Puedes reenviárselo a ${targetBudget.client?.name || 'tu cliente'} para que lo firme y acepte las condiciones de la obra._`
+        text: `✍️ *Enlace para firma del cliente:*\n${signingUrl}`
       });
       if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
     }
-
-    const followUpText = [
-      '👉 *Opciones disponibles:*',
-      '• Para emitir la factura final de liquidación cuando acaben los trabajos di *"facturar"*.',
-      '• Para consultar tus números para la gestoría di *"gestoría"*.',
-      '• Para un nuevo trabajo di *"presupuesto nuevo"*.'
-    ].join('\n');
-
-    const sentOpts = await sock.sendMessage(remoteJid, { text: followUpText });
-    if (sentOpts?.key?.id) botSentMessageIds.add(sentOpts.key.id);
 
   } catch (advErr) {
     console.error('❌ Error emitiendo factura de anticipo:', advErr.message);
@@ -2310,26 +2265,16 @@ export async function handlePaymentRegistration(sock, remoteJid, session, target
     const receiptFileName = `Recibo_${receipt.id}.pdf`;
 
     const isSettled = receipt.status === 'LIQUIDADO';
-    const statusEmoji = isSettled ? '✅' : '⏳';
-    const statusTitle = isSettled ? '*¡OBRA TOTALMENTE LIQUIDADA Y COBRADA!*' : '*ANTICIPO / PAGO A CUENTA REGISTRADO*';
+    const amountStr = receipt.amount.toLocaleString('es-ES', { minimumFractionDigits: 2 });
+    const balanceStr = receipt.remainingBalance.toLocaleString('es-ES', { minimumFractionDigits: 2 });
+    const totalStr = receipt.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 });
 
     const paymentMsgLines = [
-      `💰 ${statusTitle}`,
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      `👤 *Cliente:* ${receipt.client?.name || 'Cliente'}`,
-      `📍 *Dirección:* ${receipt.client?.address || 'Ubicación de obra'}`,
-      `📄 *Presupuesto:* ${receipt.budgetId} (🟢 *Estado:* Aceptado)`,
-      `💵 *Importe recibido:* *+${receipt.amount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
-      `💳 *Método de pago:* ${receipt.method}`,
-      `📝 *Concepto:* ${receipt.concept}`,
-      `📅 *Fecha valor:* ${receipt.date}`,
-      '',
-      '📊 *ESTADO ACTUAL DE LA CUENTA:*',
-      `• Total obra presupuestado: ${receipt.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
-      `• Total cobrado acumulado: ${receipt.totalPaid.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`,
-      `• ${statusEmoji} *SALDO PENDIENTE:* *${receipt.remainingBalance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €*`,
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      '📄 _Se adjunta el Justificante Oficial de Cobro en PDF (no requiere firma del cliente, es emitido formalmente por tu empresa)._'
+      `💰 *Pago de ${amountStr} € registrado* (${receipt.method}).`,
+      `👤 *Cliente:* ${receipt.client?.name || 'Cliente'} · Presupuesto: ${receipt.budgetId}`,
+      isSettled
+        ? '✅ *Obra totalmente liquidada y cobrada.*'
+        : `⏳ *Saldo pendiente:* *${balanceStr} €* (Total obra: ${totalStr} €)`
     ];
 
     const sentSummary = await sock.sendMessage(remoteJid, { text: paymentMsgLines.join('\n') });
@@ -2340,23 +2285,11 @@ export async function handlePaymentRegistration(sock, remoteJid, session, target
       document: receiptPdfBuffer,
       mimetype: 'application/pdf',
       fileName: receiptFileName,
-      caption: `📄 *${receiptFileName}*\nJustificante oficial de cobro expedido por ${receipt.company?.name || 'la empresa'}.`
+      caption: `📄 Recibo oficial ${receipt.id}`
     });
     if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
 
     console.log(`✅ Recibo ${receipt.id} (${receiptPdfBuffer.length} bytes) enviado por WhatsApp.`);
-
-    // Opciones posteriores
-    const followUpText = [
-      '👉 *Opciones disponibles:*',
-      '• Si deseas emitir la *Factura Oficial de Anticipo* con IVA desglosado responde *"factura de anticipo"*.',
-      '• Si quieres ver el resumen de todas tus cuentas responde *1*.',
-      '• Para emitir la factura final di *"facturar"*.',
-      '• Si quieres un presupuesto nuevo di *presupuesto nuevo*.'
-    ].join('\n');
-
-    const sentOpts = await sock.sendMessage(remoteJid, { text: followUpText });
-    if (sentOpts?.key?.id) botSentMessageIds.add(sentOpts.key.id);
 
   } catch (payErr) {
     console.error('❌ Error registrando cobro:', payErr.message);
@@ -2661,17 +2594,9 @@ async function startWhatsAppGateway() {
       const advance = targetBudget.financials?.advanceAmount ? `${targetBudget.financials.advanceAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '';
 
       const lines = [
-        '🎉 *¡PRESUPUESTO MARCADO COMO ACEPTADO!*',
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        `🆔 *Documento:* ${targetBudget.id}`,
+        `🎉 *Presupuesto ${targetBudget.id} aceptado*`,
         `👤 *Cliente:* ${targetBudget.client?.name || 'Cliente Particular'}`,
-        `📍 *Ubicación:* ${targetBudget.client?.address || 'Ubicación de obra'}`,
-        `💰 *Total Presupuestado:* *${total}*`,
-        advance ? `💳 *Anticipo pactado:* ${advance} (${targetBudget.financials?.advancePercentage || 30}%)` : null,
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        '🟢 *Nuevo estado:* *Aceptado* (antes: _Pendiente de aceptación_)',
-        '',
-        '💡 _Si el cliente te ha pagado el anticipo por transferencia bancaria o Bizum, puedes registrarlo diciendo:_\n*"Apunta anticipo de [importe]€ por transferencia"*'
+        `💰 *Total:* *${total}*` + (advance ? ` (Anticipo: ${advance})` : '')
       ].filter(Boolean);
 
       const sent = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
@@ -3668,7 +3593,7 @@ async function startWhatsAppGateway() {
         document: pdfBuffer,
         mimetype: 'application/pdf',
         fileName: pdfFileName,
-        caption: `📄 *${pdfFileName}*\nPresupuesto formal en PDF listo para enviar a tu cliente o imprimir con firma y validez legal.`
+        caption: `📄 Presupuesto ${engineResult.budget.id || 'Obra'}`
       });
       if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
       console.log(`✅ Archivo PDF (${pdfBuffer.length} bytes) enviado con éxito por WhatsApp.`);
@@ -3677,7 +3602,7 @@ async function startWhatsAppGateway() {
         const signingUrl = generateSigningUrl(engineResult.budget, session.company, cleanPhone);
 
         const sentSig = await sock.sendMessage(remoteJid, {
-          text: `✍️ *Enlace de Aceptación y Firma Digital:*\n${signingUrl}\n\n📲 _Puedes abrirlo tú o enviárselo a tu cliente para que firme cómodamente desde su móvil o desde su casa. Al firmar, el presupuesto pasa a estado *Aceptado* y el cliente recibe su copia sellada por email._`
+          text: `✍️ *Enlace para firma digital del cliente:*\n${signingUrl}`
         });
         if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
         console.log(`✅ Enlace de firma enviado por WhatsApp (${signingUrl}).`);
