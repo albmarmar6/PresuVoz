@@ -1,63 +1,25 @@
-# Guía de Argumentación Legal y Cumplimiento: PresuVoz
+# Alcance actual: firma, datos y fiscalidad
 
-Este documento reúne las respuestas jurídicas para resolver cualquier duda de clientes (profesionales o clientes finales) sobre la validez de los presupuestos y contratos de obra generados por PresuVoz.
+Este documento describe lo que el código hace hoy. No es asesoramiento jurídico, fiscal ni de protección de datos, y no debe usarse para prometer resultados legales o tributarios.
 
----
+## Aceptación electrónica
 
-## 1. Validez de la Firma Digital ante Juzgados y Tribunales
+El cliente dibuja su firma en una página web. El servidor verifica que el presupuesto procede de un enlace firmado por el gateway, guarda un único registro de aceptación en Redis y genera un PDF que intenta enviar al cliente y a la empresa. El registro incluye la hora, el email indicado y el nombre, pero no recoge IP ni identificador de dispositivo y el PDF no lleva un sello electrónico cualificado ni un hash probatorio independiente.
 
-### Pregunta Habitual
-> *"¿Si el cliente me firma en la pantalla del móvil y luego no me paga, este documento me sirve ante un juez?"*
+Una firma electrónica dibujada puede ser relevante como evidencia, pero la fuerza probatoria depende de la operación, la identidad, el consentimiento y las pruebas disponibles. No afirmes que PresuVoz garantiza una reclamación o el resultado de un juicio. Pide revisión jurídica del flujo antes de comercializar esta función.
 
-### Base Jurídica
-* **Reglamento (UE) N.º 910/2014 (Reglamento eIDAS):**
-  * El artículo 25.1 establece: *"No se denegarán efectos jurídicos ni admisibilidad como prueba en procedimiento judicial a una firma electrónica por el mero hecho de ser una firma electrónica"*.
-* **Código Civil Español (Art. 1.262 y Art. 1.542 y ss.):**
-  * El consentimiento se perfecciona por el concurso de la oferta y la aceptación sobre la cosa y la causa que han de constituir el contrato.
-* **Ley de Enjuiciamiento Civil (Art. 299.2 y Art. 326):**
-  * Los medios de prueba electrónica son plenamente admisibles en juicio ordinario y en **Procedimiento Monitorio** (procedimiento ágil de reclamación de deudas dinerarias de cualquier importe sin necesidad obligatoria de procurador ni abogado hasta 2.000 €).
+## Datos personales
 
-### Respuesta Recomendada
-> *"Totalmente. El presupuesto se formaliza bajo el Reglamento Europeo eIDAS y el Código Civil. En el instante de la firma, el sistema captura la dirección IP del firmante, la fecha y hora exacta (timestamp) y el identificador de su dispositivo, remitiendo copia certificada por correo electrónico a ambas partes. Este expediente constituye prueba fehaciente de la aceptación del encargo y sus importes para cualquier procedimiento judicial de reclamación por impago."*
+El servicio procesa nombres, teléfonos, direcciones, presupuestos, citas, facturas, audios y otros datos enviados por WhatsApp. El flujo usa WhatsApp/Baileys, Google Gemini, Resend y Upstash, además de SQLite local. No hay en el repositorio base suficiente para afirmar ubicación europea de todos los datos, cifrado en reposo, acuerdos de encargo, política de conservación, borrado integral ni cumplimiento RGPD/LOPDGDD.
 
----
+Antes de ofrecer el servicio, define responsable y encargados, base jurídica, avisos de privacidad, contratos con proveedores, medidas de seguridad, retención, exportación y borrado. Evita enviar información innecesaria a modelos de IA y revisa los términos de cada proveedor.
 
-## 2. Protección de Datos y Privacidad (RGPD)
+## IVA e IRPF
 
-### Pregunta Habitual
-> *"¿Qué ocurre con los datos personales de mis clientes (nombre, dirección de la obra y teléfono)? ¿Cumplimos el RGPD?"*
+El IVA aplicado al presupuesto usa por defecto el tipo configurado por la empresa durante el onboarding; un tipo escrito de forma explícita puede prevalecer. El sistema no comprueba destino del inmueble, antigüedad, porcentaje de materiales, naturaleza de la operación ni otros requisitos para tipos reducidos o exenciones. El profesional debe verificar el tipo con su asesoría para cada operación.
 
-### Base Jurídica
-* **Reglamento General de Protección de Datos (RGPD UE 2016/679) y LOPDGDD 3/2018:**
-  * El profesional/empresa actúa como **Responsable del Tratamiento** (obtiene los datos para ejecutar la obra contratada).
-  * PresuVoz actúa como **Encargado del Tratamiento** (proveedor de la herramienta técnica de software conforme al Art. 28 del RGPD).
+Las funciones de facturas, anticipos, pagos y exportación fiscal son ayudas operativas. No sustituyen un sistema de facturación verificado ni la revisión de un asesor. No describas un informe de PresuVoz como libro oficial o declaración fiscal validada sin una revisión técnica y fiscal específica.
 
-### Medidas de Seguridad
-1. **Tratamiento Limitado:** Los datos solo se emplean para generar el presupuesto y remitir las copias contractuales.
-2. **Sin Cesión ni Entrenamiento Público:** Ningún dato se comercializa ni se emplea para el entrenamiento de modelos de inteligencia artificial públicos.
-3. **Alojamiento Seguro:** Servidores ubicados en la Unión Europea con cifrado en tránsito (TLS 1.3) y en reposo (AES-256).
+## Respuesta prudente para clientes
 
----
-
-## 3. Régimen Fiscal y Aplicación del Tipo de IVA
-
-### Pregunta Habitual
-> *"¿Cómo se justifica la aplicación del IVA reducido del 10% frente a la Agencia Tributaria?"*
-
-### Base Jurídica
-* **Ley 37/1992 del Impuesto sobre el Valor Añadido (Art. 91.Uno.2.10º):**
-  * Se aplica el tipo reducido del 10% a las ejecuciones de obras de renovación y reparación en edificaciones destinadas a viviendas si se cumplen los requisitos:
-    1. El destinatario es una persona física que utiliza la vivienda para su uso particular.
-    2. La construcción o rehabilitación de la vivienda concluyó al menos dos años antes del inicio de las obras.
-    3. El coste de los materiales aportados por el empresario o profesional no excede del 40% de la base imponible de la operación.
-
-### Cláusula Incorporada
-PresuVoz etiqueta expresamente la partida como *IVA reducido del 10% (Reforma en vivienda habitual)*, dejando constancia de la manifestación del destinatario en el contrato de obra.
-
----
-
-## 4. Cláusula de Exención y Responsabilidad Técnica
-
-En las condiciones de uso de la plataforma, se delimitan las responsabilidades:
-* **PresuVoz:** Garantiza la integridad técnica de la generación documental, el cálculo aritmético y la custodia de evidencias electrónicas.
-* **El Profesional:** Es el único responsable técnico de la ejecución material de las obras, mediciones en obra, cumplimiento de plazos constructivos y posesión de seguros de responsabilidad civil obligatorios de su oficio.
+> “PresuVoz prepara presupuestos y registra una aceptación electrónica con copia PDF. Revisa siempre el importe, el IVA y las condiciones antes de enviarlo. La firma y la fiscalidad deben validarse según tu caso; el servicio no garantiza por sí solo un resultado legal ni sustituye a tu asesor.”

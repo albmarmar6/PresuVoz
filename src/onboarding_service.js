@@ -518,15 +518,38 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
     // 7. Validez de presupuestos
     case 'QUOTE_VALIDITY': {
       let days = 15;
-      if (/^1\b|7\s*d[ií]as?/i.test(input)) {
-        days = 7;
-      } else if (/^2\b|15\s*d[ií]as?/i.test(input)) {
-        days = 15;
-      } else if (/^3\b|30\s*d[ií]as?|un\s+mes/i.test(input)) {
+      const explicitDays = input.match(/^\s*(\d{1,4})\s*d[ií]as?(?=\s|$)/i);
+      const option = input.normalize('NFKC').replace(/[\uFE0F\u20E3]/gu, '').trim().toLowerCase();
+
+      // Una duración escrita explícitamente siempre tiene prioridad sobre el número de opción.
+      if (explicitDays) {
+        days = Number(explicitDays[1]);
+        if (!Number.isInteger(days) || days < 1 || days > 3650) {
+          return {
+            handled: true,
+            message: 'Indícame una validez entre *1 y 3650 días* (por ejemplo, *1 día* o *45 días*).'
+          };
+        }
+      } else if (/^(?:un mes|1 mes)$/i.test(option)) {
         days = 30;
+      } else if (/^(?:4|opci[oó]n\s*4|otro|otra)$/i.test(option)) {
+        return {
+          handled: true,
+          message: '¿Cuántos días quieres exactamente? Escríbelo, por ejemplo, como *1 día*, *2 días* o *45 días*.'
+        };
+      } else if (/^(?:1|opci[oó]n\s*1)$/i.test(option)) {
+        days = 7;
+      } else if (/^(?:2|opci[oó]n\s*2)$/i.test(option)) {
+        days = 15;
+      } else if (/^(?:3|opci[oó]n\s*3)$/i.test(option)) {
+        days = 30;
+      } else if (/^(?:saltar|omitir|luego|m[aá]s tarde|paso|no)$/i.test(option)) {
+        days = 15;
       } else {
-        const dMatch = input.match(/(\d+)/);
-        if (dMatch) days = parseInt(dMatch[1], 10);
+        return {
+          handled: true,
+          message: 'No he entendido la validez. Elige *1* (7 días), *2* (15 días), *3* (30 días) o escribe la duración, por ejemplo *1 día*.'
+        };
       }
       data.quoteValidityDays = days;
 
@@ -543,7 +566,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
           '',
           '━━━━━━━━━━━━━━━━━━━━━━━━━',
           '📑 *¡Vamos ahora a la parte fiscal y de facturación!*',
-          'Esto es para que tus presupuestos oficiales, contratos con firma y facturas en PDF salgan 100% legales y profesionales.',
+          'Esto permite configurar tus presupuestos, condiciones de cobro y documentos PDF según los datos de tu empresa.',
           '',
           '👉 *¿Eres autónomo o tienes una empresa (S.L., C.B., Sociedad Civil...)?*'
         ].join('\n')
@@ -655,10 +678,15 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
 
     // 12. IVA habitual
     case 'TAX_RATE': {
-      let tax = 10;
-      const numMatch = input.match(/(\d+)/);
-      if (numMatch) {
-        tax = parseInt(numMatch[1], 10);
+      const numMatch = input.match(/(?:^|\D)(0|4|5|10|21)\s*%?(?:\D|$)/);
+      const tax = /exent[oa]|sin\s+iva/i.test(input)
+        ? 0
+        : (numMatch ? Number(numMatch[1]) : (/general|normal/i.test(input) ? 21 : null));
+      if (tax === null || ![0, 4, 5, 10, 21].includes(tax)) {
+        return {
+          handled: true,
+          message: 'No he reconocido ese tipo. Indícame 21%, 10%, 5%, 4% o exento (0%) para guardar el IVA habitual.'
+        };
       }
       data.defaultTaxRate = tax;
 

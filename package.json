@@ -7,11 +7,13 @@
   "scripts": {
     "start": "node src/test_run.js",
     "test": "node src/test_suite.js",
+    "test:sign-retry": "node src/test_sign_api_retry.js",
     "simulador": "node src/interactive_cli.js",
-    "whatsapp": "node --watch src/whatsapp_gateway.js",
+    "whatsapp": "node src/whatsapp_gateway.js",
     "visor": "node --watch src/db_viewer.js",
     "db": "node --watch src/db_viewer.js",
-    "db:reset": "node src/reset_db.js"
+    "db:reset": "node src/reset_db.js",
+    "seed:manual": "node src/seed_manual_test_data.js"
   },
   "keywords": [
     "presupuestos",

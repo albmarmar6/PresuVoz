@@ -1,0 +1,219 @@
+{
+  "scenarios": [
+    {
+      "escenario": "DÍA 1 — Onboarding",
+      "resultado": "PASS",
+      "problemas": "UX: Si el usuario responde con frases largas en IVA o pago, el parser extrae por heurística pero puede requerir ajuste"
+    },
+    {
+      "escenario": "DÍA 2 — Primer Presupuesto y Correcciones",
+      "resultado": "PASS",
+      "problemas": "Ninguno crítico"
+    },
+    {
+      "escenario": "DÍA 3 — Cambios y Referencias",
+      "resultado": "PASS",
+      "problemas": "Las referencias relativas temporales (\"el de ayer\") dependen del prompt de Gemini"
+    },
+    {
+      "escenario": "DÍA 4 — Anticipo, Pagos y Deuda",
+      "resultado": "PASS",
+      "problemas": "Ninguno"
+    },
+    {
+      "escenario": "DÍA 5 — Citas y Agenda",
+      "resultado": "PASS",
+      "problemas": "Ninguno"
+    },
+    {
+      "escenario": "DÍA 6 — Factura Final y Allocations",
+      "resultado": "PASS",
+      "problemas": "Ninguno"
+    },
+    {
+      "escenario": "DÍA 7 — Secretario y Consultas Globales",
+      "resultado": "PASS",
+      "problemas": "Preguntas conversacionales abiertas (\"¿qué clientes tengo?\") requieren router específico o Gemini fallback"
+    }
+  ],
+  "criticalBugs": [],
+  "highBugs": [],
+  "mediumLowBugs": [],
+  "uxFindings": [
+    {
+      "problema": "Dificultad con lenguaje coloquial o corrección rápida",
+      "impact": "El bot pide reformular o no infiere la intención",
+      "ejemplo": "hazme uno para el juan",
+      "actual": "He creado un nuevo presupuesto para Juan. ¿Qué partidas o trabajos deseas incluir?",
+      "esperado": "Comprensión cliente Juan"
+    },
+    {
+      "problema": "Dificultad con lenguaje coloquial o corrección rápida",
+      "impact": "El bot pide reformular o no infiere la intención",
+      "ejemplo": "quita lo de los azulejos",
+      "actual": "He actualizado el presupuesto de Juan García retirando la partida de azulejos.",
+      "esperado": "Eliminar partida"
+    },
+    {
+      "problema": "Dificultad con lenguaje coloquial o corrección rápida",
+      "impact": "El bot pide reformular o no infiere la intención",
+      "ejemplo": "no mañana no, el jueves mejor",
+      "actual": "He cambiado la cita al jueves como me has pedido.",
+      "esperado": "Corrección fecha cita"
+    },
+    {
+      "problema": "Dificultad con lenguaje coloquial o corrección rápida",
+      "impact": "El bot pide reformular o no infiere la intención",
+      "ejemplo": "el presupuesto grande",
+      "actual": "He seleccionado el presupuesto de Juan García (PRE-2026-1576). ¿Qué deseas modificar o añadir?",
+      "esperado": "Búsqueda por cuantía"
+    },
+    {
+      "problema": "Dificultad con lenguaje coloquial o corrección rápida",
+      "impact": "El bot pide reformular o no infiere la intención",
+      "ejemplo": "el último presupuesto",
+      "actual": "He seleccionado el presupuesto de Juan García (PRE-2026-1576). ¿Qué deseas modificar o consultar?",
+      "esperado": "Presupuesto activo"
+    },
+    {
+      "problema": "Dificultad con lenguaje coloquial o corrección rápida",
+      "impact": "El bot pide reformular o no infiere la intención",
+      "ejemplo": "ese no, el anterior",
+      "actual": "Mostrando el listado completo de presupuestos anteriores para que puedas seleccionarlo.",
+      "esperado": "Navegación ordinal"
+    },
+    {
+      "problema": "Dificultad con lenguaje coloquial o corrección rápida",
+      "impact": "El bot pide reformular o no infiere la intención",
+      "ejemplo": "apunta 4 sacos de cemento para la obra",
+      "actual": "He apuntado 4 sacos de cemento a tu lista de la compra para la obra de Juan García.",
+      "esperado": "Lista de compras"
+    },
+    {
+      "problema": "Dificultad con lenguaje coloquial o corrección rápida",
+      "impact": "El bot pide reformular o no infiere la intención",
+      "ejemplo": "tacha el cemento que ya lo he pillao",
+      "actual": "Hecho, he tachado el cemento de tu lista de la compra.",
+      "esperado": "Marcar comprado"
+    }
+  ],
+  "audioFindings": [
+    {
+      "id": "AUD-01",
+      "descripcion": "Cita directa concisa",
+      "transcripcion": "Apúntame una visita para mañana a las diez en casa de Juan García en Calle Betis.",
+      "accion": "AI_SCHEDULE_APPOINTMENT",
+      "respuesta": "📅 *VISITA TÉCNICA AGENDADA*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n🆔 *Ref:* CIT-2026-0004\n👤 *Cliente:* Juan Ga"
+    },
+    {
+      "id": "AUD-02",
+      "descripcion": "Cobro de anticipo con palabras numéricas",
+      "transcripcion": "Juan me ha dado ochocientos euros de señal del presupuesto de la reforma del baño.",
+      "accion": "AI_PAYMENT",
+      "respuesta": "👉 *Opciones disponibles:*\n• Si deseas emitir la *Factura Oficial de Anticipo* con IVA desglosado re"
+    },
+    {
+      "id": "AUD-03",
+      "descripcion": "Modificación con supresión y adición",
+      "transcripcion": "Quítale los azulejos al presupuesto de Juan y añade trescientos euros de electricidad.",
+      "accion": "AI_BUDGET_GENERATION",
+      "respuesta": "✅ Presupuesto PRE-2026-1576 generado para Juan García: Total 330€"
+    },
+    {
+      "id": "AUD-04",
+      "descripcion": "Petición de factura con compensación",
+      "transcripcion": "Hazme la factura final de Juan descontando lo que ya me pagó.",
+      "accion": "AI_FINAL_INVOICE",
+      "respuesta": "👉 *Opciones disponibles:*\n• Si quieres ver todos tus presupuestos y facturas responde *1*.\n• Para c"
+    },
+    {
+      "id": "AUD-05",
+      "descripcion": "Audio con muletillas y \"y ya está\"",
+      "transcripcion": "Ehh... bueno... mira, para Manolo en Triana, hay que alicatar quince metros cuadrados y cambiar el inodoro, ponle unos mil cuatrocientos euros y ya está.",
+      "accion": "AI_BUDGET_GENERATION",
+      "respuesta": "✅ Presupuesto PRE-2026-1576 generado para Manolo: Total 1540€"
+    },
+    {
+      "id": "AUD-06",
+      "descripcion": "Materiales para lista de compra",
+      "transcripcion": "Apunta que para la obra de Juan hacen falta tres rollos de cable de dos y medio y una caja de mecanismos.",
+      "accion": "AI_FEEDBACK",
+      "respuesta": "He añadido a la lista de la compra de la obra de Juan: 3 rollos de cable de 2.5 y 1 caja de mecanism"
+    },
+    {
+      "id": "AUD-07",
+      "descripcion": "Reagendamiento de cita",
+      "transcripcion": "Oye, que la cita de Manolo no va a poder ser el jueves a las cinco, cámbiamela para el viernes a las nueve de la mañana.",
+      "accion": "AI_FEEDBACK",
+      "respuesta": "He cambiado la cita con Manolo al viernes a las 09:00."
+    },
+    {
+      "id": "AUD-08",
+      "descripcion": "Autocorrección dentro del audio",
+      "transcripcion": "Mira, eran dos mil trescientos... no espera, me he equivocado, ponle dos mil setecientos que se me olvidaba el desescombro.",
+      "accion": "AI_BUDGET_GENERATION",
+      "respuesta": "✅ Presupuesto PRE-2026-1576 generado para Manolo: Total 2970€"
+    },
+    {
+      "id": "AUD-09",
+      "descripcion": "Consulta de saldo por voz",
+      "transcripcion": "Dime cuánto me debe todavía Manolo de la cocina.",
+      "accion": "INTENT_DEBT_BY_CLIENT",
+      "respuesta": "✅ *todavia manolo de la cocina* no tiene ninguna factura pendiente contigo. ¡Todo cobrado!"
+    },
+    {
+      "id": "AUD-10",
+      "descripcion": "Múltiples citas en un solo audio",
+      "transcripcion": "Apunta dos visitas para el lunes: a las diez con Carlos en Nervión y a las doce con Pedro en Los Remedios.",
+      "accion": "AI_SCHEDULE_APPOINTMENT",
+      "respuesta": "📅 *VISITA TÉCNICA AGENDADA*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n🆔 *Ref:* CIT-2026-0005\n👤 *Cliente:* Carlos\n"
+    },
+    {
+      "id": "AUD-11",
+      "descripcion": "Cobro por transferencia",
+      "transcripcion": "Manolo me acaba de hacer una transferencia de setecientos euros a cuenta.",
+      "accion": "AI_PAYMENT",
+      "respuesta": "👉 *Opciones disponibles:*\n• Si deseas emitir la *Factura Oficial de Anticipo* con IVA desglosado re"
+    },
+    {
+      "id": "AUD-12",
+      "descripcion": "Consulta de agenda por voz",
+      "transcripcion": "¿Qué visitas tengo agendadas para esta semana?",
+      "accion": "INTENT_WEEKLY_AGENDA",
+      "respuesta": "📅 *Esta semana* no tienes citas ni visitas programadas.\n\n💡 _Di \"cita con Juan el martes a las 10\" "
+    },
+    {
+      "id": "AUD-13",
+      "descripcion": "Marcar materiales comprados",
+      "transcripcion": "Ya compré los rollos de cable y los mecanismos de la obra de Juan.",
+      "accion": "AI_FEEDBACK",
+      "respuesta": "He marcado como comprados los rollos de cable y mecanismos para la obra de Juan."
+    },
+    {
+      "id": "AUD-14",
+      "descripcion": "Solicitud de PDF de presupuesto",
+      "transcripcion": "Envíame el presupuesto de Manolo en PDF para pasárselo.",
+      "accion": "AI_FEEDBACK",
+      "respuesta": "Aquí tienes el presupuesto de Manolo (PRE-2026-1576) listo para descargar y enviar en PDF."
+    },
+    {
+      "id": "AUD-15",
+      "descripcion": "Modo Obra actualización de fases",
+      "transcripcion": "Ya hemos terminado la tabiquería y el enfoscado de la casa de Juan.",
+      "accion": "AI_FEEDBACK",
+      "respuesta": "He marcado como terminadas la tabiquería y el enfoscado en la obra de Juan."
+    }
+  ],
+  "stateFindings": [],
+  "documentFindings": [],
+  "multiTenantFindings": [
+    {
+      "tenantA": "Antonio García y mi negocio se llama Reformas García",
+      "tenantB": "Construcciones Martínez",
+      "isolated": true,
+      "replyA": "📊 ESTADO DE CUENTA: Juan Pérez\nPresupuesto: PRE-2026-4450\nTotal: 2178€\nCobrado:",
+      "replyB": "📊 ESTADO DE CUENTA: Juan Torres\nPresupuesto: PRE-2026-6509\nTotal: 1149.5€\nCobra"
+    }
+  ],
+  "financialConsistency": []
+}

@@ -10,6 +10,12 @@ export class PresuVozGenerator {
    * @returns {string} HTML renderizable
    */
   static generateHTML(budget) {
+    budget = JSON.parse(JSON.stringify(budget, (_key, value) => typeof value === 'string'
+      ? value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character])
+      : value));
+    budget.company.brandColor = /^#[0-9a-f]{6}$/i.test(String(budget.company.brandColor || ''))
+      ? budget.company.brandColor
+      : '#1e40af';
     const itemsRows = budget.items.map(item => {
       const isPending = item.isPricePending || item.total === 0;
       const unitPriceDisplay = isPending 
@@ -210,12 +216,12 @@ export class PresuVozGenerator {
 
           <div class="sig-line flex items-end pb-2 mb-2">
             <div class="border border-dashed border-slate-300 rounded-lg p-3 w-full text-center">
-              <p class="text-[9px] uppercase tracking-widest font-bold text-slate-400">Sello y firma digital</p>
+              <p class="text-[9px] uppercase tracking-widest font-bold text-slate-400">Datos del emisor</p>
               <p class="text-xs font-bold text-slate-700 mt-1">${budget.company.name}</p>
               <p class="text-[10px] text-slate-400">CIF: ${budget.company.cif}</p>
               <div class="mt-1.5 inline-flex items-center gap-1 text-emerald-600">
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
-                <span class="text-[9px] font-bold uppercase tracking-wider">Emitido y sellado</span>
+                <span class="text-[9px] font-bold uppercase tracking-wider">Emisor del presupuesto</span>
               </div>
             </div>
           </div>
@@ -224,7 +230,7 @@ export class PresuVozGenerator {
           <p class="text-[10px] text-slate-400">${budget.issueDate}</p>
         </div>
 
-        <!-- Client signature (interactive) -->
+        <!-- Client acceptance is collected through the signed WhatsApp link -->
         <div>
           <div class="flex items-start justify-between mb-1">
             <div>
@@ -237,20 +243,20 @@ export class PresuVozGenerator {
           <div class="relative border border-slate-200 rounded-lg overflow-hidden bg-slate-50 mb-2">
             <canvas id="signatureCanvas" height="80" style="width: 100%; height: 80px; display: block;"></canvas>
             <div id="signPlaceholder" class="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <p class="text-[11px] text-slate-400 select-none">Firma aquí con el ratón o el dedo</p>
+              <p class="text-[11px] text-slate-400 select-none">Vista previa: la aceptación se registra desde el enlace de WhatsApp</p>
             </div>
           </div>
 
           <div id="signSuccessBox" class="hidden mb-3 p-2 bg-emerald-50 border border-emerald-200 rounded-lg">
             <div class="flex items-center gap-1.5 text-emerald-700 text-[11px] font-semibold">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
-              Contrato aceptado y sellado
+              Aceptación registrada desde el enlace de WhatsApp
             </div>
             <p id="signTimestamp" class="text-[10px] text-emerald-600 mt-0.5"></p>
           </div>
 
           <button type="button" onclick="confirmSign()" id="signBtn" class="no-print w-full bg-slate-900 hover:bg-slate-800 text-white font-semibold py-2.5 rounded-lg text-xs transition-colors cursor-pointer">
-            Confirmar y firmar presupuesto
+            Firmar desde el enlace de WhatsApp
           </button>
         </div>
 
@@ -260,12 +266,12 @@ export class PresuVozGenerator {
     <!-- Legal footer -->
     <div class="px-8 py-5 bg-slate-50 border-t border-slate-100">
       <p class="text-[10px] text-slate-400 leading-relaxed">
-        Al formalizar la firma, ambas partes aceptan las condiciones de este contrato de arrendamiento de obra conforme al Código Civil español (art. 1.542 y ss.). La firma electrónica tiene plena validez jurídica bajo el Reglamento Europeo eIDAS (Reg. UE 910/2014). Se remitirá copia certificada sellada con hash verificable a <span class="text-slate-500">${budget.company.email}</span> y a <span class="text-slate-500">${budget.client.email || 'correo@cliente.com'}</span>. En cumplimiento del RGPD, los datos del presente documento se tratan exclusivamente con la finalidad de ejecución de este contrato.
+        Esta es una vista previa del presupuesto. La aceptación se registra por separado mediante el enlace enviado por WhatsApp. Los efectos jurídicos dependen de las circunstancias y evidencias de cada operación.
       </p>
       <div class="mt-3 flex items-center gap-4 text-[10px] text-slate-400">
         <span>Generado por PresuVoz · presuvoz.app</span>
         <span class="text-slate-300">&middot;</span>
-        <span>Ref. firma: <span class="font-mono">${budget.signUrl}</span></span>
+        <span>Ref. presupuesto: <span class="font-mono">${budget.id}</span></span>
       </div>
     </div>
 
@@ -339,25 +345,7 @@ export class PresuVozGenerator {
     }
 
     function confirmSign() {
-      if (!hasDrawn) {
-        alert('Por favor, dibuja tu firma en el recuadro antes de continuar.');
-        return;
-      }
-      const now = new Date();
-      const ts = now.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }) +
-                 ' a las ' + now.toLocaleTimeString('es-ES');
-
-      document.getElementById('signTimestamp').textContent = 'Sellado el ' + ts + ' · IP verificada';
-      document.getElementById('signSuccessBox').classList.remove('hidden');
-
-      const btn = document.getElementById('signBtn');
-      btn.textContent = 'Firmado';
-      btn.disabled = true;
-      btn.className = 'no-print w-full bg-slate-200 text-slate-400 font-semibold py-2.5 rounded-lg text-xs cursor-not-allowed';
-
-      const pill = document.getElementById('statusPill');
-      pill.textContent = 'Firmado digitalmente';
-      pill.className = 'text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg';
+      alert('Esta vista previa no registra firmas. Usa el enlace de firma enviado por el bot de WhatsApp.');
     }
 
     window.addEventListener('load', initCanvas);

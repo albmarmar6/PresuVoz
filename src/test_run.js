@@ -65,7 +65,7 @@ console.log(`• Base Imponible:        ${processedBudget.financials.subtotal.to
 console.log(`• Cuota de IVA:          ${processedBudget.financials.taxAmount.toFixed(2)} €`);
 console.log(`• TOTAL DEL PRESUPUESTO: ${processedBudget.financials.totalAmount.toFixed(2)} €`);
 console.log(`• Anticipo requerido:    ${processedBudget.financials.advancePercentage}% (${processedBudget.financials.advanceAmount.toFixed(2)} €)`);
-console.log(`• Enlace Firma Cliente:  ${processedBudget.signUrl}`);
+console.log('• Enlace de firma: se genera al enviar el presupuesto desde WhatsApp.');
 console.log("----------------------------------------------------------\n");
 
 // 4. Generar el documento visual interactivo

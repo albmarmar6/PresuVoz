@@ -80,7 +80,9 @@ export class PresuVozParser {
       formal: "Albañilería general, redistribución de tabiquería, trasdosados de pladur y recrecido autonivelante de suelos"
     },
     {
-      regex: /(?:fontaner[ií]a\s+y\s+saneamiento|saneamiento|multicapa|polietileno\s*reticulado|red\s*(?:completa)?\s*(?:de\s+agua)?)/i,
+      // 'red' debe ser palabra independiente: sin \b coincidía dentro de 'paredes'
+      // y convertía cualquier descripción que las mencionase en fontanería.
+      regex: /(?:fontaner[ií]a\s+y\s+saneamiento|saneamiento|multicapa|polietileno\s*reticulado|\bred\s*(?:completa)?\s*(?:de\s+agua)?)/i,
       formal: "Instalación integral de fontanería y saneamiento con red de tubería multicapa / polietileno reticulado y desagües"
     },
     {

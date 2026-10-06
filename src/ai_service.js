@@ -8,7 +8,7 @@
  *   const aiResult = await parseTranscriptWithGemini("oye para Don Rodrigo en calle Alcalá...");
  */
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -24,12 +24,13 @@ REGLAS CRÍTICAS (cumplirlas sin excepción):
 2. IGNORA completamente: saludos, despedidas, muletillas ("eh", "mmm", "bueno", "sinceramente"), anécdotas, explicaciones y la expresión "y ya está".
 3. "y ya está" NO es una partida técnica. No la incluyas.
 4. Rangos de precio ("de 4.500 a 6.000 €", "entre 4.000 y 5.500 €", "4.500 7.500 euros"): usa SIEMPRE el valor MÁXIMO.
-5. Errores fonéticos de Whisper (ej: "4.205.000 €" para una fontanería → imposible, corrígelo al valor razonable, ej: 5.000 €). Detecta precios irracionales para el tipo de obra.
-6. Usa descripciones TÉCNICAS FORMALES en español de presupuesto de obra (no las palabras exactas del audio).
-7. Sin precio → unitPrice: 0, isPricePending: true.
-8. IVA: 10 para vivienda habitual / piso / baño / cocina particular. 21 para local comercial / nave / oficina.
+5. No inventes ni "corrijas" importes. Si un precio parece irracional o el audio no permite distinguirlo, pon unitPrice: 0, isPricePending: true y explica la duda en warnings para pedir confirmación.
+6. Redacta en español técnico claro, pero conserva exactamente el tipo de trabajo y el alcance que describe el profesional. No sustituyas suministro por reparación, reparación por instalación, ni añadas desmontajes, ajustes, herrajes o trabajos no dictados.
+7. Sin precio explícito → unitPrice: 0, isPricePending: true. Nunca estimes precios de mercado ni completes importes por intuición.
+8. No determines el tipo de IVA por el oficio, estancia o tipo de inmueble. Devuelve el tipo solo si el profesional lo indica expresamente; en caso contrario usa null. La aplicación aplicará el tipo configurado por la empresa y deberá revisarse antes de emitir.
 9. Incoherencia geográfica (pueblo que no existe en la provincia mencionada) → añade aviso en warnings.
 10. El assistantFeedback debe ser un mensaje corto y profesional en español para el instalador.
+11. Para paymentTerms, usa el porcentaje/plazo que el profesional indique o los valores del perfil de empresa incluido en el contexto. Si no hay ninguno, devuelve null; no inventes un anticipo ni una validez.
 
 UNIDADES:
 - "m²" → superficies (alicatado, pintura, solado, pladur)
@@ -56,8 +57,16 @@ EJEMPLOS DE DESCRIPCIONES TÉCNICAS FORMALES:
 - electricidad/REBT/RBT → "Instalación eléctrica según REBT: cuadro general de mando y protección, circuitos, mecanismos y tomas de corriente"
 - alicatados/gresporcelánico → "Suministro y colocación de alicatados y solados en gres porcelánico de primera calidad con adhesivo C2TE y rejuntado"
 - pintura → "Preparación de paramentos, emplastecido y aplicación de pintura plástica lisa de alta cubrición en techos y paredes"
-- carpintería/puertas → "Revisión, ajuste y sustitución de carpintería interior: puertas de paso, marcos y manivelas"
+- "puerta de paso de 62 semimaciza totalmente terminada" → "Puerta de paso semimaciza de 62 cm, totalmente terminada". No la conviertas en una reparación ni añadas ajuste, cepillado o cambio de manivelas salvo que el profesional lo pida expresamente.
+- "3 puertas de paso de 72 semimaciza totalmente terminada" → "Puerta de paso semimaciza de 72 cm, totalmente terminada" con qty: 3. No inventes reparación, herrajes ni instalación.
+- "Ventana aluminio blanco corredera, persiana, climalit de 1,10 x 1,22" → "Ventana corredera de aluminio blanco con persiana y acristalamiento tipo Climalit, dimensiones 1,10 × 1,22 m". No la sustituyas por climatización ni añadas instalación si no se ha dictado.
 - reforma integral → "Reforma integral de vivienda: demolición, distribución, instalaciones, acabados y carpintería"
+
+CONTROL DE ALCANCE Y DUPLICADOS:
+- Mantén una correspondencia fiel entre cada trabajo dictado y cada objeto de items. No añadas elementos basándote en usos habituales del oficio.
+- En cada partida nueva incluye 'sourcePhrase' con la frase original literal del profesional que justifica esa partida. La descripción debe conservar los términos técnicos distintivos de esa frase (producto, material, medida y acabado). No inventes la frase original.
+- No dupliques una partida ni la dividas en varias con la misma descripción, salvo que el profesional haya dictado trabajos separados de forma inequívoca.
+- Cantidad por defecto: 1. No inventes unidades, cantidades ni precios.
 
 FORMATO DE RESPUESTA (JSON estricto, sin texto adicional):
 {
@@ -73,15 +82,37 @@ FORMATO DE RESPUESTA (JSON estricto, sin texto adicional):
     }
   ],
   "discount": null,
-  "taxRate": 10,
-  "paymentTerms": { "advancePercentage": 30, "validityDays": 15 },
+  "taxRate": null,
+  "paymentTerms": null,
   "warnings": [],
   "isDraftMode": false,
   "assistantFeedback": "Mensaje breve en español para el instalador confirmando el presupuesto o pidiendo información"
 }`;
 
+export const GEMINI_TRANSCRIPT_BUDGET_PROMPT = `Convierte la transcripción literal de un profesional en partidas de presupuesto. Devuelve únicamente JSON válido con este esquema: {"clientName":string|null,"clientAddress":string|null,"items":[{"sourcePhrase":string,"description":string,"qty":number,"unit":"ud"|"m²"|"ml"|"pa"|"h","unitPrice":number,"isPricePending":boolean}],"discount":null,"taxRate":null,"paymentTerms":null,"warnings":[],"isDraftMode":boolean,"assistantFeedback":string}.
+
+REGLAS OBLIGATORIAS:
+- Esta entrada es una transcripción; no hay historial de otras obras. Usa solo lo que aparece en ella. No añadas ninguna partida por oficio, costumbre, contexto o conocimiento propio.
+- Crea una partida por cada trabajo mencionado. Mantén producto/trabajo, material, tipo, acabado y dimensiones. Puedes corregir gramática y darle formato técnico breve, pero no cambiar su significado ni alcance.
+- 'sourcePhrase' debe ser el fragmento literal más corto que nombra el trabajo y sus características; omite introducciones, cantidades, precios y contexto hablado. 'description' debe conservar los términos distintivos de ese fragmento.
+- Conserva cantidades y medidas explícitas. Si hay cantidad sin unidad, usa 'ud' para elementos contables y 'pa' para trabajos globales.
+- Extrae únicamente precios o porcentajes expresamente pronunciados. Si se da un precio total para una partida agrupada con cantidad explícita, calcula el precio unitario por división exacta, sin alterar el total de la partida. No inventes precios ni repartas importes entre trabajos diferentes; si el importe no se puede asignar con certeza, marca isPricePending=true y unitPrice=0.
+- No emitas el texto del JSON de ejemplo como partida. Si una parte no se entiende, conserva la frase reconocible y añade un aviso breve, sin reemplazarla por otro producto o trabajo.`;
+
+export function isLikelyBudgetTranscript(text = '') {
+  const value = String(text || '').toLowerCase();
+  if (/\b(?:agenda|cita|visita|factura|facturar|cobro|me\s+ha\s+pagado|lista\s+de\s+la\s+compra|comprar|compr[eé]|gestor[ií]a|exportar|cancelar|anular|qu[eé]\s+falta|c[oó]mo\s+va\s+la\s+obra|estado\s+de\s+la\s+obra|presupuestos?\s+(?:pendientes|firmados|aceptados))\b/i.test(value)) return false;
+  return /\b(?:presupuesto|partida|demolici[oó]n|tabique|alicatado|solado|fontaner[ií]a|electricidad|pintura|pintar|puertas?|ventanas?|carpinter[ií]a|sanitarios?|grifer[ií]a|tuber[ií]a|instalaci[oó]n|reforma|paredes?|techos?|suelo|mueble|persiana|metros?|m[²2]|climalit|euros?|€)\b/i.test(value);
+}
+
+export function isExplicitNewBudgetTranscript(text = '') {
+  return /\b(?:nuevo\s+presupuesto|presupuesto\s+nuevo|hacer\s+un\s+nuevo\s+presupuesto|empezar\s+un\s+nuevo\s+presupuesto)\b/i.test(String(text || ''));
+}
+
 export const GEMINI_UPDATE_PROMPT = `Eres un asistente inteligente de gestión de presupuestos, facturación y cobros para profesionales de la construcción en España.
 Se te proporciona el contexto de los presupuestos guardados del profesional y el nuevo mensaje o audio recibido.
+
+FUENTE DE VERDAD PARA EL MENSAJE NUEVO: usa exclusivamente las palabras del mensaje/transcripción actual para decidir qué trabajos, materiales, cantidades y precios se han pedido. El contexto de presupuestos previos sirve para identificar el presupuesto que se modifica y conservar datos que no cambian; nunca copies partidas antiguas como si se hubieran dictado ahora ni sustituyas materiales mencionados por otros trabajos típicos del oficio. Si el mensaje es una transcripción literal, conserva sus sustantivos técnicos, medidas y cantidades en cada partida. Ante una frase de material ambigua o que no se entienda, pregunta; no la conviertas en otro producto.
 
 Tu función es:
 1. DETECCIÓN DE INTENCIÓN Y DESTINO:
@@ -127,7 +158,7 @@ Tu función es:
       pon 'action: "add_shopping_items"', si menciona cliente o la obra de alguien rellena 'clientName': "Carlos", y rellena 'shoppingItems': [ { "description": "azulejo gris", "qty": 14, "unit": "m²", "clientName": "Carlos" }, ... ].
     - CONSULTAR LISTA DE MATERIALES / COMPRAS: Si el profesional pregunta qué tiene que comprar o pide ver la lista (ej: "¿qué materiales tengo que comprar?", "¿qué tengo que comprar para Carlos?", "lista de la compra", "materiales pendientes de Alberto", "qué tengo que comprar"):
       pon 'action: "list_shopping_items"' y si menciona un cliente concreto pon 'clientName': "Carlos" (o null si pide la lista general de todas las obras).
-    - MARCAR MATERIALES COMO COMPRADOS: Si indica que ya compró algo o pide tacharlo (ej: "ya he comprado el cemento de Carlos", "tacha el azulejo gris", "comprado cemento cola"):
+    - MARCAR MATERIALES COMO COMPRADOS: Si indica que ya compró algo o pide tacharlo (ej: "ya he comprado el cemento de Carlos", "tacha el azulejo gris", "comprado cemento cola"). Si dice que compró todo lo de una o varias obras/clientes, usa 'mark_shopping_items' y conserva todos los nombres de clientes; NUNCA lo interpretes como vaciar/borrar la lista:
       pon 'action: "mark_shopping_items"', rellena 'shoppingQuery': "cemento cola" y 'clientName': "Carlos" si lo menciona.
     - MODO OBRA / CONSULTAR ESTADO O QUÉ FALTA EN UNA OBRA: Si el profesional pregunta por el estado de una obra, cómo va o qué le falta por hacer/comprar (ej: "¿qué nos falta en la obra de Juan?", "¿qué falta en la obra de Juan?", "modo obra Juan", "estado de la obra de Carlos", "cómo va la obra de Alberto", "ficha de obra de Juan"):
       pon 'action: "query_work_status"', rellena 'clientName': "Juan", y si pregunta explícitamente qué falta pon 'onlyMissing': true (o false si pide el estado general).
@@ -137,7 +168,7 @@ Tu función es:
       pon 'action: "update_work_dates"', rellena 'clientName': "Juan", 'startDate': "2 de septiembre", 'estimatedEndDate': "15 de octubre".
     - FACTURA RECIBIDA / GASTO / COMPRA DE MATERIAL: Si el profesional describe una compra de material, ticket de gasto o factura de proveedor (ej: "he comprado 40 sacos de cemento en Bricomart por 242€ factura F-9923 CIF A12345678", "apunta gasto de 50€ de gasolina", "factura de proveedor Salvador Escoda 300€ mas IVA"):
       pon 'action: "purchase_invoice"' y rellena 'purchaseInvoiceInfo': { "supplierName": "...", "supplierTaxId": "...", "invoiceNumber": "...", "issueDate": "YYYY-MM-DD", "category": "MATERIALES|COMBUSTIBLE|HERRAMIENTAS|SUBCONTRATA|VARIOS", "totalAmount": 242, "taxBase": 200, "vatRate": 21, "vatAmount": 42, "description": "..." }.
-    - VACIAR O BORRAR LISTA DE COMPRAS: Si pide borrar o vaciar la lista (ej: "borrar lista de la compra", "vaciar compras", "limpiar lista"):
+    - VACIAR O BORRAR LISTA DE COMPRAS: Solo si pide explícitamente borrar/vaciar la lista completa (ej: "vacía la lista de la compra", "borra todos los materiales de mi lista"). Decir que ha comprado todo para una obra significa marcar esos materiales como comprados, NO borrar la lista:
       pon 'action: "clear_shopping_list"'.
    - Si el profesional menciona un cliente o número concreto para modificar un presupuesto (ej: "en el de José Luis...", "en el 8629..."):
      pon 'action: "budget"' y selecciona ese presupuesto como 'targetBudgetId'.
@@ -146,8 +177,12 @@ Tu función es:
    - Si describe una obra COMPLETAMENTE NUEVA para otro cliente que no guarda relación con los anteriores:
      pon 'action: "budget"', 'isNewBudget: true' y 'targetBudgetId: null'.
 
-2. REGLAS DE ACTUALIZACIÓN DE PARTIDAS (cuando action es "budget"):
-   - VALORACIÓN: Asigna precios ('unitPrice') y pon 'isPricePending: false'.
+2. REGLAS DE CREACIÓN Y ACTUALIZACIÓN DE PARTIDAS (cuando action es "budget"):
+   - FIDELIDAD AL DICTADO: transforma la redacción a formato técnico sin cambiar el trabajo descrito. No supongas que una puerta se repara, se instala o se sustituye si el audio no lo dice. No añadas materiales, desmontajes, ajustes, herrajes ni remates implícitos.
+   - CONSERVACIÓN DE LOS TÉRMINOS: conserva en la descripción cada elemento que diferencia el trabajo dictado (producto, material, apertura/tipo, acabado y medidas). Ejemplo: "ventana aluminio blanco corredera, persiana, climalit" sigue siendo una ventana corredera con persiana y acristalamiento; nunca la conviertas en un split de aire acondicionado.
+   - CANTIDADES Y PRECIOS: usa solo cantidades e importes explícitos del mensaje o los datos ya guardados. Si no se entiende con certeza un importe, déjalo pendiente y pide confirmación; nunca lo inventes ni lo "corrijas" por parecer raro.
+   - PARTIDAS DUPLICADAS: no repitas ni dividas una partida con el mismo alcance, salvo que el profesional haya descrito trabajos distintos de forma inequívoca.
+   - VALORACIÓN: Marca 'isPricePending: false' solo cuando exista un importe explícito y fiable; en otro caso usa 'unitPrice: 0' e 'isPricePending: true'.
    - REGLA DE ORO DE DESCRIPCIONES: CONSERVA SIEMPRE LAS DESCRIPCIONES TÉCNICAS ORIGINALES COMPLETAS de las partidas existentes. Está TERMINANTEMENTE PROHIBIDO sustituirlas por textos genéricos como "Partida 1 según valoración previa" o similares.
    - Si pide modificar dirección, cliente o forma de pago, actualiza esos campos.
    - Si añade nuevos trabajos, agrégalos a 'items' con redacción técnica formal en español.
@@ -241,6 +276,7 @@ FORMATO DE RESPUESTA (JSON estricto):
   },
   "items": [
     {
+      "sourcePhrase": "fragmento literal del mensaje que origina esta partida",
       "description": "Descripción técnica detallada original",
       "qty": 1,
       "unit": "pa",
@@ -249,8 +285,8 @@ FORMATO DE RESPUESTA (JSON estricto):
     }
   ],
   "discount": null,
-  "taxRate": 10,
-  "paymentTerms": { "advancePercentage": 30, "validityDays": 15 },
+  "taxRate": null,
+  "paymentTerms": null,
   "warnings": [],
   "isDraftMode": false,
   "assistantFeedback": "Confirmación breve en español para el profesional"
@@ -285,7 +321,7 @@ export async function callGeminiAPI(userPrompt, systemInstruction, apiKey) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(12000)
+    signal: AbortSignal.timeout(18000)
   });
 
   if (!response.ok) {
@@ -332,7 +368,7 @@ export async function updateBudgetWithGemini(currentBudget, userMessage, apiKey)
       unitPrice: i.unitPrice,
       isPricePending: i.isPricePending
     })),
-    taxRate: currentBudget.financials?.taxRatePercentage || 10,
+    taxRate: currentBudget.financials?.taxRatePercentage ?? 21,
     discount: currentBudget.financials?.discountPercentage > 0
       ? { type: 'percentage', value: currentBudget.financials.discountPercentage }
       : null
@@ -447,7 +483,7 @@ export async function callGeminiMultimodal({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(18000)
+    signal: AbortSignal.timeout(25000)
   });
 
   if (!response.ok) {
@@ -554,4 +590,3 @@ export function validateAndNormalizePurchaseInvoice(raw, businessId, attachmentP
     assistantFeedback: raw.assistantFeedback
   };
 }
-

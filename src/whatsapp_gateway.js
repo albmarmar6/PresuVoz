@@ -16,11 +16,15 @@ import pino from 'pino';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { createHmac } from 'node:crypto';
 import dotenv from 'dotenv';
 import { Resend } from 'resend';
 import { PresuVozEngine } from './engine.js';
 import {
   GEMINI_SYSTEM_PROMPT,
+  GEMINI_TRANSCRIPT_BUDGET_PROMPT,
+  isLikelyBudgetTranscript,
+  isExplicitNewBudgetTranscript,
   GEMINI_UPDATE_PROMPT,
   parsePurchaseInvoiceWithGemini,
   validateAndNormalizePurchaseInvoice
@@ -79,6 +83,7 @@ import {
   addShoppingItems,
   listShoppingItems,
   markShoppingItemBought,
+  markShoppingItemsBoughtForClients,
   clearShoppingList,
   getWorkMemory,
   updateWorkTaskStatus,
@@ -113,6 +118,60 @@ import { detectIntent, resolveIntent } from './intent_router.js';
 
 dotenv.config();
 
+export function parseBoughtAllShoppingForClients(text = '') {
+  const match = String(text).match(/\b(?:ya\s+)?(?:he|hemos)\s+comprado\s+todo\s+lo\s+de\s+(?:la\s+)?obra\s+de\s+(.+?)[.!?]*$/i);
+  if (!match) return [];
+  return [...new Set(match[1]
+    .replace(/\s+(?:y|,)\s+(?:(?:de\s+)?(?:(?:la\s+)?obra\s+de\s+))?/gi, '|')
+    .split('|')
+    .map(name => name.replace(/[.!?]+$/g, '').replace(/^(?:de\s+(?:la\s+)?obra\s+de|de)\s+/i, '').trim())
+    .filter(name => name && name.length <= 100))];
+}
+
+export function findUngroundedAudioItems(transcript = '', items = [], existingDescriptions = []) {
+  const normalize = value => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const tokens = value => (normalize(value).match(/\d+(?:[.,]\d+)?|[a-zñ]+/g) || []).map(token => {
+    if (token === 'pintar') return 'pintura';
+    return token.length > 4 && token.endsWith('s') ? token.slice(0, -1) : token;
+  });
+  const ignored = new Set(['para', 'todo', 'toda', 'necesito', 'quiero', 'pon', 'poner', 'hacer', 'obra', 'trabajo', 'trabajos', 'unidad', 'unidades', 'medida', 'medidas', 'totalmente', 'terminada', 'terminado', 'terminadas', 'terminados', 'completa', 'completo', 'completamente', 'la', 'las', 'el', 'los', 'de', 'del', 'y', 'con', 'en', 'por', 'una', 'uno', 'unos', 'unas', 'que', 'es', 'ser', 'sean', 'son', 'tenga', 'tengan', 'tiene', 'tienen', 'su', 'a', 'al', 'precio', 'importe', 'coste', 'costar', 'euros', 'euro', 'vale', 'valer', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve', 'diez', 'habitación', 'pasar', 'queremos', 'cambiar', 'cambio', 'necesidad', 'suministro', 'instalación', 'montaje', 'ejecución', 'trabajo', 'realización', 'aplicación', 'sustitución'].map(normalize));
+  const transcriptTokens = new Set(tokens(transcript));
+  return (Array.isArray(items) ? items : []).flatMap((item, index) => {
+    const sourcePhrase = String(item?.sourcePhrase || '').trim();
+    const description = String(item?.description || '').trim();
+    if (!sourcePhrase || !description) {
+      if (!sourcePhrase && existingDescriptions.some(existing => normalize(existing) === normalize(description))) return [];
+      return [{ index, sourcePhrase, description, missing: [!sourcePhrase ? 'falta sourcePhrase' : 'falta description'] }];
+    }
+    const scopePhrase = sourcePhrase
+      .replace(/\b(?:por|a)\s+(?:un\s+)?(?:el\s+)?(?:precio|importe|coste|total)\s+(?:de\s+)?[\d.,]+\s*(?:€|euros?)?.*$/i, '')
+      .replace(/\b(?:por|a)\s+(?:unos?\s+)?[\d.,]+\s*(?:€|euros?).*$/i, '');
+    const sourceTerms = [...new Set(tokens(scopePhrase).filter(token => !ignored.has(token) && (token.length >= 4 || /^\d/.test(token))))];
+    const missingFromTranscript = sourceTerms.filter(token => !transcriptTokens.has(token));
+    const descriptionTokens = new Set(tokens(description));
+    const unsupportedDescriptionTerms = [...descriptionTokens].filter(token =>
+      !ignored.has(token) && !transcriptTokens.has(token) && (token.length >= 4 || /^\d/.test(token))
+    );
+    const missing = [...new Set([
+      ...missingFromTranscript.map(token => `transcripción:${token}`),
+      ...unsupportedDescriptionTerms.map(token => `partida sin respaldo:${token}`)
+    ])];
+    return missing.length ? [{ index, sourcePhrase, description, missing }] : [];
+  });
+}
+
+export function professionalizeAudioSourcePhrase(sourcePhrase = '') {
+  let description = String(sourcePhrase || '').trim()
+    .replace(/\b(?:por|a)\s+(?:un\s+)?(?:el\s+)?(?:precio|importe|coste|total)\s+(?:de\s+)?[\d.,]+\s*(?:€|euros?)?.*$/i, '')
+    .replace(/\b(?:por|a)\s+(?:unos?\s+)?[\d.,]+\s*(?:€|euros?).*$/i, '')
+    .replace(/^(?:(?:necesito|quiero|pon(?:me)?|ser[ií]an|ser[ií]a|vamos\s+a\s+(?:poner|hacer))\s+)/i, '')
+    .replace(/^(?:un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s+/i, '')
+    .replace(/[\s,;:.-]+$/g, '')
+    .trim();
+  if (!description) return '';
+  return description.charAt(0).toLocaleUpperCase('es-ES') + description.slice(1);
+}
+
 // Silenciar volcados internos de depuración de claves criptográficas de libsignal (Signal Protocol)
 const _origInfo = console.info;
 console.info = (...args) => {
@@ -142,14 +201,8 @@ const ALLOWED_NUMBERS = (process.env.ALLOWED_NUMBERS || '')
   .map(s => s.trim().replace(/\D/g, ''))
   .filter(Boolean);
 
-const GEMINI_MODELS = [
-  'gemini-3-flash-preview',
-  'gemini-flash-lite-latest',
-  'gemini-3.6-flash',
-  'gemini-3.5-flash-lite',
-  'gemini-3.7-flash',
-  'gemini-3.8-flash'
-];
+// Fallback de menor coste para ráfagas de saturación del modelo principal.
+const GEMINI_MODELS = [...new Set([process.env.GEMINI_MODEL || 'gemini-3.8-flash', 'gemini-3.5-flash-lite'])];
 
 // Almacén en memoria de mensajes de WhatsApp para responder a solicitudes 'retry' (evita 'Esperando mensaje')
 const messageStore = new Map();
@@ -459,7 +512,7 @@ function storeMessage(keyId, message) {
  * 3. Mensajes entrantes de terceros (!fromMe): SOLO se procesan si el remitente está
  *    explícitamente en ALLOWED_NUMBERS (ej. familiares/testers para sus pruebas). Contactos ajenos se descartan.
  */
-export function shouldProcessIncomingMessage({ remoteJid, fromMe, myNumber, myLid, allowedNumbers = [] }) {
+export function shouldProcessIncomingMessage({ remoteJid, fromMe, myNumber, myLid, remotePhone, allowedNumbers = [] }) {
   if (!remoteJid || typeof remoteJid !== 'string') {
     return { process: false, reason: 'INVALID_JID' };
   }
@@ -471,11 +524,11 @@ export function shouldProcessIncomingMessage({ remoteJid, fromMe, myNumber, myLi
 
   const cleanMyNum = String(myNumber || '').replace(/\D/g, '');
   const cleanMyLid = String(myLid || '').replace(/\D/g, '');
-  const remoteUser = remoteJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+  const remoteUser = String(remotePhone || remoteJid.split('@')[0]).split(':')[0].replace(/\D/g, '');
   const isFromMe = Boolean(fromMe);
 
   // 2. Comprobar si es Self-Chat (chat consigo mismo por número de teléfono o LID propio)
-  const isSelfChat = isFromMe && (
+  const isSelfChat = (
     (cleanMyNum && remoteUser === cleanMyNum) ||
     (cleanMyLid && remoteUser === cleanMyLid)
   );
@@ -634,7 +687,7 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
             maxOutputTokens: 2048
           }
         }),
-        signal: AbortSignal.timeout(12000)
+        signal: AbortSignal.timeout(18000)
       });
 
       const data = await response.json().catch(() => ({}));
@@ -645,7 +698,9 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
         // Priorizar errores de cuota o alta demanda (429/503) para activar correctamente la cola stand-by
         if (response.status === 429 || response.status === 503 || /demand|quota|busy|exhausted/i.test(errMsg)) {
           lastError = new Error(`Servidores de Gemini saturados (${response.status}: ${errMsg.substring(0, 100)})`);
-          await new Promise(r => setTimeout(r, 1000));
+        // Un cambio de modelo puede aliviar saturación puntual; backoff evita golpear
+        // continuamente a Google si el servicio completo está degradado.
+        await new Promise(r => setTimeout(r, 1500));
         } else if (!lastError || !/demand|quota|busy|exhausted|429|503/i.test(lastError.message)) {
           lastError = new Error(errMsg);
         }
@@ -660,8 +715,8 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
     } catch (e) {
       const isTimeout = e.name === 'TimeoutError' || /timeout|aborted/i.test(e.message || '');
       if (isTimeout) {
-        console.warn(`PresuVoz ⚠ Modelo "${model}" agotó tiempo de espera (12s sin respuesta)`);
-        lastError = new Error('Servidores de Gemini saturados (timeout: modelo no respondió en 12s)');
+        console.warn(`PresuVoz ⚠ Modelo "${model}" agotó tiempo de espera (18s sin respuesta)`);
+        lastError = new Error('Gemini no respondió dentro del tiempo límite (18s); se probará el modelo estable alternativo.');
       } else {
         console.warn(`PresuVoz ⚠ Error con modelo "${model}":`, e.message);
         if (!lastError || !/demand|quota|busy|exhausted|429|503/i.test(lastError.message)) {
@@ -672,6 +727,22 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
   }
 
   throw lastError || new Error('No se pudo conectar con ningún modelo de Gemini');
+}
+
+export function findDuplicateBudgetItemGroups(items = []) {
+  const groups = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    const key = String(item?.description || '')
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  return [...groups.values()].filter(group => group.length > 1);
 }
 
 function formatBudgetForWhatsApp(budget, warnings = []) {
@@ -844,7 +915,12 @@ function generateSigningUrl(budget, company, cleanPhone) {
 
   const compressed = zlib.deflateRawSync(Buffer.from(JSON.stringify(compactBudget), 'utf-8'));
   const budgetZ = compressed.toString('base64url');
-  return `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z=${budgetZ}`;
+  const signingSecret = process.env.PRESUVOZ_SIGNING_SECRET;
+  if (!signingSecret || signingSecret.length < 32) {
+    throw new Error('La firma electrónica no está configurada. Define PRESUVOZ_SIGNING_SECRET (mínimo 32 caracteres) en el gateway y en Vercel.');
+  }
+  const proof = createHmac('sha256', signingSecret).update(budgetZ).digest('base64url');
+  return `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z=${budgetZ}&s=${proof}`;
 }
 
 function detectBudgetListIntent(text) {
@@ -3065,6 +3141,15 @@ async function startWhatsAppGateway() {
       if (sentSig?.key?.id) botSentMessageIds.add(sentSig.key.id);
     } catch (err) {
       console.error('❌ Error generando enlace de firma:', err.message);
+      const userMessage = /PRESUVOZ_SIGNING_SECRET/i.test(err.message)
+        ? '⚠️ La firma digital todavía no está configurada en el servidor. El presupuesto y su PDF siguen disponibles; pide al administrador que configure la clave de firma.'
+        : `⚠️ No pude generar el enlace de firma: ${err.message}`;
+      try {
+        const sentErr = await sock.sendMessage(remoteJid, { text: userMessage });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      } catch (sendErr) {
+        console.error('❌ Tampoco se pudo notificar el fallo del enlace:', sendErr.message);
+      }
     }
   }
 
@@ -3087,7 +3172,7 @@ async function startWhatsAppGateway() {
         unitPrice: i.unitPrice,
         isPricePending: i.isPricePending
       })),
-      taxRate: b.financials?.taxRatePercentage || 10,
+      taxRate: b.financials?.taxRatePercentage ?? 21,
       discount: b.financials?.discountPercentage > 0 ? { type: 'percentage', value: b.financials.discountPercentage } : null
     }));
 
@@ -3099,7 +3184,11 @@ async function startWhatsAppGateway() {
       phone: session.company?.phone,
       email: session.company?.email,
       iban: session.company?.iban,
-      bizum: session.company?.bizum
+      bizum: session.company?.bizum,
+      defaultTaxRate: session.company?.defaultTaxRate,
+      defaultAdvance: session.company?.defaultAdvance,
+      quoteValidityDays: session.company?.quoteValidityDays,
+      paymentTerms: session.company?.paymentTerms
     };
 
     const nowObj = new Date();
@@ -3112,6 +3201,7 @@ async function startWhatsAppGateway() {
     const contextPrompt = `FECHA Y HORA ACTUAL (utilízala como referencia para resolver días relativos como "hoy", "mañana", "el jueves", etc.):\n${dayName}, ${currentDateStr} (${currentIsoDate}), ${currentTimeStr}\n\nPRESUPUESTOS GUARDADOS EN MEMORIA DEL PROFESIONAL:\n${budgetsList.length > 0 ? JSON.stringify(budgetsList, null, 2) : 'Ninguno todavía'}\n\nPRESUPUESTO ACTIVO ACTUALMENTE: ${session.activeBudgetId || 'Ninguno (modo nuevo cliente)'}\n\nDATOS DE LA EMPRESA DEL PROFESIONAL:\n${JSON.stringify(companyContext, null, 2)}`;
 
     let aiResult;
+    let recognizedUserText = taskData.rawUserText || '';
     if (taskData.isAudio) {
       console.log(`🎙️ Enviando audio a Gemini (${taskData.audioBuffer?.length} bytes)...`);
       if (!isRetry) {
@@ -3122,11 +3212,33 @@ async function startWhatsAppGateway() {
           if (sentAudioNotice?.key?.id) botSentMessageIds.add(sentAudioNotice.key.id);
         } catch (noticeErr) {}
       }
-      aiResult = await callGemini({
+      const transcription = await callGemini({
         audioBuffer: taskData.audioBuffer,
         mimeType: taskData.audioMimeType || 'audio/ogg',
-        promptText: `${contextPrompt}\n\nEl profesional está dictando una nota de voz. Identifica su intención: si es configurar datos de su perfil o empresa (Bizum, IBAN, CIF, nombre comercial, dirección, oficio), consultar datos de empresa, agendar cita/visita, consultar agenda, cancelar cita, registrar cobro, consultar saldo, facturar, factura de anticipo, exportar trimestre, o crear/modificar presupuesto.`
-      }, GEMINI_UPDATE_PROMPT);
+        promptText: 'Transcribe literalmente, en español, todo lo que dice el profesional. No resumas, no corrijas nombres, medidas, materiales ni marcas y no añadas contenido. Devuelve JSON estricto con esta forma: {"transcript":"transcripción literal completa"}.'
+      }, 'Eres un servicio de transcripción literal. No interpretes el contenido ni lo conviertas en presupuesto. Conserva términos técnicos, nombres, cantidades, medidas y orden. Devuelve únicamente JSON válido con la propiedad transcript.');
+      recognizedUserText = typeof transcription?.transcript === 'string' ? transcription.transcript.trim() : '';
+      if (!recognizedUserText) {
+        await sock.sendMessage(remoteJid, { text: '⚠️ No he podido transcribir el audio con suficiente claridad. No he creado ni modificado ningún presupuesto. ¿Puedes repetirlo o enviarme los trabajos por escrito?' });
+        return;
+      }
+      console.log(`🎙️ Transcripción literal obtenida (${recognizedUserText.length} caracteres); extrayendo datos del presupuesto.`);
+      if (isLikelyBudgetTranscript(recognizedUserText)) {
+        console.log('🧾 El audio contiene trabajos de presupuesto; extracción aislada sin ejemplos de otros oficios ni historial de partidas.');
+        aiResult = await callGemini(
+          `TRANSCRIPCIÓN LITERAL DEL PROFESIONAL:\n${recognizedUserText}`,
+          GEMINI_TRANSCRIPT_BUDGET_PROMPT
+        );
+        aiResult.action = 'budget';
+        const explicitNewBudget = isExplicitNewBudgetTranscript(recognizedUserText);
+        aiResult.targetBudgetId = explicitNewBudget ? null : (session.activeBudgetId || null);
+        aiResult.isNewBudget = explicitNewBudget || !session.activeBudgetId;
+      } else {
+        aiResult = await callGemini(
+          `${contextPrompt}\n\nTRANSCRIPCIÓN LITERAL DEL AUDIO (fuente única para los datos nuevos; no la contradigas ni completes con partidas de otros presupuestos):\n${recognizedUserText}`,
+          GEMINI_UPDATE_PROMPT
+        );
+      }
     } else {
       console.log(`\n💬 Enviando texto a Gemini: "${taskData.rawUserText}"`);
       aiResult = await callGemini(
@@ -3488,7 +3600,31 @@ async function startWhatsAppGateway() {
 
     // 16. Vaciar lista de compras (Nivel B: Confirmación simple)
     if (aiResult?.action === 'clear_shopping_list') {
-      await handleClearShoppingList(sock, remoteJid, session);
+      const sourceText = recognizedUserText;
+      const explicitClear = /\b(?:vaciar|limpiar|borrar|eliminar)\b.{0,45}\b(?:lista\s+de\s+(?:la\s+)?compras?|materiales\s+de\s+la\s+compra)\b/i.test(sourceText)
+        || /\b(?:vaciar|limpiar|borrar|eliminar)\s+(?:todos\s+)?(?:los\s+)?materiales\s+de\s+mi\s+lista\b/i.test(sourceText);
+      if (explicitClear) {
+        await handleClearShoppingList(sock, remoteJid, session);
+        return;
+      }
+
+      const boughtClients = parseBoughtAllShoppingForClients(sourceText);
+      if (boughtClients.length) {
+        const tenantContext = session.authContext || { companyId: session.companyId };
+        const updated = markShoppingItemsBoughtForClients(tenantContext, boughtClients);
+        const msg = updated.length
+          ? `✔️ He tachado ${updated.length} material(es) pendiente(s) de ${boughtClients.join(' y ')}. No he vaciado la lista.`
+          : `ℹ️ No encontré materiales pendientes asociados a ${boughtClients.join(' y ')}.`;
+        const sent = await sock.sendMessage(remoteJid, { text: msg });
+        if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+        return;
+      }
+
+      console.warn(`🛑 [Shopping Safety] Rechazada intención de vaciado sin petición explícita: "${sourceText.slice(0, 160)}"`);
+      const sent = await sock.sendMessage(remoteJid, {
+        text: '⚠️ No estoy seguro de que quieras borrar toda la lista. No he cambiado nada. Di explícitamente “vacía la lista de la compra” para borrarla, o dime qué materiales/obras quieres marcar como comprados.'
+      });
+      if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
       return;
     }
 
@@ -3518,10 +3654,79 @@ async function startWhatsAppGateway() {
       return;
     }
 
+    if (taskData.isAudio) {
+      const candidateBudgetId = aiResult.targetBudgetId || session.activeBudgetId;
+      const existingDescriptions = (session.budgets.get(candidateBudgetId)?.items || []).map(item => item.description);
+      let ungroundedItems = findUngroundedAudioItems(recognizedUserText, aiResult.items, existingDescriptions);
+      if (ungroundedItems.length) {
+        console.warn(`⚠️ [Audio grounding] Extracción no respaldada por la transcripción (${ungroundedItems.length} partida(s)); reintentando con la transcripción aislada.`);
+        try {
+          const repaired = await callGemini(
+            `TRANSCRIPCIÓN LITERAL DEL PROFESIONAL (ÚNICA FUENTE):\n${recognizedUserText}\n\nLa extracción previa incluyó partidas sin respaldo literal. Extrae de nuevo cada trabajo nombrado, conserva materiales, medidas, cantidades y precios expresos, y añade sourcePhrase como fragmento literal exacto de esta transcripción. No uses ejemplos ni presupuestos anteriores.`,
+            GEMINI_TRANSCRIPT_BUDGET_PROMPT
+          );
+          const repairedUngrounded = findUngroundedAudioItems(recognizedUserText, repaired?.items || [], existingDescriptions);
+          if (Array.isArray(repaired?.items) && repaired.items.length > 0 && repairedUngrounded.length === 0) {
+            aiResult.items = repaired.items;
+            aiResult.clientName = repaired.clientName || aiResult.clientName;
+            aiResult.clientAddress = repaired.clientAddress || aiResult.clientAddress;
+            aiResult.warnings = [...(aiResult.warnings || []), 'Partidas reextraídas desde la transcripción literal tras detectar una primera extracción no respaldada.'];
+            ungroundedItems = [];
+          }
+        } catch (repairError) {
+          console.warn(`⚠️ [Audio grounding] No se pudo reparar la extracción: ${repairError.message}`);
+        }
+      }
+      if (ungroundedItems.length) {
+        // Preserve the extractor's separate items, quantities and explicit prices.
+        // If polishing adds unsupported scope, use that item's grounded source phrase;
+        // never collapse the whole audio into one unpriced line.
+        aiResult.items = aiResult.items.map((item, index) => {
+          const mismatch = ungroundedItems.find(entry => entry.index === index);
+          if (!mismatch) return item;
+          const groundedDescription = professionalizeAudioSourcePhrase(mismatch.sourcePhrase);
+          return groundedDescription ? { ...item, description: groundedDescription } : item;
+        });
+        aiResult.warnings = [...(aiResult.warnings || []), 'Se conservan las partidas por separado; una descripción se dejó fiel a la frase dictada porque no se pudo verificar su redacción profesional.'];
+        console.warn(`⚠️ [Audio grounding] La segunda extracción no fue totalmente verificable; se conservan ${aiResult.items.length} partidas, cantidades y precios, ajustando solo las descripciones no respaldadas.`);
+      } else if (ungroundedItems.length === 0 && aiResult.items?.length) {
+        console.log(`✅ [Audio grounding] ${aiResult.items.length} partida(s) verificadas contra fragmentos literales de la transcripción.`);
+      }
+    }
+
+    const duplicateItemGroups = findDuplicateBudgetItemGroups(aiResult.items);
+    if (duplicateItemGroups.length > 0) {
+      const duplicateDetails = duplicateItemGroups.map(group => {
+        const description = group[0].description;
+        const variants = group.map(item => {
+          const qty = Number(item.qty || 1);
+          const unit = item.unit || 'ud';
+          const unitPrice = Number(item.unitPrice || 0);
+          return `${qty} ${unit} × ${unitPrice.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+        }).join(' / ');
+        return `• *${description}*: ${variants}`;
+      }).join('\n');
+      const sentClarification = await sock.sendMessage(remoteJid, {
+        text: `⚠️ He detectado una o varias partidas repetidas en el audio y no quiero inventar ni duplicar importes. No he guardado ni enviado el presupuesto.\n\n${duplicateDetails}\n\n¿Es la misma partida repetida o son trabajos distintos? Confírmamelo y lo preparo correctamente.`
+      });
+      if (sentClarification?.key?.id) botSentMessageIds.add(sentClarification.key.id);
+      console.warn(`⚠️ Presupuesto detenido por ${duplicateItemGroups.length} descripción(es) de partida duplicada(s).`);
+      return;
+    }
+
     // 13. Cálculo y guardado de Presupuesto
     let targetId = aiResult.targetBudgetId || session.activeBudgetId;
     const isUpdate = !aiResult.isNewBudget && targetId && session.budgets.has(targetId);
     const prevBudget = isUpdate ? session.budgets.get(targetId) : null;
+
+    if (prevBudget && (['ACEPTADO', 'FIRMADO', 'PAGADO', 'PAGADA'].includes(String(prevBudget.status || '').toUpperCase()) ||
+        Number(prevBudget.paymentSummary?.totalPaid || 0) > 0 || (prevBudget.payments || []).length > 0 ||
+        (prevBudget.advanceInvoices || []).length > 0)) {
+      await sock.sendMessage(remoteJid, {
+        text: '⚠️ Ese presupuesto ya tiene una aceptación o movimientos de pago. No lo modificaré para conservar el historial. Si necesitas cambios, pide crear una nueva versión.'
+      });
+      return;
+    }
 
     if (prevBudget) {
       if (!aiResult.clientName && prevBudget.client?.name && prevBudget.client.name !== 'Cliente Particular') {
@@ -3533,14 +3738,20 @@ async function startWhatsAppGateway() {
     }
 
     const engineResult = engine.process({
-      rawTranscript: '',
+      rawTranscript: recognizedUserText,
       company: session.company,
       clientName: aiResult.clientName,
       clientAddress: aiResult.clientAddress,
       items: aiResult.items,
-      taxRate: (aiResult.taxRate || session.company?.defaultTaxRate || 10) / 100,
+      // El IVA por estancia/oficio no lo decide el modelo. Se usa la tasa de onboarding;
+      // una tasa explícita escrita en el mensaje puede prevalecer de forma determinista.
+      taxRate: engine.detectTaxRate(
+        recognizedUserText,
+        Number(session.company?.defaultTaxRate ?? 21) / 100
+      ),
       discount: aiResult.discount || null,
-      customConditions: aiResult.paymentTerms
+      paymentTerms: aiResult.paymentTerms || null,
+      customConditions: aiResult.paymentTerms?.advancePercentage !== undefined && aiResult.paymentTerms?.advancePercentage !== null
         ? `${aiResult.paymentTerms.advancePercentage}% al aceptar. ${100 - aiResult.paymentTerms.advancePercentage}% a la entrega.`
         : null
     });
@@ -3562,10 +3773,12 @@ async function startWhatsAppGateway() {
 
     engineResult.budget.company = session.company;
     engineResult.budget.companyId = session.companyId;
+    const generatedBudgetId = engineResult.budget.id;
+    const savedBudget = saveBudget(session.authContext || session.companyId || cleanPhone, engineResult.budget);
+    if (savedBudget?.id) engineResult.budget.id = savedBudget.id;
+    if (generatedBudgetId !== engineResult.budget.id) session.budgets.delete(generatedBudgetId);
     session.budgets.set(engineResult.budget.id, engineResult.budget);
     session.activeBudgetId = engineResult.budget.id;
-
-    saveBudget(session.companyId || cleanPhone, engineResult.budget);
     console.log(`💾 Presupuesto guardado en SQLite y sesión: ${engineResult.budget.id} (companyId: ${session.companyId}) (Total guardados: ${session.budgets.size})`);
 
     // Detección preventiva de cliente homónimo / repetido al crear presupuesto nuevo
@@ -3579,7 +3792,10 @@ async function startWhatsAppGateway() {
       }
     }
 
-    const replyText = formatBudgetForWhatsApp(engineResult.budget, aiResult.warnings || []) + homonymWarningText;
+    const userFacingWarnings = (aiResult.warnings || []).filter(warning =>
+      !/(?:no se especific[oó]|sin especificar|pendiente de valorar|falta el precio|precio pendiente)/i.test(String(warning))
+    );
+    const replyText = formatBudgetForWhatsApp(engineResult.budget, userFacingWarnings) + homonymWarningText;
     const sent = await sock.sendMessage(remoteJid, { text: replyText });
     if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
     console.log('✅ Resumen de texto enviado por WhatsApp.');
@@ -3677,7 +3893,8 @@ async function startWhatsAppGateway() {
               });
             } catch(e) {}
           } else {
-            const delay = Math.min(60000, 5000 * Math.pow(1.35, item.attempts));
+            const baseDelay = Math.min(300000, 15000 * Math.pow(2, item.attempts - 1));
+            const delay = Math.round(baseDelay * (0.8 + Math.random() * 0.4));
             item.nextRetryAt = Date.now() + delay;
             console.log(`⏳ Próximo reintento para ${item.remoteJid} en ${Math.round(delay / 1000)}s.`);
             aiStandbyQueue.push(item);
@@ -4866,11 +5083,37 @@ async function startWhatsAppGateway() {
 
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    // Aceptar tanto 'notify' (mensajes de terceros) como 'append' (mensajes a ti mismo desde tu móvil)
+    // 'append' incluye historial sincronizado; solo se procesa si es un mensaje enviado
+    // en el chat consigo mismo. El resto del historial no es actividad nueva del bot.
     if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of messages) {
       if (!msg.message) continue;
+
+      const remoteJid = msg.key?.remoteJid;
+      const isFromMe = Boolean(msg.key?.fromMe);
+      const myNumber = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].replace(/\D/g, '');
+      const myLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].replace(/\D/g, '');
+      let remotePhone = '';
+      if (remoteJid?.endsWith('@lid')) {
+        try {
+          const mappedJid = await sock.signalRepository?.lidMapping?.getPNForLID(remoteJid);
+          if (mappedJid) remotePhone = mappedJid.split('@')[0].split(':')[0];
+        } catch (error) {
+          console.warn(`No se pudo resolver el LID ${remoteJid}: ${error.message}`);
+        }
+      }
+
+      // La sincronización histórica ('append') puede traer cientos de mensajes antiguos.
+      // Conservamos solo el self-chat reciente: Baileys también usa 'append' para
+      // recuperar mensajes antiguos tras reconectar y no debemos reproducirlos como comandos.
+      if (type === 'append') {
+        const selfCheck = shouldProcessIncomingMessage({ remoteJid, fromMe: isFromMe, myNumber, myLid, remotePhone });
+        if (!selfCheck.process || selfCheck.reason !== 'SELF_CHAT') continue;
+        const timestamp = Number(msg.messageTimestamp?.low ?? msg.messageTimestamp ?? 0);
+        const ageSeconds = Math.floor(Date.now() / 1000) - timestamp;
+        if (!timestamp || ageSeconds < -60 || ageSeconds > 600) continue;
+      }
 
       if (msg.key?.id) {
         storeMessage(msg.key.id, msg.message);
@@ -4888,17 +5131,13 @@ async function startWhatsAppGateway() {
         }
       }
 
-      const remoteJid = msg.key?.remoteJid;
-      const isFromMe = Boolean(msg.key?.fromMe);
-      const myNumber = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].replace(/\D/g, '');
-      const myLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].replace(/\D/g, '');
-
       // ─── INGRESS GATEKEEPER: Blindaje Estricto de Entrada ───
       const ingressCheck = shouldProcessIncomingMessage({
         remoteJid,
         fromMe: isFromMe,
         myNumber,
         myLid,
+        remotePhone,
         allowedNumbers: ALLOWED_NUMBERS
       });
 
@@ -4912,9 +5151,9 @@ async function startWhatsAppGateway() {
       }
 
       const senderNumber = ingressCheck.senderNumber;
-      const logMsg = `[${new Date().toLocaleTimeString()}] 📩 Mensaje autorizado [jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]\n`;
+      const logMsg = `[${new Date().toLocaleTimeString()}] 📩 Mensaje autorizado [type: ${type}, jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]\n`;
       try { (await import('fs')).appendFileSync('gateway.log', logMsg); } catch(e) {}
-      console.log(`📩 Mensaje autorizado [jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]`);
+      console.log(`📩 Mensaje autorizado [type: ${type}, jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]`);
 
       // Desempaquetar contenedores de WhatsApp (efímeros, vista única, etc.)
       let messageContent = msg.message;

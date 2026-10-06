@@ -51,8 +51,12 @@
       <div class="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center text-xl flex-shrink-0">✓</div>
       <div>
         <div class="text-sm font-bold">¡Presupuesto firmado y aceptado con éxito!</div>
-        <div class="text-xs text-emerald-100 mt-0.5">Se ha remitido la copia oficial sellada en PDF por email.</div>
+        <div id="flatJustSignedMessage" class="text-xs text-emerald-100 mt-0.5">La aceptación se ha registrado.</div>
       </div>
+    </div>
+    <div id="emailDeliveryNotice" class="hidden bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900">
+      <div id="emailDeliveryMessage">La aceptación está registrada. La copia por correo sigue pendiente.</div>
+      <button id="retryEmailButton" onclick="retryEmailCopy()" class="mt-3 bg-amber-700 hover:bg-amber-800 text-white font-semibold px-4 py-2 rounded-lg">Reintentar envío de la copia</button>
     </div>
 
     <!-- Banner Oficial de Certificación -->
@@ -90,7 +94,7 @@
     <div class="bg-amber-50 border border-amber-200/80 rounded-xl p-3.5 text-xs text-amber-900 flex items-start gap-2.5 shadow-sm">
       <span class="text-base leading-none">🔒</span>
       <div class="leading-relaxed">
-        <strong>Enlace en modo consulta (Acción única realizada):</strong> Este presupuesto ya ha sido firmado y aceptado formalmente. Para garantizar la seguridad jurídica entre ambas partes, este enlace ya no admite nuevas firmas ni modificaciones.
+        <strong>Enlace en modo consulta (acción ya realizada):</strong> La aceptación electrónica se registró y este enlace ya no admite otra firma.
       </div>
     </div>
 
@@ -142,8 +146,7 @@
     <div class="bg-white rounded-2xl shadow-sm border border-green-100 p-4 text-xs text-gray-600 space-y-1.5">
       <div class="font-bold text-gray-800 text-xs mb-1">📋 Condiciones acordadas:</div>
       <div id="flatAdvanceText">• Anticipo inicial acordado a la firma.</div>
-      <div>• Resto del pago a la recepción y finalización de los trabajos.</div>
-      <div>• Garantía legal de 2 años en instalaciones y reformas ejecutadas.</div>
+      <div>• Resto del pago según las condiciones del presupuesto.</div>
     </div>
 
     <!-- Cajas de Sellos y Firmas Estampadas (Planas, no editables) -->
@@ -152,8 +155,8 @@
       <div class="bg-white rounded-xl border border-gray-200 p-3 text-center">
         <div class="text-[10px] uppercase font-bold text-gray-400 mb-2">Por la empresa instaladora</div>
         <div class="py-2 px-3 bg-emerald-50 rounded-lg border border-emerald-100">
-          <div class="text-xs font-bold text-emerald-800">EMITIDO Y CERTIFICADO</div>
-          <div class="text-[10px] text-emerald-600">Telemáticamente por la empresa</div>
+          <div class="text-xs font-bold text-emerald-800">PRESUPUESTO EMITIDO</div>
+          <div class="text-[10px] text-emerald-600">Identificación de la empresa</div>
         </div>
       </div>
 
@@ -163,8 +166,8 @@
         <div id="flatClientSigBox" class="py-2 px-3 bg-slate-50 rounded-lg border border-slate-200 min-h-[50px] flex items-center justify-center">
           <img id="flatClientSigImg" class="hidden max-h-12 mx-auto" alt="Firma del cliente" />
           <div id="flatClientSigPlaceholder" class="text-xs font-bold text-slate-700">
-            ✍️ FIRMADO Y ACEPTADO
-            <div class="text-[10px] text-slate-500 font-normal">Identificación validada</div>
+            ✍️ ACEPTACIÓN REGISTRADA
+            <div class="text-[10px] text-slate-500 font-normal">Registro electrónico</div>
           </div>
         </div>
       </div>
@@ -172,7 +175,7 @@
 
     <!-- Pie Legal -->
     <div class="text-center text-[11px] text-gray-400 py-3 leading-relaxed">
-      ⚖️ Documento con validez contractual plena conforme al <strong>Reglamento UE eIDAS 910/2014</strong> y la <strong>Ley 6/2020</strong> de España. Copia electrónica certificada.
+      Copia electrónica del presupuesto y de la aceptación registrada.
     </div>
   </div>
 
@@ -220,7 +223,7 @@
     <!-- Email para recibir copia sellada -->
     <div class="bg-white rounded-2xl shadow-sm border border-green-100 p-4">
       <label class="text-sm font-semibold text-gray-800 block mb-1">📧 Email del cliente para recibir copia</label>
-      <p class="text-xs text-gray-400 mb-3">Se remitirá el contrato firmado y sellado en PDF con plena validez</p>
+      <p class="text-xs text-gray-400 mb-3">Se enviará una copia PDF al correo indicado.</p>
       <input id="clientEmail" type="email" inputmode="email" placeholder="tu-email@gmail.com" class="w-full px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent transition-all">
     </div>
 
@@ -246,13 +249,14 @@
       <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
       Aceptar y Firmar Presupuesto
     </button>
-    <p class="text-center text-xs text-gray-400 pb-6">Esta acción es única: al firmar, el presupuesto queda formalizado y el enlace pasa a modo consulta.<br>Validez legal según <strong>Reglamento eIDAS</strong> y <strong>Ley 6/2020</strong> de España.</p>
+    <p class="text-center text-xs text-gray-400 pb-6">La aceptación quedará registrada con la fecha y hora de envío. Conserva la copia recibida para tus registros.</p>
   </div>
 
 <script>
 const SIGN_ENDPOINT = 'https://presuvoz.vercel.app/api/sign';
-const KEYVALUE_APP = 'presuvoz2026';
 let budget = null;
+let signedPayload = null;
+let payloadProof = null;
 const sigStates = { canvasPro: false, canvasClient: false };
 
 function decodeBase64Utf8(base64Str) {
@@ -379,110 +383,62 @@ function getStorageKey(budgetId) {
 async function checkRemoteSigned(budgetId) {
   if (!budgetId) return null;
   const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
-  
-  // 1. Intentar consultar el backend de PresuVoz
-  try {
-    const res = await fetch(`${SIGN_ENDPOINT}?check=${encodeURIComponent(cleanId)}`, { signal: AbortSignal.timeout(3000) });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.alreadySigned && data.details) return data.details;
-    }
-  } catch(e) {}
-
-  // 2. Fallback a nube de persistencia global
-  try {
-    const key = `signed_${cleanId}`;
-    const res2 = await fetch(`https://keyvalue.immanuel.co/api/KeyVal/GetValue/${KEYVALUE_APP}/${encodeURIComponent(key)}`, { signal: AbortSignal.timeout(3000) });
-    if (res2.ok) {
-      const raw = await res2.json();
-      if (raw && typeof raw === 'string') {
-        const decoded = decodeBase64Utf8(raw);
-        return JSON.parse(decoded);
-      }
-    }
-  } catch(e) {}
-
-  return null;
-}
-
-async function saveRemoteSigned(budgetId, record) {
-  if (!budgetId) return;
-  const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
-  try {
-    const key = `signed_${cleanId}`;
-    const raw = JSON.stringify(record);
-    const b64 = btoa(unescape(encodeURIComponent(raw))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    await fetch(`https://keyvalue.immanuel.co/api/KeyVal/UpdateValue/${KEYVALUE_APP}/${encodeURIComponent(key)}/${b64}`, {
-      method: 'POST',
-      signal: AbortSignal.timeout(3000)
-    });
-  } catch(e) {
-    console.error('Error guardando firma remota:', e);
-  }
+  const res = await fetch(`${SIGN_ENDPOINT}?check=${encodeURIComponent(cleanId)}`, { signal: AbortSignal.timeout(5000) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) throw new Error(data.error || 'No se pudo comprobar el estado de la firma.');
+  return data.alreadySigned ? data.details : null;
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
   const params = new URLSearchParams(window.location.search);
   const zParam = params.get('z');
-  const dataParam = params.get('data');
+  signedPayload = zParam;
+  payloadProof = params.get('s');
 
-  if (!zParam && !dataParam) {
+  if (!zParam || !payloadProof) {
     showState('error');
     return;
   }
 
   try {
-    if (zParam) {
-      const decompressed = await decompressZ(zParam);
-      budget = normalizeBudget(decompressed);
-    } else {
-      budget = normalizeBudget(JSON.parse(decodeBase64Utf8(dataParam)));
-    }
+    const decompressed = await decompressZ(zParam);
+    budget = normalizeBudget(decompressed);
   } catch(e) {
     console.error('Error decodificando presupuesto:', e);
     showState('error');
     return;
   }
 
-  if (!budget || !budget.id) {
+  if (!budget || !budget.id || !signedPayload || !payloadProof) {
     showState('error');
     return;
   }
 
   const storageKey = getStorageKey(budget.id);
 
-  // 1. Verificación inmediata en LocalStorage (mismo dispositivo/navegador)
-  const localRecordStr = localStorage.getItem(storageKey);
-  if (localRecordStr) {
-    try {
-      const localRec = JSON.parse(localRecordStr);
-      renderFlatSigned(localRec, false);
-      return;
-    } catch(e) {}
+  let remoteRecord;
+  try {
+    remoteRecord = await checkRemoteSigned(budget.id);
+  } catch (error) {
+    console.error('No se pudo verificar el registro de firmas:', error);
+    showState('error');
+    return;
   }
-
-  // 2. Verificación si el presupuesto venía ya con estado ACEPTADO en los datos
-  if (budget.status === 'ACEPTADO' || budget.status === 'FIRMADO') {
-    renderFlatSigned({
-      signedAt: budget.updatedAt || budget.createdAt || new Date().toISOString(),
-      clientEmail: budget.client?.email || 'Registrado en el sistema'
-    }, false);
+  if (remoteRecord?.signed) {
+    let localRecord = {};
+    try { localRecord = JSON.parse(localStorage.getItem(storageKey) || '{}'); } catch (_) {}
+    const combinedRecord = { ...localRecord, ...remoteRecord };
+    localStorage.setItem(storageKey, JSON.stringify(combinedRecord));
+    renderFlatSigned(combinedRecord, false);
     return;
   }
 
-  // 3. Si aún no está firmado localmente, renderizar formulario interactivo
+  // Solo se ofrece la firma tras verificar su estado en el servidor.
   renderSummary();
   initCanvas('canvasPro');
   initCanvas('canvasClient');
   showState('main');
 
-  // 4. En segundo plano, verificar si ya fue firmado desde otro móvil o navegador
-  checkRemoteSigned(budget.id).then(remoteRec => {
-    if (remoteRec && remoteRec.signed) {
-      localStorage.setItem(storageKey, JSON.stringify(remoteRec));
-      renderFlatSigned(remoteRec, false);
-    }
-  });
 });
 
 function showState(s) {
@@ -508,6 +464,18 @@ function renderFlatSigned(record, justSigned = false) {
   
   document.getElementById('flatSignedDate').textContent = signedDate;
   document.getElementById('flatSignedEmail').textContent = record.clientEmail || cli.email || 'Remitida por email';
+  const deliveryNotice = document.getElementById('emailDeliveryNotice');
+  const retryEmailButton = document.getElementById('retryEmailButton');
+  const deliveryMessage = document.getElementById('emailDeliveryMessage');
+  const emailSent = Boolean(record.emailSent);
+  document.getElementById('flatJustSignedMessage').textContent = emailSent
+    ? 'La copia en PDF se ha enviado por correo.'
+    : 'La aceptación está registrada; la copia por correo sigue pendiente.';
+  deliveryNotice.classList.toggle('hidden', emailSent);
+  retryEmailButton.classList.toggle('hidden', !record.clientSignature || emailSent);
+  deliveryMessage.textContent = record.clientSignature
+    ? 'La aceptación está registrada; falta entregar la copia por correo. Puedes reintentar sin volver a firmar.'
+    : 'La aceptación está registrada, pero la copia no consta como enviada. Abre este enlace en el mismo dispositivo usado para firmar o contacta con el profesional para solicitar el reenvío.';
   
   document.getElementById('flatCompanyName').textContent = comp.name || 'Empresa Instaladora';
   document.getElementById('flatCompanyCif').textContent = 'CIF: ' + (comp.cif || 'No especificado');
@@ -538,15 +506,15 @@ function renderFlatSigned(record, justSigned = false) {
 
   // Totales
   document.getElementById('flatSubtotal').textContent = (fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 }) + ' €';
-  document.getElementById('flatTaxAmount').textContent = (fin.taxAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 }) + ' € (' + (fin.taxRatePercentage || 10) + '%)';
+  document.getElementById('flatTaxAmount').textContent = (fin.taxAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 }) + ' € (' + (fin.taxRatePercentage ?? 21) + '%)';
   document.getElementById('flatTotalFinal').textContent = total.toLocaleString('es-ES', { minimumFractionDigits: 2 }) + ' €';
 
   // Anticipo
-  const advancePct = fin.advancePercentage || 30;
+  const advancePct = fin.advancePercentage ?? 30;
   const advanceAmt = fin.advanceAmount || (total * advancePct / 100);
   document.getElementById('flatAdvanceText').textContent = `• Anticipo acordado a la firma: ${advancePct}% (${advanceAmt.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €).`;
 
-  // Firma del cliente (imagen si existe o sello certificado)
+  // Firma del cliente (imagen capturada durante la aceptación)
   const clientSigImg = document.getElementById('flatClientSigImg');
   const clientSigPlaceholder = document.getElementById('flatClientSigPlaceholder');
   if (record.clientSignature && record.clientSignature.startsWith('data:image')) {
@@ -633,8 +601,12 @@ window.submitSignatures = async function() {
     return;
   }
 
-  if (!sigStates.canvasClient && !sigStates.canvasPro) {
+  if (!sigStates.canvasClient) {
     showError('Por favor, estampa tu firma en el recuadro para aceptar el presupuesto.');
+    return;
+  }
+  if (!signedPayload || !payloadProof) {
+    showError('Este enlace no es válido para firmar. Solicita al profesional que genere uno nuevo.');
     return;
   }
 
@@ -655,7 +627,7 @@ window.submitSignatures = async function() {
     const res = await fetch(SIGN_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ budget, signaturePro: sigPro, signatureClient: sigClient, clientEmail: email })
+      body: JSON.stringify({ signedPayload, proof: payloadProof, signaturePro: sigPro, signatureClient: sigClient, clientEmail: email })
     });
 
     const data = await res.json().catch(() => ({}));
@@ -683,16 +655,51 @@ window.submitSignatures = async function() {
     // 1. Guardar en el almacenamiento del navegador
     localStorage.setItem(storageKey, JSON.stringify(record));
 
-    // 2. Guardar en la nube para sincronizar otros dispositivos
-    saveRemoteSigned(budget.id, record);
+    record.emailSent = Boolean(data.emailSent);
+    record.emailId = data.emailId || null;
+    localStorage.setItem(storageKey, JSON.stringify(record));
 
-    // 3. Cambiar de inmediato a la Vista Plana con aviso de éxito
+    // Cambiar a la vista de consulta tras el registro en el servidor.
     renderFlatSigned(record, true);
 
   } catch(err) {
     showError('Error al firmar: ' + err.message + '. Inténtalo de nuevo.');
     btn.disabled = false;
     btn.innerHTML = '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>Aceptar y Firmar Presupuesto';
+  }
+};
+
+window.retryEmailCopy = async function() {
+  const storageKey = getStorageKey(budget?.id);
+  let record;
+  try { record = JSON.parse(localStorage.getItem(storageKey) || '{}'); } catch (_) { record = {}; }
+  if (!signedPayload || !payloadProof || !record.clientSignature) {
+    document.getElementById('emailDeliveryMessage').textContent = 'No encuentro los datos de la firma en este dispositivo. Contacta con el profesional para recibir la copia.';
+    return;
+  }
+  const button = document.getElementById('retryEmailButton');
+  button.disabled = true;
+  button.textContent = 'Reintentando envío…';
+  try {
+    const response = await fetch(SIGN_ENDPOINT, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signedPayload, proof: payloadProof, signaturePro: record.proSignature || null, signatureClient: record.clientSignature, clientEmail: record.clientEmail })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (data.emailSent) {
+      record.emailSent = true;
+      record.emailId = data.emailId || null;
+      localStorage.setItem(storageKey, JSON.stringify(record));
+      renderFlatSigned(record, false);
+      document.getElementById('emailDeliveryMessage').textContent = 'La copia se ha enviado correctamente.';
+      return;
+    }
+    document.getElementById('emailDeliveryMessage').textContent = data.error || data.emailError || 'La aceptación sigue registrada, pero el correo no se pudo entregar. Puedes volver a intentarlo.';
+  } catch (error) {
+    document.getElementById('emailDeliveryMessage').textContent = 'No se pudo conectar para reintentar el correo. La aceptación sigue registrada; prueba de nuevo cuando tengas conexión.';
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Reintentar envío de la copia';
   }
 };
 

@@ -139,7 +139,7 @@ export function generateBudgetPDF(budget) {
         .text(`${(fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
       tableY += 14;
 
-      doc.text(`IVA (${fin.taxRatePercentage || 10}%):`, totalsX, tableY)
+      doc.text(`IVA (${fin.taxRatePercentage ?? 21}%):`, totalsX, tableY)
         .text(`${(fin.taxAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
       tableY += 16;
 
@@ -156,13 +156,13 @@ export function generateBudgetPDF(budget) {
 
       const validityDays = budget.company?.quoteValidityDays || 15;
       const termsDesc = budget.company?.paymentTerms || '50% al empezar y 50% al acabar';
-      const advPct = fin.advancePercentage || budget.company?.defaultAdvance || 30;
+      const advPct = fin.advancePercentage ?? budget.company?.defaultAdvance ?? 30;
 
       doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
         .text(`• Condiciones de cobro: ${termsDesc}.`, 40, termsY + 12)
         .text(`• Anticipo establecido: ${advPct}% (${(fin.advanceAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €).`, 40, termsY + 22)
         .text(`• Precios válidos durante ${validityDays} días desde la fecha de emisión.`, 40, termsY + 32)
-        .text('• Trabajos con garantía de 2 años según legislación vigente.', 40, termsY + 42);
+        .text('• Cualquier garantía aplicable dependerá del tipo de trabajo y de la normativa correspondiente.', 40, termsY + 42);
 
       // 7. Firmas
       const signY = 700;
@@ -340,7 +340,7 @@ export function generateInvoicePDF(invoice) {
         tableY += 14;
 
         const netTax = Math.max(0, (fin.taxAmount || 0) - (fin.advanceTaxAmount || 0));
-        doc.text(`IVA (${fin.taxRatePercentage || 10}%):`, totalsX, tableY)
+        doc.text(`IVA (${fin.taxRatePercentage ?? 21}%):`, totalsX, tableY)
           .text(`${netTax.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
         tableY += 16;
       } else {
@@ -348,7 +348,7 @@ export function generateInvoicePDF(invoice) {
           .text(`${(fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
         tableY += 14;
 
-        doc.text(`IVA (${fin.taxRatePercentage || 10}%):`, totalsX, tableY)
+        doc.text(`IVA (${fin.taxRatePercentage ?? 21}%):`, totalsX, tableY)
           .text(`${(fin.taxAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
         tableY += 16;
       }
@@ -399,7 +399,7 @@ export function generateInvoicePDF(invoice) {
       // 7. Pie de página legal según RD 1619/2012 y Ley del IVA
       const legalNote = invoice.type === 'ANTICIPO'
         ? 'Factura de anticipo emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA (devengo por cobro de pago anticipado) y RD 1619/2012. El IVA devengado se deduce en la liquidación final.'
-        : 'Factura emitida conforme al Real Decreto 1619/2012 (Reglamento de Facturación en España). Garantía de 2 años en mano de obra según Ley de Ordenación de la Edificación (LOE).';
+        : 'Factura emitida conforme al Real Decreto 1619/2012 (Reglamento de Facturación en España).';
 
       doc.fontSize(6.5).fillColor('#94a3b8').font('Helvetica')
         .text(legalNote, 40, 785, { align: 'center', width: 515 });
@@ -747,7 +747,7 @@ export function generateQuarterTaxPDF(company, quarterData) {
             .text(inv.issueDate || quarterData.startDateFormatted, 116, currentY + 5, { width: 48 })
             .text(shortClient, 166, currentY + 5, { width: 140 })
             .text(formatEur(fin.taxableBase), 308, currentY + 5, { width: 55, align: 'right' })
-            .text(`${fin.taxRatePercentage || 10}%`, 365, currentY + 5, { width: 28, align: 'center' })
+            .text(`${fin.taxRatePercentage ?? 21}%`, 365, currentY + 5, { width: 28, align: 'center' })
             .text(formatEur(fin.taxAmount), 395, currentY + 5, { width: 50, align: 'right' })
             .font('Helvetica-Bold')
             .text(formatEur(total), 447, currentY + 5, { width: 55, align: 'right' });

@@ -5,6 +5,7 @@
  */
 
 import { PresuVozParser } from './parser.js';
+import { randomBytes } from 'node:crypto';
 
 export class PresuVozEngine {
   constructor(companyConfig = {}) {
@@ -14,6 +15,10 @@ export class PresuVozEngine {
       phone: companyConfig.phone || "600 11 22 33",
       email: companyConfig.email || "presupuestos@carpinteriamanolo.es",
       address: companyConfig.address || "Polígono Industrial Nave 14, Sevilla",
+      defaultTaxRate: companyConfig.defaultTaxRate,
+      defaultAdvance: companyConfig.defaultAdvance,
+      quoteValidityDays: companyConfig.quoteValidityDays,
+      paymentTerms: companyConfig.paymentTerms,
       logoText: companyConfig.logoText || "CM",
       brandColor: companyConfig.brandColor || "#9a3412", // Color madera cálido
       professionalSigner: companyConfig.professionalSigner || "Manuel Gómez (Administrador)",
@@ -22,36 +27,17 @@ export class PresuVozEngine {
   }
 
   /**
-   * Determina automáticamente el tipo de IVA aplicable según el texto del audio
+   * Usa un tipo mencionado explícitamente o el tipo configurado para la empresa.
+   * No infiere el IVA reducido por mencionar una estancia o una vivienda.
    * @param {string} text - Transcripción del audio
    * @returns {number} 0.10 (reducido para vivienda habitual) o 0.21 (general)
    */
-  detectTaxRate(text) {
-    const lower = text.toLowerCase();
-    const reducedKeywords = [
-      "reforma de vivienda",
-      "vivienda habitual",
-      "vivienda",
-      "la casa",
-      "una casa",
-      "casa particular",
-      "piso particular",
-      "piso",
-      "baño",
-      "cocina",
-      "cambio de bañera",
-      "plato de ducha",
-      "mampara",
-      "iva reducido",
-      "iva del 10"
-    ];
-
-    for (const kw of reducedKeywords) {
-      if (lower.includes(kw)) {
-        return 0.10; // IVA Reducido 10% (Art. 91 Uno 2.10º Ley del IVA)
-      }
-    }
-    return 0.21; // IVA General 21%
+  detectTaxRate(text, fallbackRate = 0.21) {
+    const lower = String(text || '').toLowerCase();
+    if (/\b(?:iva\s+)?exent[oa]s?\b|\biva\s+(?:del?\s*)?0\s*%/.test(lower)) return 0;
+    const explicit = lower.match(/\biva\s+(?:general\s+)?(?:del?\s*)?(4|5|10|21)\s*%/);
+    if (explicit) return Number(explicit[1]) / 100;
+    return fallbackRate;
   }
 
   /**
@@ -59,10 +45,16 @@ export class PresuVozEngine {
    * @param {string} text 
    * @returns {object}
    */
-  extractTerms(text) {
+  extractTerms(text, company = {}) {
     const lower = text.toLowerCase();
-    let advancePercentage = 30; // 30% estándar para acopio de materiales
-    let validityDays = 15;
+    const configuredAdvance = Number(company.defaultAdvance ?? 30);
+    let advancePercentage = Number.isFinite(configuredAdvance) && configuredAdvance >= 0 && configuredAdvance <= 100
+      ? configuredAdvance
+      : 30;
+    const configuredValidity = Number(company.quoteValidityDays ?? 15);
+    let validityDays = Number.isInteger(configuredValidity) && configuredValidity > 0 && configuredValidity <= 365
+      ? configuredValidity
+      : 15;
 
     // Detectar porcentaje con dígitos ("30%") o con palabras ("cuarenta por ciento")
     const advanceDigitMatch = lower.match(/(\d{1,2})\s*(?:%|por\s*ciento)\s*(?:por\s*adelantado|a\s*la\s*firma|al\s*inicio|de\s*anticipo)/);
@@ -85,7 +77,7 @@ export class PresuVozEngine {
     return {
       advancePercentage,
       validityDays,
-      textConditions: `${advancePercentage}% al aceptar el presupuesto para reserva de fechas y acopio de materiales. ${100 - advancePercentage}% a la finalización de los trabajos.`
+      textConditions: company.paymentTerms || `${advancePercentage}% al aceptar el presupuesto para reserva de fechas y acopio de materiales. ${100 - advancePercentage}% a la finalización de los trabajos.`
     };
   }
 
@@ -127,28 +119,69 @@ export class PresuVozEngine {
       if (!clientAddress) clientAddress = parseResult.data.clientAddress;
     }
 
-    const taxRate = rawInput.taxRate !== undefined ? rawInput.taxRate : this.detectTaxRate(rawText);
-    const terms = this.extractTerms(rawText);
+    const configuredTaxRate = rawInput.company?.defaultTaxRate ?? this.company.defaultTaxRate ?? 21;
+    let taxRate = rawInput.taxRate !== undefined
+      ? Number(rawInput.taxRate)
+      : this.detectTaxRate(rawText, Number(configuredTaxRate) / 100);
+    if (taxRate > 1) taxRate /= 100;
+    if (!Number.isFinite(taxRate) || ![0, 0.04, 0.05, 0.1, 0.21].includes(taxRate)) {
+      return { success: false, budget: null, errors: ['Tipo de IVA no válido.'], warnings: [], assistantFeedback: 'No he podido calcular el presupuesto porque el tipo de IVA no es válido.' };
+    }
+    const terms = this.extractTerms(rawText, rawInput.company || this.company);
+    if (rawInput.paymentTerms?.advancePercentage !== undefined && rawInput.paymentTerms?.advancePercentage !== null) {
+      const advancePercentage = Number(rawInput.paymentTerms.advancePercentage);
+      if (!Number.isFinite(advancePercentage) || advancePercentage < 0 || advancePercentage > 100) {
+        return { success: false, budget: null, errors: ['Porcentaje de anticipo no válido.'], warnings: [], assistantFeedback: 'Revisa el porcentaje de anticipo indicado.' };
+      }
+      terms.advancePercentage = advancePercentage;
+      terms.textConditions = `${advancePercentage}% al aceptar. ${100 - advancePercentage}% al finalizar.`;
+    }
+    if (rawInput.paymentTerms?.validityDays !== undefined && rawInput.paymentTerms?.validityDays !== null) {
+      const validityDays = Number(rawInput.paymentTerms.validityDays);
+      if (!Number.isInteger(validityDays) || validityDays < 1 || validityDays > 365) {
+        return { success: false, budget: null, errors: ['Plazo de validez no válido.'], warnings: [], assistantFeedback: 'Revisa el plazo de validez indicado.' };
+      }
+      terms.validityDays = validityDays;
+    }
 
     // Calcular y sanitizar estrictamente cada partida
     let subtotal = 0;
+    if (!Array.isArray(itemsToProcess) || itemsToProcess.length === 0) {
+      return { success: false, budget: null, errors: ['El presupuesto debe incluir al menos una partida.'], warnings: [], assistantFeedback: 'No he encontrado partidas para incluir en el presupuesto.' };
+    }
+    const invalidItemIndex = itemsToProcess.findIndex(item => {
+      if (!item || typeof item !== 'object') return true;
+      const qty = Number(item?.qty ?? 1);
+      const unitPrice = Number(item?.price !== undefined ? item.price : (item?.unitPrice ?? 0));
+      return !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(unitPrice) || unitPrice < 0 || !Number.isFinite(qty * unitPrice);
+    });
+    if (invalidItemIndex !== -1) {
+      return { success: false, budget: null, errors: [`Datos no válidos en la partida ${invalidItemIndex + 1}.`], warnings: [], assistantFeedback: 'Revisa las cantidades y precios del presupuesto.' };
+    }
     const items = itemsToProcess.map((item, index) => {
-      const qty = item.qty || 1;
-      const unitPrice = item.price !== undefined ? item.price : (item.unitPrice || 0);
-      const total = Number((qty * unitPrice).toFixed(2));
+      const qty = item.qty ?? 1;
+      const unitPrice = item.price !== undefined ? item.price : (item.unitPrice ?? 0);
+      const numericQty = Number(qty);
+      const numericUnitPrice = Number(unitPrice);
+      const total = Number((numericQty * numericUnitPrice).toFixed(2));
       subtotal += total;
 
       // Sanitización contra palabras sueltas o muletillas
-      const cleanDesc = PresuVozParser.normalizeItemDescription(item.description || "");
+      // La transcripción literal usada como degradación segura ya fue revisada
+      // contra el alcance del audio: no debe pasar por el diccionario de oficios,
+      // que podría reemplazarla por una partida de otro gremio.
+      const cleanDesc = item.preserveDescription === true
+        ? String(item.description || "").trim().replace(/\s+/g, " ")
+        : PresuVozParser.normalizeItemDescription(item.description || "");
 
       const isPricePending = item.isPricePending !== undefined ? item.isPricePending : (total === 0);
 
       return {
         id: index + 1,
         description: cleanDesc,
-        qty,
+        qty: numericQty,
         unit: item.unit || 'pa',
-        unitPrice,
+        unitPrice: numericUnitPrice,
         total,
         isPricePending
       };
@@ -162,9 +195,15 @@ export class PresuVozEngine {
     if (discountInfo) {
       if (discountInfo.type === 'percentage') {
         discountPercentage = discountInfo.value;
+        if (!Number.isFinite(discountPercentage) || discountPercentage < 0 || discountPercentage > 100) {
+          return { success: false, budget: null, errors: ['El porcentaje de descuento debe estar entre 0 y 100.'], warnings: [], assistantFeedback: 'Revisa el porcentaje de descuento indicado.' };
+        }
         discountAmount = Number(((subtotal * discountPercentage) / 100).toFixed(2));
       } else if (discountInfo.type === 'fixed') {
         discountAmount = discountInfo.value;
+        if (!Number.isFinite(discountAmount) || discountAmount < 0 || discountAmount > subtotal) {
+          return { success: false, budget: null, errors: ['El descuento no puede superar el subtotal.'], warnings: [], assistantFeedback: 'Revisa el importe del descuento indicado.' };
+        }
         discountPercentage = subtotal > 0 ? Number(((discountAmount / subtotal) * 100).toFixed(1)) : 0;
       }
     }
@@ -175,7 +214,7 @@ export class PresuVozEngine {
     const totalAmount = Number((taxableBase + taxAmount).toFixed(2));
     const advanceAmount = Number(((totalAmount * terms.advancePercentage) / 100).toFixed(2));
 
-    const budgetId = `PRE-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const budgetId = `PRE-${new Date().getFullYear()}-${randomBytes(8).toString('hex').toUpperCase()}`;
     const issueDate = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
     const isDraft = items.every(it => it.total === 0);
@@ -215,7 +254,6 @@ export class PresuVozEngine {
       },
       isDraft,
       status: isDraft ? "BORRADOR_MEDICION" : "PENDIENTE_FIRMA",
-      signUrl: `https://presuvoz.app/f/${Math.random().toString(36).substring(2, 9)}`,
       hasWarnings: warnings.length > 0 || isDraft,
       warnings,
       assistantFeedback
@@ -248,6 +286,14 @@ export class PresuVozEngine {
       return { success: false, message: "Presupuesto no válido." };
     }
 
+    if (['ACEPTADO', 'FIRMADO', 'PAGADO', 'PAGADA'].includes(String(budget.status || '').toUpperCase()) ||
+        Number(budget.paymentSummary?.totalPaid || 0) > 0 ||
+        (budget.payments || []).length > 0 || (budget.advanceInvoices || []).length > 0) {
+      return { success: false, budget, assistantMessage: 'Este presupuesto ya tiene aceptación o movimientos de pago. No lo modificaré; crea una nueva versión para conservar el historial.' };
+    }
+
+    budget = structuredClone(budget);
+
     const replyRes = PresuVozParser.applyConversationalReply(budget, updateText);
     if (!replyRes.success) {
       return {
@@ -268,8 +314,8 @@ export class PresuVozEngine {
     }
 
     // Si fue una actualización de partida / importe, recalcular finanzas
-    const taxRate = (budget.financials.taxRatePercentage || 21) / 100;
-    const advancePct = budget.financials.advancePercentage || 30;
+    const taxRate = (budget.financials.taxRatePercentage ?? 21) / 100;
+    const advancePct = budget.financials.advancePercentage ?? 30;
 
     let subtotal = 0;
     budget.items.forEach(item => {
@@ -286,6 +332,10 @@ export class PresuVozEngine {
       discountAmount = budget.financials.discountAmount;
     }
 
+    if (!Number.isFinite(discountAmount) || discountAmount < 0 || discountAmount > subtotal) {
+      return { success: false, budget, assistantMessage: 'El importe actualizado dejaría un descuento superior al subtotal. No he guardado el cambio; revisa el descuento.' };
+    }
+
     const taxableBase = Number((subtotal - discountAmount).toFixed(2));
     const taxAmount = Number((taxableBase * taxRate).toFixed(2));
     const totalAmount = Number((taxableBase + taxAmount).toFixed(2));
@@ -298,6 +348,12 @@ export class PresuVozEngine {
     budget.financials.totalAmount = totalAmount;
     budget.financials.advanceAmount = advanceAmount;
     budget.financials.remainingAmount = Number((totalAmount - advanceAmount).toFixed(2));
+    budget.paymentSummary = {
+      ...(budget.paymentSummary || {}),
+      totalPaid: 0,
+      remainingBalance: totalAmount,
+      status: totalAmount === 0 ? 'PAGADO' : 'PENDIENTE'
+    };
 
     const pendingCount = budget.items.filter(it => it.isPricePending).length;
     if (pendingCount === 0 && budget.warnings) {
@@ -363,7 +419,7 @@ export class PresuVozEngine {
     const today = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
 
-    const taxRate = (budget.financials?.taxRatePercentage || 10) / 100;
+    const taxRate = (budget.financials?.taxRatePercentage ?? 21) / 100;
     const taxableBase = Number((rawAmount / (1 + taxRate)).toFixed(2));
     const taxAmount = Number((rawAmount - taxableBase).toFixed(2));
     const totalAmount = Number((taxableBase + taxAmount).toFixed(2));
@@ -404,7 +460,7 @@ export class PresuVozEngine {
         discountPercentage: 0,
         discountAmount: 0,
         taxableBase,
-        taxRatePercentage: budget.financials?.taxRatePercentage || 10,
+        taxRatePercentage: budget.financials?.taxRatePercentage ?? 21,
         taxAmount,
         totalAmount,
         advanceAmount: 0,
@@ -516,7 +572,7 @@ export class PresuVozEngine {
         discountPercentage: fin.discountPercentage || 0,
         discountAmount: fin.discountAmount || 0,
         taxableBase: fin.taxableBase || 0,
-        taxRatePercentage: fin.taxRatePercentage || 10,
+        taxRatePercentage: fin.taxRatePercentage ?? 21,
         taxAmount: fin.taxAmount || 0,
         irpfRatePercentage: irpfRate,
         irpfAmount,

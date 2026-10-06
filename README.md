@@ -1,72 +1,44 @@
-# PresuVoz — Presupuestos Técnicos por Voz para Gremios y Reformas
+# PresuVoz
 
-Plataforma de generación automatizada de presupuestos técnicos y contratos de obra a partir de notas de voz en WhatsApp, con cálculo fiscal automático (IVA 10% vs 21%) y doble firma electrónica conforme al Reglamento Europeo eIDAS y RGPD.
+Asistente de WhatsApp para profesionales de oficios. El flujo principal cubre el alta de cada empresa, presupuestos a partir de texto o voz, facturas, agenda y recordatorios de materiales, cobros y trabajos pendientes. La gestoría es secundaria y sus cálculos no sustituyen la revisión de un asesor.
 
----
+## Estado del producto
 
-## Características Principales
+El repositorio contiene un gateway de WhatsApp basado en Baileys, persistencia SQLite y páginas de demostración. **Todavía no está listo para un lanzamiento comercial multiempresa.** Baileys conecta una sesión de WhatsApp Web mediante QR; para operar como servicio comercial y escalar de forma fiable hay que integrar la WhatsApp Business Platform Cloud API oficial, con webhooks verificados, plantillas y gestión de límites. El transporte actual no debe tratarse como una integración oficial de Meta.
 
-* **Entrada por Voz sin Fricción:** Diseñado para profesionales (fontaneros, electricistas, carpinteros, climatización y reformas) que necesitan generar ofertas vinculantes desde la furgoneta o a pie de obra.
-* **Lógica Fiscal Automatizada:** Identificación inteligente del tipo de IVA aplicable según normativa española (10% reducido para reformas en vivienda habitual según Art. 91 Uno 2.10º Ley del IVA; 21% régimen general).
-* **Doble Firma Vinculante (eIDAS):**
-  * **Empresa emisora:** Sello oficial digital pre-estampado y vinculado a la entidad.
-  * **Cliente final:** Lienzo interactivo en HTML5 Pointer Events optimizado para pantalla táctil móvil o ratón.
-* **Prueba Probatoria:** Registro de fecha y hora fehaciente, trazabilidad de IP del firmante y remisión de copia certificada por correo electrónico a ambas partes.
-* **Diseño Documental Sobrio (Estándar v2):** Documentación contable profesional, limpia y sin emojis, orientada al sector B2B.
+La aceptación electrónica disponible registra una aceptación del cliente y crea un PDF. No registra IP ni dispositivo, no aplica un sello cualificado, y no garantiza por sí sola efectos jurídicos concretos. El tipo de IVA procede del perfil de empresa salvo que el profesional lo indique expresamente; PresuVoz no verifica si se cumplen los requisitos fiscales de cada obra.
 
----
+## Componentes
 
-## Estructura del Repositorio
+- `src/whatsapp_gateway.js`: recepción y gestión de conversaciones de WhatsApp.
+- `src/onboarding_service.js`: preguntas de configuración de empresa y preferencias de trabajo.
+- `src/engine.js` y `src/parser.js`: extracción y cálculo de presupuestos.
+- `src/db_service.js` y `src/migrations/`: SQLite, identidad por empresa y evolución del esquema.
+- `src/pdf_service.js` y `src/fiscal_service.js`: documentos, pagos y funciones de apoyo fiscal.
+- `api/sign.js`: emisión del PDF de aceptación electrónica. Ver requisitos de configuración abajo.
+- `api/gemini.js`: proxy para el simulador web; desactivado por defecto porque no debe exponerse una clave de IA a llamadas públicas sin autenticación de usuario.
+- `studio/` y `landing/`: páginas de demostración y presentación.
 
-```text
-PresuVoz/
-├── src/
-│   ├── engine.js                      # Motor central de cálculo impositivo y financiero
-│   ├── generator.js                   # Generador del documento formal v2 con firma táctil
-│   └── test_run.js                    # Script ejecutable de prueba en consola
-├── landing/
-│   └── index.html                     # Landing page comercial con calculadora de ROI
-├── studio/
-│   └── index.html                     # Demostrador interactivo con grabación de micrófono en vivo
-├── output/
-│   ├── presupuesto_demo.html          # Documento oficial generado listo para firma
-│   └── presupuesto_demo_v2.html       # Plantilla de referencia v2
-├── estrategia_primeros_clientes.md    # Guía de prospección y cierre comercial en 7 días
-├── faq_legal_para_cerrar_ventas.md    # Respuestas jurídicas (eIDAS, Código Civil y RGPD)
-├── .env.example                       # Plantilla de variables de entorno para producción
-├── .gitignore                         # Exclusiones de seguridad para Git
-└── package.json                       # Configuración del paquete Node.js (ES Modules)
-```
+## Configuración
 
----
+1. Usa Node.js 22 y ejecuta `npm install`.
+2. Copia `.env.example` a `.env` y completa las credenciales fuera del control de versiones.
+3. Define `GEMINI_API_KEY`. El gateway usa `GEMINI_MODEL=gemini-3.8-flash` y prueba `gemini-3.5-flash-lite` como alternativa de menor coste ante saturación temporal.
+4. Configura la sesión WhatsApp usada por Baileys y revisa `ALLOWED_NUMBERS` antes de arrancar el gateway.
+5. Para aceptar firmas, configura el mismo secreto aleatorio `PRESUVOZ_SIGNING_SECRET` (mínimo 32 caracteres) en el gateway y en Vercel. Añade `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `RESEND_API_KEY`, `RESEND_FROM_EMAIL` y `PRESUVOZ_ALLOWED_ORIGINS` en Vercel. Sin el almacén Upstash, la firma falla de forma cerrada.
+6. No habilites `GEMINI_PROXY_ENABLED` para uso público hasta implementar autenticación por usuario y límites de consumo compartidos entre instancias.
 
-## Puesta en Marcha en Local
+## Comandos locales
 
-### Requisitos
-* Node.js v18 o superior (probado en Node.js v22).
-
-### Ejecución del Motor de Prueba
 ```bash
-# Ejecutar simulación de presupuesto técnico
-node src/test_run.js
+npm start       # Genera el presupuesto de demostración
+npm run whatsapp # Inicia el gateway de WhatsApp (sin reinicio automático de node --watch)
+npm test        # Ejecuta la suite del proyecto
+npm run seed:manual # Añade datos manuales de prueba al tenant configurado (no borra datos)
 ```
 
-El script procesará los conceptos de obra, calculará la base imponible y el IVA reducido, y generará el documento listo para firma en `output/presupuesto_demo.html`.
+La página de firma alojada en GitHub Pages debe poder llamar a `/api/sign`; añade su origen en `PRESUVOZ_ALLOWED_ORIGINS` si cambia. El registro de firmas usa `SET NX` en Redis para evitar dos aceptaciones concurrentes del mismo presupuesto.
 
-### Visualización de Herramientas Web
-* **Landing Page comercial:** Abre `landing/index.html` en tu navegador.
-* **Estudio con dictado en vivo:** Abre `studio/index.html` en tu navegador para dictar por voz usando el micrófono.
-* **Presupuesto generado:** Abre `output/presupuesto_demo.html` para probar la firma digital.
+## Próximo requisito para producción
 
----
-
-## Seguridad y Cumplimiento Normativo
-
-1. **Reglamento eIDAS (Reg. UE 910/2014):** Las firmas electrónicas recogen evidencias probatorias (timestamp, IP de origen, identificador de dispositivo y hash inalterable del documento).
-2. **RGPD y LOPDGDD:** Tratamiento de datos limitado a la relación contractual de arrendamiento de servicios. Servidores dentro del espacio económico europeo en despliegue.
-3. **Protección de Credenciales:** El proyecto utiliza archivos de entorno (`.env`) excluidos de control de versiones mediante `.gitignore`.
-
----
-
-## Licencia
-Uso exclusivo y propietario para PresuVoz. Todos los derechos reservados.
+El paso arquitectónico prioritario es migrar el transporte Baileys a WhatsApp Business Platform Cloud API y conectar sus webhooks con las colas actuales. Antes de venderlo también hacen falta despliegue multiinstancia, copias de seguridad y restauración de SQLite, gestión de secretos, retención/borrado de datos, límites de uso y revisión profesional de documentos y obligaciones fiscales/RGPD.

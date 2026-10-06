@@ -286,8 +286,8 @@ export function completeSecureOnboarding(phone, onboardingData = {}, options = {
   const entityType = (data.entityType || existing.entityType || 'autonomo');
   const irpfRate = Number(data.irpfRate !== undefined ? data.irpfRate : (existing.irpfRate || 0));
   const invoiceSeries = (data.invoiceSeries || existing.invoiceSeries || '2026-');
-  const defaultTaxRate = Number(data.defaultTaxRate !== undefined ? data.defaultTaxRate : (existing.defaultTaxRate || 10));
-  const defaultAdvance = data.defaultAdvance !== undefined && data.defaultAdvance !== null ? Number(data.defaultAdvance) : (existing.defaultAdvance || null);
+  const defaultTaxRate = Number(data.defaultTaxRate !== undefined ? data.defaultTaxRate : (existing.defaultTaxRate ?? 21));
+  const defaultAdvance = data.defaultAdvance !== undefined && data.defaultAdvance !== null ? Number(data.defaultAdvance) : (existing.defaultAdvance ?? null);
   const iban = (data.iban || existing.iban || null);
   const bizum = (data.bizum || existing.bizum || null);
   const email = (data.email || existing.email || null);
@@ -523,6 +523,15 @@ export function resolveLegacyBusinessId(companyContextOrId) {
 }
 
 
+export function formatBudgetPublicId(year, sequence) {
+  const cleanYear = Number(year);
+  const cleanSequence = Number(sequence);
+  if (!Number.isInteger(cleanYear) || cleanYear < 2000 || cleanYear > 9999 || !Number.isInteger(cleanSequence) || cleanSequence < 1) {
+    throw new Error('Número correlativo de presupuesto no válido.');
+  }
+  return `PRE${cleanYear}-${String(cleanSequence).padStart(3, '0')}`;
+}
+
 export function saveBudget(companyContextOrIdOrPhone, budget) {
   if (!budget || !budget.id) return null;
   if (!companyContextOrIdOrPhone) {
@@ -532,6 +541,26 @@ export function saveBudget(companyContextOrIdOrPhone, budget) {
   const tenant = ensureCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId || null;
   const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
+
+  // Convertir el ID aleatorio del motor a una referencia pública correlativa,
+  // solo al crear presupuestos nuevos. Las referencias históricas no cambian.
+  const generatedId = String(budget.id);
+  const generatedMatch = generatedId.match(/^PRE-(\d{4})-[0-9A-F]{16}$/i);
+  const alreadyExists = db.prepare('SELECT 1 FROM budgets WHERE company_id = ? AND id = ?').get(companyId, generatedId);
+  if (generatedMatch && !alreadyExists && isMigration016Applied()) {
+    const year = Number(generatedMatch[1]);
+    const existingNumberedIds = db.prepare('SELECT id FROM budgets WHERE company_id = ?').all(companyId);
+    const existingMax = existingNumberedIds.reduce((max, row) => {
+      const match = String(row.id || '').match(new RegExp(`^PRE${year}-(\\d+)$`));
+      return match ? Math.max(max, Number(match[1])) : max;
+    }, 0);
+    db.prepare(`
+      INSERT OR IGNORE INTO invoice_sequences (company_id, series, year, current_number, updated_at)
+      VALUES (?, 'BUDGET', ?, ?, ?)
+    `).run(companyId, year, existingMax, new Date().toISOString());
+    const allocation = allocateInvoiceNumber(companyId, 'BUDGET', year);
+    budget.id = formatBudgetPublicId(year, allocation.invoiceNumber);
+  }
 
   const now = new Date().toISOString();
   const total = budget.financials?.totalAmount || budget.totals?.total || budget.totalAmount || 0;
@@ -1830,7 +1859,7 @@ export function getQuarterInvoices(phoneOrCompany, quarterInput = null, yearInpu
     const base = Number(fin.taxableBase || 0);
     const tax = Number(fin.taxAmount || 0);
     const tot = Number(fin.totalAmount || 0);
-    const rate = Math.round(Number(fin.taxRatePercentage || 10));
+    const rate = Math.round(Number(fin.taxRatePercentage ?? 21));
     const advance = Number(fin.advanceAmount || 0);
     const remaining = fin.remainingAmount !== undefined ? Number(fin.remainingAmount) : Math.max(0, tot - advance);
 
@@ -1923,7 +1952,7 @@ export function generateQuarterCSV(company, quarterData) {
   for (const inv of quarterData.invoices) {
     const fin = inv.financials || {};
     const base = fin.taxableBase || 0;
-    const rate = fin.taxRatePercentage || 10;
+    const rate = fin.taxRatePercentage ?? 21;
     const tax = fin.taxAmount || 0;
     const total = fin.totalAmount || 0;
     const advance = fin.advanceAmount || 0;
@@ -2947,6 +2976,39 @@ export function markShoppingItemBought(companyContextOrIdOrPhone, queryOrId, cli
     });
   }
   return updated;
+}
+
+export function markShoppingItemsBoughtForClients(companyContextOrIdOrPhone, clientNames = []) {
+  if (!companyContextOrIdOrPhone || !Array.isArray(clientNames) || clientNames.length === 0) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  if (!companyId) return [];
+
+  const names = [...new Set(clientNames.map(name => String(name || '').trim()).filter(Boolean))];
+  if (!names.length) return [];
+  const clauses = names.map(() => 'LOWER(client_name) LIKE ?').join(' OR ');
+  const rows = db.prepare(`SELECT * FROM shopping_items WHERE company_id = ? AND status = 'PENDING' AND (${clauses})`)
+    .all(companyId, ...names.map(name => `%${name.toLowerCase()}%`));
+  if (!rows.length) return [];
+
+  const now = new Date().toISOString();
+  const update = db.prepare("UPDATE shopping_items SET status = 'BOUGHT', bought_at = ? WHERE id = ? AND company_id = ? AND status = 'PENDING'");
+  const updated = [];
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const row of rows) {
+      if (update.run(now, row.id, companyId).changes > 0) updated.push(row);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  return updated.map(row => ({
+    id: row.id, companyId: row.company_id, companyPhone: row.company_phone,
+    clientName: row.client_name, budgetId: row.budget_id, description: row.description,
+    qty: row.qty, unit: row.unit, status: 'BOUGHT', boughtAt: now
+  }));
 }
 
 export function clearShoppingList(companyContextOrIdOrPhone) {
@@ -5441,5 +5503,3 @@ export function getAuditLog(companyContextOrId, logId) {
     timestamp: row.timestamp
   };
 }
-
-

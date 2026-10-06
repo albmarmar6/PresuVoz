@@ -1014,34 +1014,17 @@
         phone: "620 44 55 66",
         email: "presupuestos@carpinteriamanolo.es",
         address: "Polígono Industrial La Negrilla, Nave 12, Sevilla",
+        defaultTaxRate: 21,
         logoText: "CM",
         brandColor: "#9a3412",
         professionalSigner: "Manuel Sánchez (Gerente)"
       };
 
-      this.detectTaxRate = function(text) {
-        const lower = text.toLowerCase();
-        const kw = [
-          "reforma de vivienda",
-          "vivienda habitual",
-          "vivienda",
-          "la casa",
-          "una casa",
-          "casa particular",
-          "piso particular",
-          "piso",
-          "baño",
-          "cocina",
-          "cambio de bañera",
-          "plato de ducha",
-          "mampara",
-          "iva reducido",
-          "iva del 10"
-        ];
-        for (const k of kw) {
-          if (lower.includes(k)) return 0.10;
-        }
-        return 0.21;
+      this.detectTaxRate = function(text, fallbackRate = Number(this.company.defaultTaxRate ?? 21) / 100) {
+        const lower = String(text || '').toLowerCase();
+        if (/\b(?:iva\s+)?exent[oa]s?\b|\biva\s+(?:del?\s*)?0\s*%/.test(lower)) return 0;
+        const explicit = lower.match(/\biva\s+(?:general\s+)?(?:del?\s*)?(4|5|10|21)\s*%/);
+        return explicit ? Number(explicit[1]) / 100 : fallbackRate;
       };
 
       this.extractTerms = function(text) {
@@ -1103,7 +1086,8 @@
           if (!clientAddress) clientAddress = parseResult.data.clientAddress;
         }
 
-        const taxRate = rawInput.taxRate !== undefined ? rawInput.taxRate : this.detectTaxRate(rawText);
+        const configuredRate = rawInput.company?.defaultTaxRate ?? this.company.defaultTaxRate ?? 21;
+        const taxRate = rawInput.taxRate !== undefined ? rawInput.taxRate : this.detectTaxRate(rawText, configuredRate / 100);
         const terms = this.extractTerms(rawText);
 
         let subtotal = 0;
@@ -1148,7 +1132,8 @@
         const totalAmount = Number((taxableBase + taxAmount).toFixed(2));
         const advanceAmount = Number(((totalAmount * terms.advancePercentage) / 100).toFixed(2));
 
-        const budgetId = `PRE-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+        const idBytes = crypto.getRandomValues(new Uint8Array(8));
+        const budgetId = `PRE-${new Date().getFullYear()}-${Array.from(idBytes, byte => byte.toString(16).padStart(2, '0')).join('').toUpperCase()}`;
         const issueDate = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
         const isDraft = items.every(it => it.total === 0);
 
@@ -1181,7 +1166,6 @@
           },
           isDraft,
           status: isDraft ? "BORRADOR_MEDICION" : "PENDIENTE_FIRMA",
-          signUrl: `https://presuvoz.app/f/${Math.random().toString(36).substring(2, 9)}`,
           hasWarnings: warnings.length > 0 || isDraft,
           warnings,
           assistantFeedback
@@ -1211,8 +1195,8 @@
           return { success: true, budget, assistantMessage: replyRes.message };
         }
 
-        const taxRate = (budget.financials.taxRatePercentage || 21) / 100;
-        const advancePct = budget.financials.advancePercentage || 30;
+        const taxRate = (budget.financials.taxRatePercentage ?? 21) / 100;
+        const advancePct = budget.financials.advancePercentage ?? 30;
 
         let subtotal = 0;
         budget.items.forEach(item => { subtotal += item.total || 0; });
@@ -1269,6 +1253,12 @@
     // -------------------------------------------------------------------------
     const PresuVozGenerator = {
       generateHTML: function(budget) {
+        budget = JSON.parse(JSON.stringify(budget, (_key, value) => typeof value === 'string'
+          ? value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character])
+          : value));
+        budget.company.brandColor = /^#[0-9a-f]{6}$/i.test(String(budget.company.brandColor || ''))
+          ? budget.company.brandColor
+          : '#1e40af';
         const itemsRows = budget.items.map(item => {
           const isPending = item.isPricePending || item.total === 0;
           const unitPriceDisplay = isPending 
@@ -1364,7 +1354,7 @@
           <div class="space-y-1 text-xs text-slate-600">
             <div class="flex justify-between">
               <span class="text-slate-400">Tipo de IVA</span>
-              <span class="font-medium text-slate-700">${budget.financials.taxRatePercentage}% (${budget.financials.taxRatePercentage === 10 ? 'Vivienda' : 'General'})</span>
+              <span class="font-medium text-slate-700">${budget.financials.taxRatePercentage}% (tipo aplicado)</span>
             </div>
             <div class="flex justify-between">
               <span class="text-slate-400">Anticipo</span>
@@ -1436,7 +1426,7 @@
           <p class="text-xs font-semibold text-slate-700 mb-1">Por el cliente</p>
           <p class="text-xs text-slate-400 mb-3">${budget.client.name}</p>
           <div class="border border-slate-200 rounded-lg h-20 bg-slate-50 flex items-center justify-center">
-            <p class="text-xs text-slate-400 italic">Lienzo interactivo de firma</p>
+            <p class="text-xs text-slate-400 italic">La aceptación se registra desde el enlace enviado por WhatsApp. Esta vista previa no recoge firmas.</p>
           </div>
         </div>
       </div>
@@ -1474,8 +1464,8 @@
       addUserBubble(text);
       showTypingIndicator();
 
-      // Usar IA si hay clave personal O si hay backend compartido configurado
-      if (GEMINI_API_KEY || PRESUVOZ_BACKEND_URL) {
+      // El simulador exige una clave propia; no expone una clave de servidor en un proxy público.
+      if (GEMINI_API_KEY) {
         try {
           await processWithGemini(text);
         } catch(err) {
@@ -1544,16 +1534,16 @@
           <div class="mt-3 p-3 bg-[#182229] border border-slate-700/80 rounded-xl">
             <div class="flex items-center justify-between mb-2">
               <span class="text-[10px] uppercase font-bold tracking-wider ${badgeColor} border px-2 py-0.5 rounded-md">${badgeText}</span>
-              <span class="text-[11px] text-slate-400 font-mono">#${budget.id}</span>
+              <span class="text-[11px] text-slate-400 font-mono">#${escapeHtml(budget.id)}</span>
             </div>
             <div class="space-y-1 text-xs">
               <div class="flex justify-between text-slate-400">
                 <span>Cliente:</span>
-                <span class="text-slate-200 font-medium">${budget.client.name}</span>
+                <span class="text-slate-200 font-medium">${escapeHtml(budget.client.name)}</span>
               </div>
               <div class="flex justify-between text-slate-400">
                 <span>Ubicación:</span>
-                <span class="text-slate-200 font-medium">${budget.client.address}</span>
+                <span class="text-slate-200 font-medium">${escapeHtml(budget.client.address)}</span>
               </div>
               <div class="flex justify-between text-slate-400">
                 <span>Partidas:</span>
@@ -1566,7 +1556,7 @@
             </div>
             <button onclick="openBudgetModal()" class="w-full mt-3 bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-2 rounded-lg text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-              Ver Documento y Firmar
+              Ver documento (vista previa)
             </button>
           </div>
         `;
@@ -1616,9 +1606,6 @@
     // -------------------------------------------------------------------------
     let GEMINI_API_KEY = localStorage.getItem('presuvoz_gemini_key') || '';
 
-    // URL del backend Vercel compartido — todos los usuarios usan la IA sin configurar nada.
-    const PRESUVOZ_BACKEND_URL = 'https://presuvoz.vercel.app';
-
     const GEMINI_SYSTEM_PROMPT = `Eres un asistente especializado en extracción de presupuestos para gremios españoles de construcción y reformas.
 
 Tu función es analizar CUALQUIER descripción de obra — ya sea una transcripción de audio, un mensaje de texto escrito, una nota informal o una descripción conversacional — y extraer los datos estructurados en formato JSON para generar un presupuesto formal.
@@ -1631,7 +1618,7 @@ REGLAS CRÍTICAS (cumplirlas sin excepción):
 5. Errores fonéticos de Whisper (ej: "4.205.000 €" para una fontanería → imposible, corrígelo al valor razonable para ese tipo de obra).
 6. Usa descripciones TÉCNICAS FORMALES en español de presupuesto de obra oficial.
 7. Sin precio → unitPrice: 0, isPricePending: true.
-8. IVA: 10 para vivienda habitual / piso / baño / cocina particular. 21 para local comercial / nave / oficina.
+8. No determines el IVA por el oficio o la estancia. Devuelve un tipo solo cuando el profesional lo indique expresamente; en caso contrario usa null.
 9. Incoherencia geográfica → añade aviso en warnings.
 10. El assistantFeedback debe ser un mensaje corto y profesional en español para el instalador.
 
@@ -1684,7 +1671,7 @@ FORMATO DE RESPUESTA (JSON estricto, sin texto adicional):
     }
   ],
   "discount": null,
-  "taxRate": 10,
+  "taxRate": null,
   "paymentTerms": { "advancePercentage": 30, "validityDays": 15 },
   "warnings": [],
   "isDraftMode": false,
@@ -1713,9 +1700,6 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
       if (GEMINI_API_KEY) {
         badge.textContent = '🟢 IA Personal';
         badge.className = 'text-[9px] font-medium px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-700 cursor-default select-none';
-      } else if (PRESUVOZ_BACKEND_URL) {
-        badge.textContent = '🔵 IA Servidor';
-        badge.className = 'text-[9px] font-medium px-2 py-0.5 rounded-full bg-sky-950 text-sky-300 border border-sky-700 cursor-default select-none';
       } else {
         badge.textContent = '⚪ Modo Local';
         badge.className = 'text-[9px] font-medium px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 cursor-default select-none';
@@ -1782,31 +1766,10 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
     let cachedGeminiModel = null;
 
     async function callGeminiAPI(userPrompt, systemInstruction) {
-      // ── Modo backend compartido (sin clave personal) ──────────────────────
-      // Si no hay clave local pero hay backend Vercel, delegar al servidor
-      if (!GEMINI_API_KEY && PRESUVOZ_BACKEND_URL) {
-        const response = await fetch(`${PRESUVOZ_BACKEND_URL}/api/gemini`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userPrompt, systemInstruction })
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok || !data.ok) {
-          throw new Error(data.error || `Error del servidor ${response.status}`);
-        }
-        return data.result;
-      }
-
       // ── Modo clave personal (llamada directa a Gemini) ─────────────────────
+      if (!GEMINI_API_KEY) throw new Error('Configura tu clave personal de Gemini en Ajustes para usar la IA del simulador.');
       // Si ya encontramos un modelo que funciona, usarlo directamente
-      const base = [
-        'gemini-3.1-pro-preview',
-        'gemini-3.1-flash-preview',
-        'gemini-2.5-flash-preview-05-20',
-        'gemini-2.5-flash',
-        'gemini-2.0-flash',
-        'gemini-2.0-flash-lite'
-      ];
+      const base = ['gemini-3.8-flash', 'gemini-3.6-flash'];
       const modelsToTry = cachedGeminiModel
         ? [cachedGeminiModel, ...base.filter(m => m !== cachedGeminiModel)]
         : base;
@@ -1828,7 +1791,8 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
                 temperature: 0.1,
                 maxOutputTokens: 2048
               }
-            })
+            }),
+            signal: AbortSignal.timeout(18000)
           });
 
           // Leer siempre el JSON de la respuesta (tanto éxito como error)
@@ -1920,10 +1884,11 @@ Responde SOLO con JSON válido con el presupuesto completo actualizado en el mis
       // Alimentar el resultado de IA al motor de cálculo fiscal
       const res = engine.process({
         rawTranscript: text,
+        company: engine.company,
         clientName: aiResult.clientName,
         clientAddress: aiResult.clientAddress,
         items: aiResult.items,
-        taxRate: (aiResult.taxRate || 10) / 100,
+        taxRate: engine.detectTaxRate(text, Number(engine.company.defaultTaxRate ?? 21) / 100),
         discount: aiResult.discount || null,
         customConditions: aiResult.paymentTerms
           ? `${aiResult.paymentTerms.advancePercentage}% al aceptar el presupuesto para reserva de fechas y acopio de materiales. ${100 - aiResult.paymentTerms.advancePercentage}% a la finalización de los trabajos.`

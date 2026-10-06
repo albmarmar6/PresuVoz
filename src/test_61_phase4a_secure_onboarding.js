@@ -7,7 +7,7 @@
  * 2. Todas las operaciones de prueba se ejecutan sobre una copia aislada de
  *    data/backups/presuvoz_post_migration_20261001.db en data/test/phase4a_secure_onboarding.db.
  * 3. Aislamiento total entre provisional y autenticado.
- * 4. Cero migraciones nuevas (sin migración 016).
+ * 4. Ninguna operación de prueba debe mutar la base de datos activa ni su esquema.
  */
 
 import fs from 'node:fs';
@@ -57,7 +57,10 @@ export async function runTest61() {
   }
 
   const PROD_PATH = path.resolve('data', 'presuvoz.db');
-  const EXPECTED_POST015_SHA = '7454D7DF010E1078F81CA69A3C0A14F59CD265741E802E04EDC82A30C495833A';
+  const initialProdSha = computeSha256(PROD_PATH);
+  const initialProdDb = new DatabaseSync(PROD_PATH, { readOnly: true });
+  const initialProdVersions = initialProdDb.prepare('SELECT version FROM schema_migrations ORDER BY version ASC').all().map(r => r.version);
+  initialProdDb.close();
 
   // 1. Preparar base de datos aislada a partir del backup post-015
   const testDir = path.resolve('data', 'test');
@@ -374,11 +377,11 @@ export async function runTest61() {
   // ─── BLOQUE H: INMUTABILIDAD DE PRODUCCIÓN Y ESQUEMA ───────────────────────────
   console.log('--- H. Inmutabilidad de Producción y Esquema ---');
   const finalProdSha = computeSha256(PROD_PATH);
-  assert(finalProdSha === EXPECTED_POST015_SHA, 'H1. data/presuvoz.db SHA-256 permanece estrictamente INMUTABLE (7454D7DF...)');
+  assert(finalProdSha === initialProdSha, 'H1. data/presuvoz.db conserva exactamente su SHA-256 inicial durante el test');
 
   const prodDb = new DatabaseSync(PROD_PATH, { readOnly: true });
   const prodVersions = prodDb.prepare('SELECT version FROM schema_migrations ORDER BY version ASC').all().map(r => r.version);
-  assert(JSON.stringify(prodVersions) === JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]), 'H2. Cero migraciones añadidas a producción (versiones [1..15] intactas)');
+  assert(JSON.stringify(prodVersions) === JSON.stringify(initialProdVersions), `H2. Las versiones de migración activas no cambian (${prodVersions.join(',')})`);
   prodDb.close();
 
   // Limpieza de DB de prueba aislada

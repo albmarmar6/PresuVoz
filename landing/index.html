@@ -97,7 +97,7 @@
       </h1>
 
       <p class="text-slate-400 text-lg leading-relaxed max-w-xl mb-10">
-        Hablas desde la furgoneta. Tu cliente recibe un presupuesto con tu logo y lo firma desde su móvil. Copia certificada por correo a ambos. Sin ordenadores, sin Excel, sin esperas.
+        Hablas desde la furgoneta. PresuVoz prepara un presupuesto con tus datos y permite registrar la aceptación desde el móvil. Se genera una copia PDF para las partes si el correo está configurado.
       </p>
 
       <div class="flex flex-col sm:flex-row gap-3">
@@ -116,16 +116,16 @@
     <!-- Metrics strip -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-20 pt-8 border-t border-slate-800/60">
       <div>
-        <p class="text-2xl font-bold text-white">14 h/semana</p>
-        <p class="text-xs text-slate-500 mt-0.5">Ahorradas en trabajo administrativo</p>
+        <p class="text-2xl font-bold text-white">Presupuestos</p>
+        <p class="text-xs text-slate-500 mt-0.5">Preparados desde WhatsApp</p>
       </div>
       <div>
-        <p class="text-2xl font-bold text-white">+42%</p>
-        <p class="text-xs text-slate-500 mt-0.5">Más presupuestos cerrados</p>
+        <p class="text-2xl font-bold text-white">Agenda</p>
+        <p class="text-xs text-slate-500 mt-0.5">Citas y recordatorios en el chat</p>
       </div>
       <div>
-        <p class="text-2xl font-bold text-white">100% legal</p>
-        <p class="text-xs text-slate-500 mt-0.5">Firma válida bajo Reglamento eIDAS UE</p>
+        <p class="text-2xl font-bold text-white">Facturas</p>
+        <p class="text-xs text-slate-500 mt-0.5">Generadas a partir de tus trabajos</p>
       </div>
       <div>
         <p class="text-2xl font-bold text-white">Sin apps</p>
@@ -161,7 +161,7 @@
           </div>
           <h3 class="text-base font-semibold text-white mb-3">PresuVoz redacta el documento</h3>
           <p class="text-sm text-slate-400 leading-relaxed">
-            La IA transcribe, desglosa partidas técnicas, calcula base imponible e IVA (10% o 21% según el tipo de obra) y genera un PDF formal con tu logotipo y sello oficial.
+            La IA extrae las partidas y los importes. PresuVoz aplica el tipo de IVA configurado para tu empresa y genera una vista previa en PDF.
           </p>
         </div>
 
@@ -171,7 +171,7 @@
           </div>
           <h3 class="text-base font-semibold text-white mb-3">El cliente firma desde su móvil</h3>
           <p class="text-sm text-slate-400 leading-relaxed">
-            Tu cliente abre el enlace, firma con el dedo y ambos recibís copia certificada por correo. Sin descargas, sin registro, sin complicaciones.
+            Tu cliente abre el enlace y registra su aceptación. Si el correo está configurado, recibe una copia PDF junto con la empresa.
           </p>
         </div>
       </div>
@@ -288,7 +288,7 @@
             </li>
             <li class="flex items-start gap-2.5">
               <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Doble firma digital con validez legal eIDAS
+              Registro electrónico de aceptación del cliente
             </li>
             <li class="flex items-start gap-2.5">
               <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
@@ -296,7 +296,7 @@
             </li>
             <li class="flex items-start gap-2.5">
               <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Copia certificada por correo a ambas partes
+              Copia PDF por correo (con email configurado)
             </li>
           </ul>
           <button onclick="requestPilot('Plan Autónomo')" class="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-semibold py-3 rounded-xl text-sm transition-colors cursor-pointer">
@@ -378,7 +378,7 @@
             <svg class="faq-arrow w-4 h-4 text-slate-500 shrink-0 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
           </button>
           <div class="faq-body hidden px-6 pb-6">
-            <p class="text-sm text-slate-400 leading-relaxed">Sí. El documento se rige por el Reglamento Europeo eIDAS (Reg. 910/2014) y el artículo 1.262 del Código Civil. Al firmar se registra la IP, el dispositivo, la fecha y hora exacta y se sella el hash del documento. Con ese expediente se puede interponer un juicio monitorio por impago sin necesidad de abogado para reclamar cantidades inferiores a 2.000 €.</p>
+            <p class="text-sm text-slate-400 leading-relaxed">PresuVoz registra la aceptación electrónica, la fecha y hora y genera una copia PDF. No es una firma electrónica cualificada ni garantiza por sí sola un resultado judicial; la eficacia y las pruebas necesarias dependen de cada caso. Consulta con un profesional jurídico antes de basarte en el documento para una reclamación.</p>
           </div>
         </div>
 
@@ -388,7 +388,7 @@
             <svg class="faq-arrow w-4 h-4 text-slate-500 shrink-0 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
           </button>
           <div class="faq-body hidden px-6 pb-6">
-            <p class="text-sm text-slate-400 leading-relaxed">No. PresuVoz genera el presupuesto y contrato de obra, que es el documento previo que protege tu cobro. La factura fiscal la emites con tu software habitual o con tu gestor cuando cobras el anticipo o finalizas la obra. PresuVoz ya calcula el IVA correcto para que no haya discrepancias.</p>
+            <p class="text-sm text-slate-400 leading-relaxed">No. PresuVoz ayuda a preparar presupuestos y facturas; revisa los datos fiscales y el tipo de IVA con tu asesoría antes de emitirlos. El sistema no valida por sí solo qué tipo corresponde a cada operación.</p>
           </div>
         </div>
 
@@ -398,7 +398,7 @@
             <svg class="faq-arrow w-4 h-4 text-slate-500 shrink-0 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
           </button>
           <div class="faq-body hidden px-6 pb-6">
-            <p class="text-sm text-slate-400 leading-relaxed">Sí. El motor de transcripción incorpora cancelación de ruido adaptativa que funciona correctamente con tráfico de fondo, obra, furgoneta en marcha o viento. Si el sistema detecta que algún dato no ha quedado claro, te devuelve un mensaje pidiendo aclaración antes de generar el documento.</p>
+            <p class="text-sm text-slate-400 leading-relaxed">El reconocimiento de voz puede equivocarse con ruido o nombres propios. Revisa cantidades, mediciones, cliente y tipo de IVA antes de enviar el presupuesto.</p>
           </div>
         </div>
       </div>
@@ -417,7 +417,7 @@
           </div>
           <span class="font-bold text-sm text-white">PresuVoz</span>
         </div>
-        <p class="text-xs text-slate-500 max-w-xs">Presupuestos profesionales por nota de voz para gremios y empresas de reformas. Conforme con RGPD y Reglamento eIDAS.</p>
+        <p class="text-xs text-slate-500 max-w-xs">Presupuestos y tareas por WhatsApp para profesionales de oficios y reformas. Revisa los datos y condiciones antes de emitir documentos.</p>
       </div>
 
       <div class="flex gap-12 text-xs text-slate-500">

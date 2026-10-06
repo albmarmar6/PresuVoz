@@ -237,7 +237,7 @@
     <!-- Legal footer -->
     <div class="px-8 py-5 bg-slate-50 border-t border-slate-100">
       <p class="text-[10px] text-slate-400 leading-relaxed">
-        Al formalizar la firma, ambas partes aceptan las condiciones de este contrato de arrendamiento de obra conforme al Código Civil español (art. 1.542 y ss.). La firma electrónica tiene plena validez jurídica bajo el Reglamento Europeo eIDAS (Reg. UE 910/2014). Se remitirá copia certificada sellada con hash verificable a <span class="text-slate-500">presupuestos@carpinteriamanolo.es</span> y a <span class="text-slate-500">francisco.perez@email.com</span>. En cumplimiento del RGPD, los datos del presente documento se tratan exclusivamente con la finalidad de ejecución de este contrato.
+        Esta aceptación registra la conformidad expresada por las partes con las condiciones del presupuesto. Se enviará una copia por correo electrónico a las direcciones indicadas. La empresa es responsable de informar sobre el tratamiento de datos personales aplicable.
       </p>
       <div class="mt-3 flex items-center gap-4 text-[10px] text-slate-400">
         <span>Generado por PresuVoz · presuvoz.app</span>
@@ -324,7 +324,7 @@
       const ts = now.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }) +
                  ' a las ' + now.toLocaleTimeString('es-ES');
 
-      document.getElementById('signTimestamp').textContent = 'Sellado el ' + ts + ' · IP verificada';
+      document.getElementById('signTimestamp').textContent = 'Aceptación registrada el ' + ts;
       document.getElementById('signSuccessBox').classList.remove('hidden');
 
       const btn = document.getElementById('signBtn');
