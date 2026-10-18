@@ -1,5 +1,6 @@
 import PDFDocument from 'pdfkit';
 import fs from 'node:fs';
+import { formatInvoiceNaming, formatReceiptNaming } from './engine.js';
 
 /**
  * Genera un Buffer con el PDF formal del presupuesto
@@ -121,60 +122,110 @@ export function generateBudgetPDF(budget) {
       // 5. Totales y Fiscalidad (abajo a la derecha)
       tableY += 15;
       const fin = budget.financials || {};
-      const totalsX = 350;
+      const boxX = 320;
+      const boxWidth = 235;
+      const labelX = 330;
+      const valX = 435;
+      const valW = 110; // 435 + 110 = 545 pt, exactly matches item table IMPORTE column (485 + 60 = 545 pt)
 
       doc.fontSize(8).fillColor(grayColor).font('Helvetica');
 
       if (fin.discountAmount > 0) {
-        doc.text('Subtotal:', totalsX, tableY)
-          .text(`${fin.subtotal.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
+        doc.text('Subtotal trabajos:', labelX, tableY)
+          .text(`${fin.subtotal.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
         tableY += 14;
 
-        doc.text(`Descuento (${fin.discountPercentage}%):`, totalsX, tableY)
-          .text(`-${fin.discountAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
+        doc.text(`Descuento comercial (${fin.discountPercentage}%):`, labelX, tableY)
+          .text(`-${fin.discountAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
         tableY += 14;
       }
 
-      doc.text('Base Imponible:', totalsX, tableY)
-        .text(`${(fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
+      doc.text('Base Imponible:', labelX, tableY)
+        .text(`${(fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
       tableY += 14;
 
-      doc.text(`IVA (${fin.taxRatePercentage ?? 21}%):`, totalsX, tableY)
-        .text(`${(fin.taxAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
-      tableY += 16;
+      doc.text(`IVA (${fin.taxRatePercentage ?? 21}%):`, labelX, tableY)
+        .text(`${(fin.taxAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
+      tableY += 14;
+
+      if (fin.irpfAmount > 0) {
+        doc.text(`Retención IRPF (-${fin.irpfRatePercentage}%):`, labelX, tableY)
+          .text(`-${fin.irpfAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
+        tableY += 14;
+      }
+      tableY += 3;
 
       // Cuadro de Total Final
-      doc.rect(totalsX - 10, tableY - 4, 215, 26).fill(primaryColor);
+      doc.roundedRect(boxX, tableY - 2, boxWidth, 26, 3).fill(primaryColor);
       doc.fontSize(9).fillColor('#ffffff').font('Helvetica-Bold')
-        .text('TOTAL PRESUPUESTO:', totalsX, tableY + 4)
-        .text(`${(fin.totalAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 475, tableY + 4, { width: 70, align: 'right' });
+        .text('TOTAL PRESUPUESTO:', labelX, tableY + 6)
+        .text(`${(fin.totalAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY + 6, { width: valW, align: 'right' });
+      tableY += 30;
 
       // 6. Condiciones de Pago (abajo a la izquierda)
-      const termsY = tableY - 40;
+      const termsWidth = 270;
+      const termsY = tableY - 44;
       doc.fontSize(8).fillColor(darkColor).font('Helvetica-Bold')
-        .text('CONDICIONES GENERALES Y FORMA DE PAGO:', 40, termsY);
+        .text('CONDICIONES GENERALES Y FORMA DE PAGO:', 40, termsY, { width: termsWidth });
 
       const validityDays = budget.company?.quoteValidityDays || 15;
       const termsDesc = budget.company?.paymentTerms || '50% al empezar y 50% al acabar';
       const advPct = fin.advancePercentage ?? budget.company?.defaultAdvance ?? 30;
 
-      doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
-        .text(`• Condiciones de cobro: ${termsDesc}.`, 40, termsY + 12)
-        .text(`• Anticipo establecido: ${advPct}% (${(fin.advanceAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €).`, 40, termsY + 22)
-        .text(`• Precios válidos durante ${validityDays} días desde la fecha de emisión.`, 40, termsY + 32)
-        .text('• Cualquier garantía aplicable dependerá del tipo de trabajo y de la normativa correspondiente.', 40, termsY + 42);
+      const termsList = [
+        `• Condiciones de cobro: ${termsDesc}.`,
+        `• Anticipo establecido: ${advPct}% (${(fin.advanceAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €).`,
+        `• Precios válidos durante ${validityDays} días desde la fecha de emisión.`,
+        '• Cualquier garantía aplicable dependerá del tipo de trabajo y de la normativa correspondiente.'
+      ];
+
+      let currentTermY = termsY + 12;
+      doc.fontSize(7.5).fillColor(grayColor).font('Helvetica');
+      for (const term of termsList) {
+        doc.text(term, 40, currentTermY, { width: termsWidth, lineGap: 1 });
+        currentTermY += doc.heightOfString(term, { width: termsWidth, lineGap: 1 }) + 2.5;
+      }
 
       // 7. Firmas
       const signY = 700;
-      doc.rect(40, signY, 240, 70).strokeColor(borderColor).stroke();
-      doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
-        .text('POR LA EMPRESA INSTALADORA', 50, signY + 8)
-        .text('Firma y Sello:', 50, signY + 55);
+      const isSigned = budget.status === 'ACEPTADO' || budget.status === 'FIRMADO' || budget.status === 'FINALIZADO' || Boolean(budget.signedAt);
+      const signDateFormatted = budget.signedAt ? new Date(budget.signedAt).toLocaleDateString('es-ES') : new Date().toLocaleDateString('es-ES');
 
-      doc.rect(315, signY, 240, 70).strokeColor(borderColor).stroke();
+      // Caja 1: Empresa instaladora
+      doc.rect(40, signY, 240, 70).strokeColor(isSigned ? '#059669' : borderColor).stroke();
       doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
-        .text('CONFORME DEL CLIENTE', 325, signY + 8)
-        .text('Firma y DNI: ____________________ Fecha: ___/___/2026', 325, signY + 55);
+        .text('POR LA EMPRESA INSTALADORA', 50, signY + 8);
+
+      if (isSigned) {
+        doc.roundedRect(48, signY + 20, 224, 42, 3).fillColor('#f0fdf4').fillAndStroke('#f0fdf4', '#bbf7d0');
+        doc.fontSize(8).fillColor('#059669').font('Helvetica-Bold')
+          .text('✔ CERTIFICADO ELECTRÓNICAMENTE', 50, signY + 25, { width: 220, align: 'center' });
+        doc.fontSize(7).fillColor(darkColor).font('Helvetica')
+          .text(`${budget.company?.name || 'PresuVoz Reformas S.L.'}`, 50, signY + 36, { width: 220, align: 'center' });
+        doc.fontSize(6.5).fillColor(grayColor).font('Helvetica')
+          .text(`Sello digital emitido · CIF: ${budget.company?.cif || 'B-99887766'}`, 50, signY + 47, { width: 220, align: 'center' });
+      } else {
+        doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
+          .text('Firma y Sello:', 50, signY + 55);
+      }
+
+      // Caja 2: Conforme del cliente
+      doc.rect(315, signY, 240, 70).strokeColor(isSigned ? '#059669' : borderColor).stroke();
+      doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
+        .text('CONFORME DEL CLIENTE', 325, signY + 8);
+
+      if (isSigned) {
+        doc.roundedRect(323, signY + 20, 224, 42, 3).fillColor('#f0fdf4').fillAndStroke('#f0fdf4', '#bbf7d0');
+        doc.fontSize(8).fillColor('#059669').font('Helvetica-Bold')
+          .text('✍️ FIRMADO DIGITALMENTE', 325, signY + 25, { width: 220, align: 'center' });
+        doc.fontSize(7).fillColor(darkColor).font('Helvetica')
+          .text(`Cliente: ${budget.client?.name || 'Cliente Particular'}`, 325, signY + 36, { width: 220, align: 'center' });
+        doc.fontSize(6.5).fillColor(grayColor).font('Helvetica')
+          .text(`Aceptado el ${signDateFormatted} · Vía enlace seguro`, 325, signY + 47, { width: 220, align: 'center' });
+      } else {
+        doc.fontSize(7.5).fillColor(grayColor).font('Helvetica')
+          .text('Firma y DNI: ____________________ Fecha: ___/___/2026', 325, signY + 55);
+      }
 
       // Pie de página
       doc.fontSize(7).fillColor('#94a3b8').font('Helvetica')
@@ -237,15 +288,21 @@ export function generateInvoicePDF(invoice) {
         .text(`Tel: ${invoice.company?.phone || '601 02 23 67'} | ${invoice.company?.email || 'facturas@presuvoz.app'}`, textStartX, 70);
 
       // Caja resumen de factura (derecha)
+      const isRectificativa = invoice.type === 'RECTIFICATIVA' || Boolean(invoice.rectifiesInvoiceId);
       const invoiceTypeTitle = invoice.type === 'ANTICIPO'
         ? 'FACTURA DE ANTICIPO'
-        : (invoice.advanceDeductions && invoice.advanceDeductions.length > 0 ? 'FACTURA DE LIQUIDACIÓN' : 'FACTURA ORDINARIA');
+        : (invoice.type === 'FASE' || invoice.type === 'HITO'
+            ? 'FACTURA DE HITO / FASE'
+            : (isRectificativa
+                ? 'FACTURA RECTIFICATIVA'
+                : (invoice.advanceDeductions && invoice.advanceDeductions.length > 0 ? 'FACTURA DE LIQUIDACIÓN' : 'FACTURA ORDINARIA')));
 
-      doc.roundedRect(360, 25, 195, 75, 4).strokeColor(borderColor).stroke();
-      doc.fontSize(8).fillColor(primaryColor).font('Helvetica-Bold')
+      doc.roundedRect(360, 25, 195, 75, 4).strokeColor(isRectificativa ? '#ef4444' : borderColor).stroke();
+      doc.fontSize(8).fillColor(isRectificativa ? '#dc2626' : primaryColor).font('Helvetica-Bold')
         .text(invoiceTypeTitle, 370, 33);
-      doc.fontSize(13).fillColor(darkColor).font('Helvetica-Bold')
-        .text(invoice.id || 'FAC-2026-0001', 370, 46);
+      const displayInvoiceNum = invoice.displayNumber || invoice.naming || (invoice.budgetId ? formatInvoiceNaming(invoice.type, invoice.budgetId) : (invoice.id || 'FAC-2026-0001'));
+      doc.fontSize(10.5).fillColor(darkColor).font('Helvetica-Bold')
+        .text(displayInvoiceNum, 370, 46);
       doc.fontSize(8).fillColor(grayColor).font('Helvetica')
         .text(`Fecha emisión: ${invoice.issueDate || new Date().toLocaleDateString('es-ES')}`, 370, 63)
         .text(`Fecha operación: ${invoice.operationDate || new Date().toLocaleDateString('es-ES')}`, 370, 74)
@@ -267,7 +324,17 @@ export function generateInvoicePDF(invoice) {
 
       // 4. Tabla de Partidas ejecutadas
       let tableY = 182;
-      doc.rect(40, tableY, 515, 20).fill(primaryColor);
+      if (isRectificativa) {
+        const rectBannerY = 175;
+        doc.roundedRect(40, rectBannerY, 515, 36, 4).fillColor('#fef2f2').fillAndStroke('#fef2f2', '#fca5a5');
+        doc.fontSize(7.5).fillColor('#b91c1c').font('Helvetica-Bold')
+          .text('DOCUMENTO RECTIFICATIVO SEGÚN ART. 15 DEL RD 1619/2012 Y ART. 80 LEY 37/1992 (SERIE R)', 50, rectBannerY + 6);
+        const rectInfo = `Factura rectificada: ${invoice.rectifiedInvoiceNumber || invoice.rectifiesInvoiceId || '-'}  |  Fecha rectificada: ${invoice.rectifiedInvoiceDate || '-'}  |  Motivo: ${invoice.rectificationReason || 'Ajuste de importes / anulación'}`;
+        doc.fontSize(7).fillColor('#7f1d1d').font('Helvetica')
+          .text(rectInfo, 50, rectBannerY + 18, { width: 495 });
+        tableY = 218;
+      }
+      doc.rect(40, tableY, 515, 20).fill(isRectificativa ? '#b91c1c' : primaryColor);
 
       doc.fontSize(8).fillColor('#ffffff').font('Helvetica-Bold')
         .text('#', 48, tableY + 6, { width: 20 })
@@ -307,50 +374,68 @@ export function generateInvoicePDF(invoice) {
       // 5. Totales y Liquidación Fiscal
       tableY += 15;
       const fin = invoice.financials || {};
-      const totalsX = 330;
+      const boxX = 320;
+      const boxWidth = 235;
+      const labelX = 330;
+      const valX = 435;
+      const valW = 110; // 435 + 110 = 545 pt, exactly aligns with item table IMPORTE column (485 + 60 = 545 pt)
 
       doc.fontSize(8).fillColor(grayColor).font('Helvetica');
 
       if ((fin.discountAmount || 0) > 0) {
-        doc.text('Subtotal trabajos:', totalsX, tableY)
-          .text(`${(fin.subtotal || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+        doc.text('Subtotal trabajos:', labelX, tableY)
+          .text(`${(fin.subtotal || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
         tableY += 14;
 
-        doc.text(`Descuento comercial (${fin.discountPercentage}%):`, totalsX, tableY)
-          .text(`-${(fin.discountAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+        doc.text(`Descuento comercial (${fin.discountPercentage}%):`, labelX, tableY)
+          .text(`-${(fin.discountAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
         tableY += 14;
       }
 
       if (invoice.advanceDeductions && invoice.advanceDeductions.length > 0) {
-        doc.text('Base Imponible total obra:', totalsX, tableY)
-          .text(`${(fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+        doc.text('Base Imponible total obra:', labelX, tableY)
+          .text(`${(fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
         tableY += 14;
 
         invoice.advanceDeductions.forEach(adv => {
           doc.fontSize(7.5).fillColor('#dc2626')
-            .text(`Menos Anticipo (Fac. ${adv.id}):`, totalsX, tableY)
-            .text(`-${(adv.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+            .text(`Menos Anticipo (Fac. ${adv.id}):`, labelX, tableY)
+            .text(`-${(adv.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
           tableY += 14;
         });
 
         doc.fontSize(8).fillColor(grayColor).font('Helvetica');
         const netBase = Math.max(0, (fin.taxableBase || 0) - (fin.advanceTaxableBase || 0));
-        doc.text('Base Imponible a liquidar:', totalsX, tableY)
-          .text(`${netBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+        doc.text('Base Imponible a liquidar:', labelX, tableY)
+          .text(`${netBase.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
         tableY += 14;
 
         const netTax = Math.max(0, (fin.taxAmount || 0) - (fin.advanceTaxAmount || 0));
-        doc.text(`IVA (${fin.taxRatePercentage ?? 21}%):`, totalsX, tableY)
-          .text(`${netTax.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
-        tableY += 16;
-      } else {
-        doc.text('Base Imponible:', totalsX, tableY)
-          .text(`${(fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+        doc.text(`IVA (${fin.taxRatePercentage ?? 21}%):`, labelX, tableY)
+          .text(`${netTax.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
         tableY += 14;
 
-        doc.text(`IVA (${fin.taxRatePercentage ?? 21}%):`, totalsX, tableY)
-          .text(`${(fin.taxAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
-        tableY += 16;
+        if (fin.irpfAmount > 0) {
+          doc.text(`Retención IRPF (-${fin.irpfRatePercentage}%):`, labelX, tableY)
+            .text(`-${fin.irpfAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
+          tableY += 14;
+        }
+        tableY += 3;
+      } else {
+        doc.text('Base Imponible:', labelX, tableY)
+          .text(`${(fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
+        tableY += 14;
+
+        doc.text(`IVA (${fin.taxRatePercentage ?? 21}%):`, labelX, tableY)
+          .text(`${(fin.taxAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
+        tableY += 14;
+
+        if (fin.irpfAmount > 0) {
+          doc.text(`Retención IRPF (-${fin.irpfRatePercentage}%):`, labelX, tableY)
+            .text(`-${fin.irpfAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
+          tableY += 14;
+        }
+        tableY += 3;
       }
 
       // Cuadro de Total Factura
@@ -358,48 +443,66 @@ export function generateInvoicePDF(invoice) {
         ? (fin.remainingAmount !== undefined ? fin.remainingAmount : Math.max(0, (fin.totalAmount || 0) - (fin.advanceAmount || 0)))
         : (fin.totalAmount || 0);
 
-      doc.rect(totalsX - 10, tableY - 4, 235, 24).fill(primaryColor);
+      const totalTitle = invoice.type === 'RECTIFICATIVA'
+        ? 'TOTAL RECTIFICADO (ABONO):'
+        : (invoice.type === 'ANTICIPO' ? 'TOTAL FACTURA ANTICIPO:' : ((invoice.type === 'HITO' || invoice.type === 'FASE') ? 'TOTAL FACTURA HITO:' : (invoice.advanceDeductions?.length > 0 ? 'TOTAL A PAGAR LIQUIDACIÓN:' : 'TOTAL FACTURA:')));
+
+      doc.roundedRect(boxX, tableY - 2, boxWidth, 26, 3).fill(invoice.type === 'RECTIFICATIVA' ? '#b91c1c' : primaryColor);
       doc.fontSize(9).fillColor('#ffffff').font('Helvetica-Bold')
-        .text(invoice.type === 'ANTICIPO' ? 'TOTAL FACTURA ANTICIPO:' : (invoice.advanceDeductions?.length > 0 ? 'TOTAL A PAGAR LIQUIDACIÓN:' : 'TOTAL FACTURA:'), totalsX, tableY + 4)
-        .text(`${finalInvoiceTotal.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 465, tableY + 4, { width: 90, align: 'right' });
-      tableY += 28;
+        .text(totalTitle, labelX, tableY + 6)
+        .text(`${finalInvoiceTotal.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY + 6, { width: valW, align: 'right' });
+      tableY += 30;
 
       // Desglose informativo si es ordinaria con anticipo sin deducción explícita de base
       const advance = fin.advanceAmount || 0;
       const remaining = fin.remainingAmount !== undefined ? fin.remainingAmount : Math.max(0, (fin.totalAmount || 0) - advance);
 
-      if (advance > 0 && (!invoice.advanceDeductions || invoice.advanceDeductions.length === 0) && invoice.type !== 'ANTICIPO') {
+      if (advance > 0 && (!invoice.advanceDeductions || invoice.advanceDeductions.length === 0) && invoice.type !== 'ANTICIPO' && invoice.type !== 'HITO' && invoice.type !== 'FASE' && invoice.type !== 'RECTIFICATIVA') {
         doc.fontSize(8).fillColor(grayColor).font('Helvetica')
-          .text(`Anticipo percibido a cuenta:`, totalsX, tableY)
-          .text(`-${advance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 80, align: 'right' });
+          .text(`Anticipo percibido a cuenta:`, labelX, tableY)
+          .text(`-${advance.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY, { width: valW, align: 'right' });
         tableY += 14;
 
-        doc.rect(totalsX - 10, tableY - 3, 235, 22).fill('#f1f5f9');
+        doc.roundedRect(boxX, tableY - 2, boxWidth, 24, 3).fill('#f1f5f9');
         doc.fontSize(8.5).fillColor(darkColor).font('Helvetica-Bold')
-          .text('TOTAL PENDIENTE DE PAGO:', totalsX, tableY + 3)
-          .text(`${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 465, tableY + 3, { width: 90, align: 'right' });
+          .text('TOTAL PENDIENTE DE PAGO:', labelX, tableY + 5)
+          .text(`${remaining.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, valX, tableY + 5, { width: valW, align: 'right' });
       }
 
       // 6. Datos Bancarios para la liquidación (abajo a la izquierda)
       const bankY = tableY - (advance > 0 ? 55 : 40);
       doc.roundedRect(40, bankY, 275, 80, 4).fillColor('#f8fafc').fillAndStroke('#f8fafc', borderColor);
 
-      doc.fontSize(8).fillColor(primaryColor).font('Helvetica-Bold')
-        .text('DATOS BANCARIOS PARA EL PAGO:', 50, bankY + 8);
+      if (invoice.type === 'RECTIFICATIVA' && finalInvoiceTotal <= 0) {
+        doc.fontSize(8).fillColor('#b91c1c').font('Helvetica-Bold')
+          .text('REGULARIZACIÓN FISCAL / NOTA DE ABONO:', 50, bankY + 8);
+        doc.fontSize(7.5).fillColor(darkColor).font('Helvetica')
+          .text(`• Tipo: Factura rectificativa por diferencia / abono contable`, 50, bankY + 22)
+          .text(`• Efecto: Minoración de base imponible y cuota repercutida`, 50, bankY + 33)
+          .text(`• Factura original: ${invoice.rectifiedInvoiceNumber || invoice.rectifiesInvoiceId || 'Factura previa'}`, 50, bankY + 44)
+          .text(`• Disposición: Saldo a favor del cliente conforme a ley`, 50, bankY + 55);
+      } else {
+        doc.fontSize(8).fillColor(primaryColor).font('Helvetica-Bold')
+          .text('DATOS BANCARIOS PARA EL PAGO:', 50, bankY + 8);
 
-      doc.fontSize(7.5).fillColor(darkColor).font('Helvetica')
-        .text(`• Titular: ${invoice.company?.name || 'PresuVoz Reformas S.L.'}`, 50, bankY + 22)
-        .text(`• Forma: Transferencia bancaria`, 50, bankY + 33)
-        .text(`• IBAN: ${invoice.company?.iban || 'Consultar con el emisor'}`, 50, bankY + 44)
-        .text(`• Concepto: Pago ${invoice.id || 'Factura'}`, 50, bankY + 55);
-      if (invoice.company?.bizum) {
-        doc.text(`• O pago por Bizum al ${invoice.company.bizum}`, 50, bankY + 66);
+        doc.fontSize(7.5).fillColor(darkColor).font('Helvetica')
+          .text(`• Titular: ${invoice.company?.name || 'PresuVoz Reformas S.L.'}`, 50, bankY + 22)
+          .text(`• Forma: Transferencia bancaria`, 50, bankY + 33)
+          .text(`• IBAN: ${invoice.company?.iban || 'Consultar con el emisor'}`, 50, bankY + 44)
+          .text(`• Concepto: Pago ${displayInvoiceNum}`, 50, bankY + 55);
+        if (invoice.company?.bizum) {
+          doc.text(`• O pago por Bizum al ${invoice.company.bizum}`, 50, bankY + 66);
+        }
       }
 
       // 7. Pie de página legal según RD 1619/2012 y Ley del IVA
-      const legalNote = invoice.type === 'ANTICIPO'
-        ? 'Factura de anticipo emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA (devengo por cobro de pago anticipado) y RD 1619/2012. El IVA devengado se deduce en la liquidación final.'
-        : 'Factura emitida conforme al Real Decreto 1619/2012 (Reglamento de Facturación en España).';
+      const legalNote = invoice.legalNote || (invoice.type === 'RECTIFICATIVA'
+        ? 'Factura rectificativa emitida conforme al Art. 15 del Real Decreto 1619/2012 y Art. 80 de la Ley 37/1992 del IVA. La factura original queda corregida contable y tributariamente en la Serie R.'
+        : (invoice.type === 'ANTICIPO'
+            ? 'Factura de anticipo emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA (devengo por cobro de pago anticipado) y RD 1619/2012. El IVA devengado se deduce en la liquidación final.'
+            : ((invoice.type === 'HITO' || invoice.type === 'FASE')
+                ? 'Factura de certificación / hito de obra emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA y RD 1619/2012. El importe facturado a cuenta se deduce en la liquidación final.'
+                : 'Factura emitida conforme al Real Decreto 1619/2012 (Reglamento de Facturación en España).')));
 
       doc.fontSize(6.5).fillColor('#94a3b8').font('Helvetica')
         .text(legalNote, 40, 785, { align: 'center', width: 515 });
@@ -462,15 +565,26 @@ export function generateReceiptPDF(receipt) {
         .text(`Tel: ${receipt.company?.phone || '601 02 23 67'} | ${receipt.company?.email || 'administracion@presuvoz.app'}`, textStartX, 70);
 
       // Caja resumen del recibo (derecha)
-      doc.roundedRect(360, 25, 195, 75, 4).strokeColor(borderColor).stroke();
-      doc.fontSize(8).fillColor(primaryColor).font('Helvetica-Bold')
-        .text('JUSTIFICANTE DE PAGO', 370, 33);
-      doc.fontSize(13).fillColor(darkColor).font('Helvetica-Bold')
-        .text(receipt.id || 'REC-2026-0001', 370, 46);
+      const receiptTypeUpper = String(receipt.type || '').toUpperCase();
+      const isAnticipo = receiptTypeUpper === 'ANTICIPO' || (receipt.concept && receipt.concept.toLowerCase().includes('anticipo'));
+      const isFinal = receiptTypeUpper === 'FINAL' || (receipt.remainingBalance || 0) <= 0;
+      const receiptTitle = isAnticipo
+        ? 'JUSTIFICANTE DE ANTICIPO'
+        : (isFinal
+            ? 'JUSTIFICANTE DE LIQUIDACIÓN'
+            : 'JUSTIFICANTE DE PAGO (HITO)');
+
+      const displayReceiptNum = receipt.displayNumber || receipt.naming || (receipt.budgetId ? formatReceiptNaming(receipt.type || (isFinal ? 'FINAL' : (isAnticipo ? 'ANTICIPO' : 'HITO')), receipt.budgetId) : (receipt.id || 'REC-2026-0001'));
+
+      doc.roundedRect(355, 25, 200, 75, 4).strokeColor(borderColor).stroke();
+      doc.fontSize(7.5).fillColor(primaryColor).font('Helvetica-Bold')
+        .text(receiptTitle, 365, 33);
+      doc.fontSize(10).fillColor(darkColor).font('Helvetica-Bold')
+        .text(displayReceiptNum, 365, 46);
       doc.fontSize(8).fillColor(grayColor).font('Helvetica')
-        .text(`Fecha cobro: ${receipt.date || new Date().toLocaleDateString('es-ES')}`, 370, 63)
-        .text(`Método: ${receipt.method || 'Transferencia'}`, 370, 74)
-        .text(`Ref: ${receipt.budgetId || 'Obra particular'}`, 370, 85);
+        .text(`Fecha cobro: ${receipt.date || new Date().toLocaleDateString('es-ES')}`, 365, 63)
+        .text(`Método: ${receipt.method || 'Transferencia'}`, 365, 74)
+        .text(`Ref: ${receipt.budgetId || 'Obra particular'}`, 365, 85);
 
       // 3. Bloque Cliente / Pagador
       const clientY = 112;

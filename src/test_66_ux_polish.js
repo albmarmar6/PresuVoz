@@ -67,6 +67,7 @@ export async function runTest66() {
   // Configurar ENV antes de importar módulos
   process.env.NODE_ENV = 'test';
   process.env.PRESUVOZ_DB_PATH = testDbPath;
+  process.env.PRESUVOZ_SIGNING_SECRET = process.env.PRESUVOZ_SIGNING_SECRET || 'secret-signing-key-test-minimum-32-chars-long';
 
   const {
     db,
@@ -361,7 +362,7 @@ export async function runTest66() {
   await handleAdvanceInvoice(mockSock, `${phoneTenant}@s.whatsapp.net`, testSession, testBudget2, '87654321A', null, true);
   assert(mockSent.length === 3, 'E6.1. Exactamente 3 envíos: resumen anticipo + documento PDF + enlace firma');
   const advSummary = mockSent[0].payload.text;
-  assert(advSummary.includes('Factura de anticipo') && advSummary.includes('emitida') && (advSummary.includes('INV-ADV-') || advSummary.includes('FAC')), 'E6.2. Título conciso');
+  assert(advSummary.includes('Factura de anticipo') && advSummary.includes('emitida') && (advSummary.includes('INV-ADV-') || advSummary.includes('FAC') || advSummary.includes('Factura_Anticipo_')), 'E6.2. Título conciso');
   assert(advSummary.includes('300'), 'E6.3. Importe del anticipo');
   assert(!advSummary.includes('conforme al Art. 75.Dos de la Ley 37/1992'), 'E6.4. Eliminada cita de ley redundante');
   const sigMsg = mockSent[2].payload.text;

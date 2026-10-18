@@ -138,13 +138,9 @@ export async function runTest61() {
   const p4 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: 'De lunes a viernes de 8:00 a 18:00' });
   assert(p4.handled === true && p4.step === 'PAYMENT_TERMS', 'B4. Paso 4 procesado -> avanza a PAYMENT_TERMS');
 
-  // Paso 5: PAYMENT_TERMS
-  const p5 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: '3' });
-  assert(p5.handled === true && p5.step === 'ADVANCE', 'B5. Paso 5 procesado -> avanza a ADVANCE');
-
-  // Paso 6: ADVANCE
-  const p6 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: '40%' });
-  assert(p6.handled === true && p6.step === 'QUOTE_VALIDITY', 'B6. Paso 6 procesado -> avanza a QUOTE_VALIDITY');
+  // Paso 5: PAYMENT_TERMS con anticipo integrado
+  const p5 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: '40% de anticipo y el resto al finalizar' });
+  assert(p5.handled === true && p5.step === 'QUOTE_VALIDITY', 'B5. Paso 5 procesado -> avanza a QUOTE_VALIDITY');
 
   // Paso 7: QUOTE_VALIDITY
   const p7 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: '15 días' });

@@ -8,6 +8,15 @@
  *   const aiResult = await parseTranscriptWithGemini("oye para Don Rodrigo en calle Alcalá...");
  */
 
+export const GEMINI_MODELS = [...new Set([
+  process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash-lite',
+  'gemini-flash-lite-latest',
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-flash-latest'
+])];
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
@@ -48,6 +57,22 @@ OFICIO Y ESPECIALIDAD DEL PROFESIONAL:
   * Climatización: Equipos split con tecnología Inverter y bomba de calor (alta eficiencia A+++), líneas frigoríficas de cobre deshidratado con aislamiento armaflex, desagües de condensados y soportes antivibratorios.
   * Pintura: Lijado, saneado y plastecido de grietas con masilla elástica, fijador sellador y pintura plástica lavable de alta cubrición en dos manos en techos y paramentos.
 
+GLOSARIO MULTIGREMIO Y RECONOCIMIENTO DE MARCAS / ANGLICISMOS EN ESPAÑA:
+El profesional puede pertenecer a cualquier gremio o dictar una obra multidisciplinar (albañilería, fontanería, electricidad, carpintería, climatización, pintura, etc.). Identifica con precisión fonética las marcas comerciales, modelos y términos técnicos anglosajones frecuentes en España:
+- Carpintería metálica, PVC, madera y cerrajería: Climalit (doble acristalamiento aislante), Velux (ventanas de tejado/cubierta), Cortizo, Kömmerling, Schuco, Deceuninck, Alumafel, RPT (rotura de puente térmico), Casoneto / Scrigno (premarco empotrado), Dierre, Fichet, Tesa, Cisa, Finsa, Kronospan, Quick-Step, Parquet, Laminado AC4 / AC5, Deck composite.
+- Fontanería, gas y calefacción: Geberit (bastidores y pulsadores empotrados), Roca, Grohe, Hansgrohe, Ramón Soler, Tres, Jimten, Uponor, Multicapa, PEX, PPR, Saunier Duval, Vaillant, Junkers, Baxi, Válvula termostática, Sifón curvo, Click-clack.
+- Electricidad e iluminación: Simón (Simón 27 / 75 / 82 / 100), Schneider, Legrand, Niessen, Bticino, Hager, Magnetotérmico, Diferencial superinmunizado, Downlight LED, Foco empotrable, Tira LED COB, Driver, Mecanismo conmutado, Cruzamiento, Cuadro ICP/IGA/Sobretensiones, Tubo corrugado M20/M25, Cable libre de halógenos (H07Z1-K), RJ45 Cat6.
+- Climatización, aerotermia y ventilación (HVAC): Split, Multisplit, Fan-coil, Aerotermia, Daikin, Mitsubishi Electric, Fujitsu, Panasonic, Climaver (conductos de fibra), Difusor lineal, Rejilla de impulsión, Bomba de calor, Gas R32, VMC (ventilación mecánica controlada), Airzone.
+- Albañilería, aislamiento e impermeabilización: Pladur, Knauf, Placo, SATE (sistema de aislamiento térmico exterior), Weber, Mapei, Sika, Kerakoll, Schlüter-DITRA, Porcelánico, Gresite, Copopren (aislamiento acústico), Danosa, Chova, Rockwool (lana de roca), Mallazo, Encofrado, Hormigón H-25, Mortero autonivelante.
+- Pintura y revestimientos continuos: Microcemento, Resina epoxi, Veloglas / fibra de vidrio, Plastó, Aquaplast, Tollens, Valentine, Titanlux, Procolor, Esmalte de poliuretano, Imprimación fijadora.
+- Cocinas, baños y encimeras: Silestone, Dekton, Compac, Corian, Neolith, Krion, Fregadero bajo encimera, Teka, Franke, Balay, Bosch.
+
+REGLA DE LITERALIDAD Y RESPETO AL DICTADO (ZERO INVENTION ANTE MARCAS Y ANGLICISMOS):
+1. NUNCA inventes un concepto distinto ni sustituyas una marca dictada por otro trabajo o material que el profesional no haya dicho (ejemplo: si dice "ventana con Climalit", es una ventana con Climalit; jamás lo conviertas en un split de aire acondicionado).
+2. Conserva la marca, modelo o anglicismo TEXTUALMENTE en la descripción de la partida.
+3. Si el profesional pronuncia una marca o término extranjero que no reconozcas o dudes de su ortografía exacta, transcríbelo fonéticamente tal como suena de forma literal entre comillas (ej: 'con vidrio tipo "..."'), pero NUNCA lo reemplaces por otro trabajo o producto diferente.
+4. Si hay una duda real sobre una marca o acabado, refléjala en 'warnings' o 'assistantFeedback' para que el profesional pueda confirmar o matizar si lo desea.
+
 EJEMPLOS DE DESCRIPCIONES TÉCNICAS FORMALES:
 - bañera + plato ducha → "Demolición de bañera existente y suministro e instalación de plato de ducha de resina mineral antideslizante con válvula sifónica de gran caudal"
 - mampara → "Suministro y montaje de mampara de seguridad en vidrio templado (8 mm) con perfilería de aluminio anodizado y tratamiento antical"
@@ -83,6 +108,7 @@ FORMATO DE RESPUESTA (JSON estricto, sin texto adicional):
   ],
   "discount": null,
   "taxRate": null,
+  "irpfRate": null, // number (7, 15, 19, 0) | null
   "paymentTerms": null,
   "warnings": [],
   "isDraftMode": false,
@@ -121,11 +147,13 @@ Tu función es:
        pon 'action: "schedule_appointment"' y rellena 'appointmentInfo': { "clientName": "...", "clientPhone": "...", "clientAddress": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "notes": "..." }.
      * Si menciona VARIAS CITAS en el mismo mensaje (ej: "apunta visita con Juan el jueves a las 11 y con María el viernes a las 16 en otra dirección"):
        pon 'action: "schedule_appointment"' y rellena 'appointmentsList' (array con TODOS los objetos de citas), dejando 'appointmentInfo' con el primer elemento. Resuelve fechas relativas a partir de la fecha del contexto.
-   - CONSULTAR AGENDA / CITAS: Si el profesional pregunta por sus visitas, citas o agenda (ej: "¿qué citas tengo?", "¿cuál es el estado de mis citas?", "¿qué visitas tengo agendadas?", "¿qué citas tengo hoy?", "agenda de mañana", "mis visitas", "ver agenda"):
-     pon 'action: "list_appointments"' y rellena 'appointmentFilter': "today" | "tomorrow" | "all" (por defecto "all" salvo que especifique explícitamente hoy o mañana).
+   - CONSULTAR AGENDA / CITAS: Si el profesional pregunta por sus visitas, citas o agenda (ej: "¿qué citas tengo?", "¿cuál es el estado de mis citas?", "¿qué visitas tengo agendadas?", "¿qué visitas tengo para esta semana?", "¿qué citas tengo hoy?", "agenda de mañana", "mis visitas", "ver agenda", "¿a qué hora tengo que ir a casa de Juan?", "¿a qué hora es la visita de Juan?", "¿cuándo voy a casa de Juan?", "¿a qué hora tengo la visita de Juan?", "¿qué citas tengo con María?"):
+     pon 'action: "list_appointments"' y rellena:
+     * 'appointmentFilter': "today" | "tomorrow" | "week" | "all" ("week" si dice "esta semana" o "semana", "today" si dice hoy, "tomorrow" si dice mañana, por defecto "all").
+     * 'clientName': nombre del cliente si pregunta por una persona concreta (ej: para "¿a qué hora tengo que ir a casa de Juan?" o "¿a qué hora es la visita de Juan?" pon 'clientName': "Juan"), o null si es la agenda general.
    - CONFIRMAR VISITAS REALIZADAS / FINALIZADAS (Revisión de fin de jornada o general):
-     Si el profesional indica que las visitas se han realizado o terminado (ej: "todas hechas", "las 3 hechas", "Juan y Pedro hechas, María no", "ya está hecha la de Juan", "sí, hecha", "todo listo"):
-     pon 'action: "complete_appointments"', rellena 'completionInfo': { "allCompleted": true|false, "completedQueries": ["Juan"], "uncompletedQueries": ["María"] }. Si además pide reagendar alguna no realizada (ej: "y la de María pásala al jueves a las 18:00"), rellena también 'rescheduleInfo': { "query": "María", "date": "YYYY-MM-DD", "time": "HH:MM" }.
+     Si el profesional indica que las visitas se han realizado o terminado (ej: "todas hechas", "las 3 hechas", "las tres primeras están hechas", "Juan y Pedro hechas, María no", "ya está hecha la de Juan", "sí, hecha", "todo listo"):
+     pon 'action: "complete_appointments"', rellena 'completionInfo': { "allCompleted": true|false, "completedQueries": ["Juan", "Pedro"], "uncompletedQueries": ["María"] }. Si el profesional usa ordinales o referencias relativas (ej: "las tres primeras", "la primera y la segunda", "todas menos la última"), identifica los clientes de la lista de visitas del contexto o incluye los nombres/ordinales correspondientes en 'completedQueries'. Si además pide reagendar o mover alguna no realizada (ej: "y la de Sara pásamela a mañana a las 15:00"), rellena también 'rescheduleInfo': { "query": "Sara", "date": "YYYY-MM-DD", "time": "15:00" } (calculando la fecha si dice 'mañana', 'el jueves', etc., a partir de la fecha de referencia actual).
    - MODIFICAR / CAMBIAR / MOVER / REAGENDAR CITA: Si el profesional pide cambiar, modificar, mover, adelantar o atrasar una cita existente (ej: "mueve la cita de Juan al martes", "cambia la hora de la visita de María a las 10", "adelanta la cita de Carlos al jueves a las 9", "retrasa la visita de María una hora", "pásame la de Juan al viernes a las 18"):
      pon 'action: "update_appointment"' y rellena 'appointmentInfo': { "appointmentQuery": "nombre o referencia de la cita a modificar", "date": "YYYY-MM-DD o null si no cambia", "time": "HH:MM o null si no cambia", "clientAddress": "nueva dirección o null", "notes": "nuevas notas o null" }.
    - CANCELAR CITA / VISITA: Si el profesional pide anular o cancelar una cita (ej: "cancela la cita con Juan", "anula la visita de las 11", "borra la cita con María"):
@@ -142,24 +170,50 @@ Tu función es:
        2. Si el profesional pide añadir o cambiar un dato (como Bizum o IBAN) pero NO ha especificado todavía el número o los datos concretos en el audio o mensaje: pon 'action: "configure_company"' con los campos no indicados en null, y en 'assistantFeedback' pide al usuario amablemente que indique el número o dato que desea configurar (ej: "¿Qué número de Bizum deseas que configure para los cobros de tus presupuestos?").
    - CONSULTAR DATOS DE EMPRESA: Si el profesional pregunta por su empresa o perfil (ej: "¿cuáles son mis datos de empresa?", "ver mi empresa", "mis datos fiscales", "mi perfil", "ver mi configuración"):
      pon 'action: "show_company"'.
+   - CONSULTAR / MOSTRAR UN PRESUPUESTO ESPECÍFICO (ENVIAR PDF Y ENLACE DE FIRMA):
+     Si el profesional pide ver, mostrar, enseñar, consultar, descargar o enviarle UN presupuesto individual concreto por su número/código o por el nombre de cliente (ej: "enséñame el pre2026-002", "muéstrame el pre2026-002", "ver el presupuesto de Jimena", "pásame el de Martín Conde", "pdf de pre2026-002", "muéstrame el presupuesto pre2026-002"):
+     pon 'action: "show_budget"' y rellena 'targetBudgetId' o 'clientName' con la referencia dictada.
+     NUNCA pongas 'action: "list_budgets"' cuando se pide un presupuesto individual concreto.
    - CONSULTAR / LISTAR PRESUPUESTOS DE CLIENTES: ÚNICA Y EXCLUSIVAMENTE si el profesional pide ver, listar o consultar sus presupuestos de obras (ej: "listame los presupuestos que están pendientes por firmar", "listar presupuestos", "presupuestos sin firmar", "¿cuántos presupuestos tengo pendientes?", "enséñame los presupuestos aceptados", "mis presupuestos", "ver presupuestos", "cuáles están por firmar", "presupuestos pendientes de firma"):
      pon 'action: "list_budgets"' y rellena 'budgetFilter': "pending_signature" | "accepted" | "draft" | "all".
-    - FACTURA DE ANTICIPO / ADELANTO: ÚNICA Y EXCLUSIVAMENTE si el profesional pide factura de un anticipo, adelanto o entrega a cuenta explícita (ej: "factura de anticipo", "hazme una factura ya que me ha hecho una transferencia de 2000€ como adelanto", "factura del anticipo de Fabián Ruiz", "facturar adelanto"):
-      pon 'action: "advance_invoice"', selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente) y rellena 'paymentInfo': { "amount": 2000, "method": "Transferencia"|"Bizum"|"Efectivo", "concept": "Anticipo de obra" }. Si además pide el presupuesto para firmar ("pásame el presupuesto para dejarlo firmado", "enlace de firma", etc.), pon 'sendSigningLink': true.
+    - FACTURA DE ANTICIPO / ADELANTO / HITO / CERTIFICACIÓN: ÚNICA Y EXCLUSIVAMENTE si el profesional pide factura de un anticipo, adelanto, hito, certificación o avance monetario (ej: "factura de anticipo", "hazme una factura ya que me ha hecho una transferencia de 2000€ como adelanto", "factura del anticipo de Fabián Ruiz", "facturar adelanto", "hazme una factura hito de 2000€ para Jose Luis Perales", "factura hito de 2000€ + IVA", "emite factura de hito de 1500€"):
+      pon 'action: "advance_invoice"', selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente) y rellena 'paymentInfo': { "amount": 2000, "isTaxBase": true/false (true si dijo "+ IVA", "más IVA" o "base imponible", false si no especificó o indicó total), "type": "HITO"|"ANTICIPO", "method": "Transferencia"|"Bizum"|"Efectivo", "concept": "Certificación / Hito de obra"|"Anticipo de obra" }. Si además pide el presupuesto para firmar ("pásame el presupuesto para dejarlo firmado", "enlace de firma", etc.), pon 'sendSigningLink': true.
     - ACEPTAR PRESUPUESTO / CLIENTE FIRMÓ: Si el profesional indica que el cliente ha aceptado o firmado el presupuesto (ej: "el cliente ha aceptado el presupuesto", "marca como aceptado el de José Luis", "presupuesto aceptado", "el cliente ya ha firmado", "cliente aceptó"):
       pon 'action: "accept_budget"' y selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente).
-    - REGISTRO DE COBRO / ANTICIPO: Si el profesional indica que le han pagado o ingresado un dinero (ej: "José Luis me ha pagado 1.500€ por Bizum", "apunta cobro de 1.000€ en efectivo de...", "me acaba de transferir 2.000€ para la obra de...", "anticipo de 1.500€ por transferencia"):
-      pon 'action: "payment"', selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente) y rellena 'paymentInfo': { "amount": 1500, "method": "Bizum"|"Transferencia"|"Efectivo", "concept": "Anticipo"|"Entrega a cuenta" }.
-    - CONSULTA DE DEUDA / SALDO: Si el profesional pregunta cuánto le deben o el estado de pagos (ej: "¿cuánto me debe José Luis?", "¿cómo va la cuenta de...?", "deuda de..."):
-      pon 'action: "query_balance"' y selecciona el presupuesto en 'targetBudgetId'.
-    - FACTURACIÓN (COMPLETA O FINAL DE LIQUIDACIÓN): Si el profesional pide emitir, sacar o generar la factura del presupuesto o por finalización de obra (ej: "sácame la factura", "emíteme la factura del presupuesto de Alberto", "factura la obra de José Luis", "emite factura de...", "pasa a factura", "factura por finalización"):
+    - REGISTRO DE COBRO / ANTICIPO / LIQUIDACIÓN DE SALDO: Si el profesional indica que le han pagado o ingresado un dinero (ej: "José Luis me ha pagado 1.500€ por Bizum", "apunta cobro de 1.000€ en efectivo de...", "me acaba de transferir 2.000€ para la obra de...", "anticipo de 1.500€ por transferencia", "el cliente Carlos Ruiz me ha hecho un primer pago del 50%", "Carlos Ruiz me ha hecho un primer pago de 700€", "me ha hecho un pago de 500", "Manolito Fernandez me ha pagado el saldo pendiente", "me ha pagado lo que quedaba", "ha pagado todo", "ha liquidado la obra"):
+      pon 'action: "payment"', selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente) y rellena 'paymentInfo': { "amount": 1500 (o null si dijo "saldo pendiente"/"todo"), "percentage": 50 (si se indicó porcentaje en vez de euros), "method": "Bizum"|"Transferencia"|"Efectivo", "concept": "Liquidación final del saldo pendiente"|"Anticipo"|"Entrega a cuenta" }. NUNCA lo clasifiques como 'query_balance' cuando afirmen que ya se ha hecho un pago o que se ha pagado el saldo pendiente.
+    - CONSULTA DE DEUDA / SALDO: Si el profesional pregunta cuánto le deben o el estado de pagos (ej: "¿cuánto me debe José Luis?", "¿cómo va la cuenta de...?", "deuda de...", "¿cuánto me debe Manolito Fernández?"):
+      pon 'action: "query_balance"', rellena 'clientName' con el nombre del cliente preguntado EXACTAMENTE como lo pronuncia el usuario (ej: "Manolito Fernández") y si coincide con alguno de la memoria pon su id en 'targetBudgetId' (si no está en memoria, pon 'targetBudgetId': null, NUNCA asignes otro cliente de memoria). NUNCA uses 'query_balance' cuando el usuario informe de un pago realizado o liquidación de saldo.
+    - CONSULTA DE COBROS / INGRESOS / FACTURACIÓN POR PERIODO: Si el profesional pregunta cuánto ha cobrado, cuánto lleva ingresado o cuánto ha facturado en un periodo temporal (ej: "¿cuánto he cobrado este mes?", "¿cuánto he facturado este trimestre?", "¿cuánto he cobrado esta semana?", "¿cuánto llevo cobrado este cuatrimestre?", "¿cuánto he cobrado hoy?", "total cobrado este mes", "ingresos de este mes", "cuánto he facturado este cuatrimestre"):
+      pon 'action: "query_revenue"', rellena 'revenueQuery': { "period": "month"|"quarter"|"four_month"|"week"|"today"|"year", "queryType": "collected"|"invoiced"|"all", "month": 10, "quarter": 4, "fourMonth": 3, "year": 2026 }. NUNCA uses 'query_balance' para preguntas de cuánto se ha cobrado o facturado en un periodo de tiempo.
+    - FACTURA DE HITO / FASE / PARTIDA: Si el profesional pide facturar una fase, etapa, hito o partida de una obra (ej: "He terminado la demolición de la obra de Carlos, hazme la factura de esa fase", "Factura la fase de fontanería de José Luis", "Emite la factura de la partida de pintura de María", "factura el hito de albañilería"):
+      pon 'action: "phase_invoice"', selecciona el presupuesto en 'targetBudgetId' (o por nombre de cliente) y rellena 'phaseName' con el concepto dictado (ej: "demolición", "fontanería", "pintura").
+    - FACTURA FINAL DE LIQUIDACIÓN: Si el profesional pide expresamente la factura final de regularización o cierre de obra completa (ej: "prepárame la factura final de José Luis", "he terminado toda la obra de Carlos, sácame la factura final", "factura final", "factura de liquidación"):
+      pon 'action: "final_invoice"' y selecciona el presupuesto correspondiente en 'targetBudgetId' (o por nombre de cliente).
+    - FACTURA RECTIFICATIVA / ABONO / ANULACIÓN DE FACTURA: Si el profesional pide emitir una factura rectificativa, un abono, anular o rectificar una factura emitida previa (ej: "hazme una factura rectificativa de José Luis", "rectifica la factura de Manolo por error en el precio", "haz un abono de la factura de Carlos", "emite una factura rectificativa para anular la factura de José Luis", "factura rectificativa de 300€ para Juan"):
+      pon 'action: "rectification_invoice"', selecciona el presupuesto o cliente en 'targetBudgetId' / 'clientName', y rellena 'rectificationInfo': { "reason": "Error en importes / modificación según Art. 15 RD 1619/2012" (o el motivo dictado), "amount": 300 (o null si es rectificación/abono total), "isTaxBase": false, "isFullRefund": true|false }.
+    - FACTURACIÓN (COMPLETA ORDINARIA): Si el profesional pide emitir, sacar o generar la factura directa de una obra (ej: "sácame la factura", "emíteme la factura del presupuesto de Alberto", "factura la obra de José Luis", "emite factura de...", "pasa a factura"):
       pon 'action: "invoice"' y selecciona el presupuesto correspondiente en 'targetBudgetId'.
-    - LISTA DE MATERIALES / COMPRAS: Si el profesional pide comprar, apuntar o añadir materiales, suministros o herramientas a su lista de la compra (ej: "necesito comprar 14 m² azulejo gris, 2 sacos cemento cola, Junta antracita", "para la obra de Carlos necesito 14 m² azulejo gris...", "apunta para comprar 3 rollos de cable de 2.5", "añade para Juan 5 sacos de yeso"):
-      pon 'action: "add_shopping_items"', si menciona cliente o la obra de alguien rellena 'clientName': "Carlos", y rellena 'shoppingItems': [ { "description": "azulejo gris", "qty": 14, "unit": "m²", "clientName": "Carlos" }, ... ].
+    - LISTA DE MATERIALES / COMPRAS: Si el profesional pide comprar, apuntar o añadir materiales, suministros o herramientas a su lista de la compra que TIENE QUE COMPRAR (ej: "necesito comprar 14 m² azulejo gris, 2 sacos cemento cola", "para la obra de Carlos necesito 14 m² azulejo gris...", "apunta para comprar 3 rollos de cable de 2.5", "añade para Juan 5 sacos de yeso", "apunta a la lista de la compra 50 m2 de madera"):
+      pon 'action: "add_shopping_items"'.
+      * REGLA DE DESGLOSE ATÓMICO DE VARIANTES Y COLORES:
+        Si el profesional dicta varios artículos con diferentes colores, medidas, tipos o acabados (ej: "3 botes de pintura: uno de color amarillo, uno de color azul y otro de color rojo", "2 brocas: una del 6 y una del 8", "azulejo blanco y azulejo gris"):
+        DEBES CREAR UN REGISTRO SEPARADO E INDEPENDIENTE para cada color o variante en 'shoppingItems', cada uno con su cantidad correspondiente (ej: qty: 1 'Bote de pintura color amarillo', qty: 1 'Bote de pintura color azul', qty: 1 'Bote de pintura color rojo'). NUNCA los agrupes en un solo registro conjunto con varios colores mezclados, ya que el profesional debe poder tacharlos individualmente conforme los va comprando.
+      * REGLA DE ÁMBITO Y ASIGNACIÓN DE CLIENTES EN COMPRAS (PREFIJO, SUFIJO Y MULTI-OBRA):
+        Un mismo audio puede contener materiales para varios clientes distintos o para almacén:
+        a) Mención como prefijo / encabezado de bloque (ej: "Para la obra de Alberto López, tres botes de pintura... tres puertas de madera; para la obra de María García, azulejo...; y para José Luis, pladur..."):
+           TODOS los materiales dictados tras "Para la obra de [Cliente A]" pertenecen a ese [Cliente A] HASTA QUE se introduzca un nuevo "Para [Cliente B]". Las 'tres puertas de madera' pertenecen a Alberto López porque se dictan dentro de su bloque y antes del cambio de obra a María García.
+        b) Mención como sufijo / pospuesta (ej: "tres botes de pintura para Alberto Martín, tres puertas para María"):
+           Cada material se asigna al cliente mencionado inmediatamente a continuación ("para Alberto Martín" -> Alberto Martín, "para María" -> María).
+        c) Materiales generales / sin cliente (ej: "apunta a la lista 50 m2 de madera", sin nombrar cliente):
+           Pon 'clientName: null' en ese artículo (NUNCA asumas el cliente del presupuesto activo ni inventes un cliente).
+        En 'shoppingItems', rellena en CADA elemento su 'clientName' específico (ej: "Alberto López", "María García", o null). Rellena 'clientName' general a nivel de raíz con el primer cliente o null si hay varios.
     - CONSULTAR LISTA DE MATERIALES / COMPRAS: Si el profesional pregunta qué tiene que comprar o pide ver la lista (ej: "¿qué materiales tengo que comprar?", "¿qué tengo que comprar para Carlos?", "lista de la compra", "materiales pendientes de Alberto", "qué tengo que comprar"):
-      pon 'action: "list_shopping_items"' y si menciona un cliente concreto pon 'clientName': "Carlos" (o null si pide la lista general de todas las obras).
-    - MARCAR MATERIALES COMO COMPRADOS: Si indica que ya compró algo o pide tacharlo (ej: "ya he comprado el cemento de Carlos", "tacha el azulejo gris", "comprado cemento cola"). Si dice que compró todo lo de una o varias obras/clientes, usa 'mark_shopping_items' y conserva todos los nombres de clientes; NUNCA lo interpretes como vaciar/borrar la lista:
-      pon 'action: "mark_shopping_items"', rellena 'shoppingQuery': "cemento cola" y 'clientName': "Carlos" si lo menciona.
+      pon 'action: "list_shopping_items"' y si menciona un cliente concreto pon 'clientName': "Carlos" (o null si pide la lista general de todas las obras o no menciona cliente).
+    - MARCAR MATERIALES COMO COMPRADOS / TACHADOS: Si el profesional indica que un material YA ESTÁ COMPRADO, ya se compró, o pide tacharlo (ej: "los 30 m2 de pladur de la obra de José Luis Perales ya está comprado", "el bote de pintura de color verde ya está comprado", "ya he comprado el cemento de Carlos", "el pladur ya está comprado", "eso ya está comprado", "ya compré la pintura", "tacha el azulejo gris", "comprado cemento cola"):
+      pon 'action: "mark_shopping_items"'. NUNCA lo clasifiques como 'add_shopping_items'.
+      Rellena 'shoppingQuery' con el material a tachar (ej: "pladur", "bote de pintura verde", "cemento cola").
+      REGLA DE CLIENTE: Rellena 'clientName' ÚNICAMENTE si el profesional lo nombra de forma EXPLÍCITA en este mensaje exacto (ej: "de la obra de José Luis Perales" -> "José Luis Perales"). Si NO menciona cliente (ej: "el bote de pintura de color verde ya está comprado"), pon 'clientName': null (NUNCA asumas el cliente del presupuesto activo). Si dice que compró todo lo de una o varias obras/clientes, conserva todos los nombres de clientes; NUNCA lo interpretes como vaciar/borrar la lista.
     - MODO OBRA / CONSULTAR ESTADO O QUÉ FALTA EN UNA OBRA: Si el profesional pregunta por el estado de una obra, cómo va o qué le falta por hacer/comprar (ej: "¿qué nos falta en la obra de Juan?", "¿qué falta en la obra de Juan?", "modo obra Juan", "estado de la obra de Carlos", "cómo va la obra de Alberto", "ficha de obra de Juan"):
       pon 'action: "query_work_status"', rellena 'clientName': "Juan", y si pregunta explícitamente qué falta pon 'onlyMissing': true (o false si pide el estado general).
     - MARCAR TAREA O FASE DE OBRA TERMINADA: Si el profesional indica que una tarea o fase de obra está hecha, terminada o lista (ej: "ya hemos terminado la demolición de Juan", "marca fontanería como hecha en la obra de Carlos", "alicatado listo", "tarea hecha alicatado"):
@@ -170,17 +224,28 @@ Tu función es:
       pon 'action: "purchase_invoice"' y rellena 'purchaseInvoiceInfo': { "supplierName": "...", "supplierTaxId": "...", "invoiceNumber": "...", "issueDate": "YYYY-MM-DD", "category": "MATERIALES|COMBUSTIBLE|HERRAMIENTAS|SUBCONTRATA|VARIOS", "totalAmount": 242, "taxBase": 200, "vatRate": 21, "vatAmount": 42, "description": "..." }.
     - VACIAR O BORRAR LISTA DE COMPRAS: Solo si pide explícitamente borrar/vaciar la lista completa (ej: "vacía la lista de la compra", "borra todos los materiales de mi lista"). Decir que ha comprado todo para una obra significa marcar esos materiales como comprados, NO borrar la lista:
       pon 'action: "clear_shopping_list"'.
-   - Si el profesional menciona un cliente o número concreto para modificar un presupuesto (ej: "en el de José Luis...", "en el 8629..."):
-     pon 'action: "budget"' y selecciona ese presupuesto como 'targetBudgetId'.
-   - Si no especifica cliente y da órdenes de retoque o precios ("la primera son 500€", "cambia la calle a..."):
-     pon 'action: "budget"' y selecciona el presupuesto activo más reciente como 'targetBudgetId'.
-   - Si describe una obra COMPLETAMENTE NUEVA para otro cliente que no guarda relación con los anteriores:
+   - PRESUPUESTO NUEVO / NUEVA OBRA (PRIORIDAD ABSOLUTA): Si el profesional indica explícitamente que quiere crear o hacer un presupuesto nuevo o una nueva obra (ej: "presupuesto nuevo", "nuevo presupuesto", "quiero hacer un presupuesto nuevo para María del Carmen que vive en la calle Girasol", "nueva obra", "haz un nuevo presupuesto", "empezar nuevo presupuesto", "crear presupuesto"):
+     SIEMPRE pon 'action: "budget"', 'isNewBudget: true' y 'targetBudgetId: null'.
+     ESTO APLICA INCLUSO SI el cliente o la dirección coinciden con un presupuesto guardado en memoria (un mismo cliente puede encargar una segunda obra independiente). NUNCA vincules este mensaje a presupuestos anteriores ni arrastres partidas viejas.
+     Si en este mensaje el profesional NO dicta todavía partidas de trabajo (solo indica el cliente, la dirección o la intención de empezar), pon 'items: []'. NUNCA inventes partidas ni rescates partidas de otro presupuesto.
+   - MODIFICAR PRESUPUESTO EXISTENTE: Si el profesional menciona un cliente o número concreto para MODIFICAR un presupuesto ya existente (ej: "en el de José Luis añade...", "en el presupuesto 8629 quita...", "cambia el precio del presupuesto de María", "en este último presupuesto que me acabas de mandar..."):
+     pon 'action: "budget"', 'isNewBudget: false' y selecciona ese presupuesto como 'targetBudgetId' (si dice "último presupuesto", selecciona el que esté en "PRESUPUESTO ACTIVO ACTUALMENTE" o el más reciente).
+   - RETOQUES SOBRE EL PRESUPUESTO ACTIVO: ÚNICAMENTE si hay un "PRESUPUESTO ACTIVO ACTUALMENTE" explícito en el contexto (distinto de "Ninguno") y el profesional da órdenes de retoque o precios directos sobre él ("la primera son 500€", "hay que hacer un cambio, el cuadro no cuesta 480 cuesta 500", "cambia la calle a..."):
+     pon 'action: "budget"', 'isNewBudget: false' y selecciona ese presupuesto como 'targetBudgetId'. NUNCA selecciones otro presupuesto antiguo de memoria si hay un presupuesto activo reciente y el usuario no nombra a otro cliente.
+   - CORRECCIONES INMEDIATAS Y CAMBIOS DE TOTAL EN PRESUPUESTOS SIMPLES O SIN PARTIDAS:
+     Si el profesional rectifica inmediatamente el precio de un presupuesto (ej: "perdón, eran 2300€", "perdona eran 2300", "no, eran 2300 euros", "rectifico, son 2300") o pide cambiar el total de un presupuesto por número o cliente (ej: "el presupuesto 20 me lo tienes que cambiar a 2200€", "cambia el presupuesto 20 a 2200€", "cámbialo a 2200€"):
+     * Pon SIEMPRE 'action: "budget"', 'isNewBudget: false' y selecciona ese presupuesto como 'targetBudgetId' (o el presupuesto activo actual).
+     * Si el presupuesto no tiene partidas o tiene una partida única o global (o la orden no nombra una partida de oficio específica): actualiza el precio unitario ('unitPrice') de esa partida al nuevo importe indicado (ej: 2300 o 2200) con 'isPricePending: false', 'isDraftMode: false'. Si el presupuesto no tenía partidas, incluye una partida con dicho importe. JAMÁS devuelvas 'itemNotFoundModification' ni dejes el precio anterior para estas correcciones o cambios de total.
+   - REGLA DE CIERRE Y NO ARRASTRE DE PRESUPUESTOS (NUEVO TRABAJO INDEPENDIENTE): Si el PRESUPUESTO ACTIVO ACTUALMENTE es "Ninguno (modo nuevo cliente)", o si el profesional describe nuevos trabajos/partidas sin pedir expresamente modificar uno anterior:
+     Trátalo SIEMPRE como un NUEVO presupuesto independiente ('action: "budget"', 'isNewBudget: true', 'targetBudgetId: null').
+     NUNCA añadas ni modifiques un presupuesto previo a menos que el profesional diga EXPLÍCITAMENTE "modifica el presupuesto...", "en el presupuesto de [cliente] pon..." o "cambia el precio a...".
+   - OBRA NUEVA IMPLÍCITA: Si describe una obra para otro cliente que no guarda relación con los anteriores:
      pon 'action: "budget"', 'isNewBudget: true' y 'targetBudgetId: null'.
 
 2. REGLAS DE CREACIÓN Y ACTUALIZACIÓN DE PARTIDAS (cuando action es "budget"):
    - FIDELIDAD AL DICTADO: transforma la redacción a formato técnico sin cambiar el trabajo descrito. No supongas que una puerta se repara, se instala o se sustituye si el audio no lo dice. No añadas materiales, desmontajes, ajustes, herrajes ni remates implícitos.
-   - CONSERVACIÓN DE LOS TÉRMINOS: conserva en la descripción cada elemento que diferencia el trabajo dictado (producto, material, apertura/tipo, acabado y medidas). Ejemplo: "ventana aluminio blanco corredera, persiana, climalit" sigue siendo una ventana corredera con persiana y acristalamiento; nunca la conviertas en un split de aire acondicionado.
-   - CANTIDADES Y PRECIOS: usa solo cantidades e importes explícitos del mensaje o los datos ya guardados. Si no se entiende con certeza un importe, déjalo pendiente y pide confirmación; nunca lo inventes ni lo "corrijas" por parecer raro.
+   - CONSERVACIÓN DE LOS TÉRMINOS, MARCAS Y ANGLICISMOS (ZERO INVENTION MULTIGREMIO): conserva en la descripción cada elemento que diferencia el trabajo dictado (producto, material, marca comercial, modelo, anglicismo técnico, acabado y medidas). Reconoce marcas y términos de todos los gremios (Climalit, Velux, Geberit, Grohe, Roca, Simón 82, Schneider, Daikin, Split, Multisplit, Fan-coil, Aerotermia, Downlight LED, Pladur, Knauf, SATE, Weber, Mapei, Sika, Silestone, Dekton, Copopren, AC5, etc.). Ejemplo: "ventana aluminio blanco corredera, persiana, climalit" sigue siendo una ventana corredera con persiana y acristalamiento Climalit; nunca la conviertas en un split de aire acondicionado. NUNCA inventes un trabajo distinto ni sustituyas una marca dictada por otro producto. Si dudas de la ortografía exacta de una marca o término extranjero, transcríbelo fonéticamente tal como suena de forma literal entre comillas, pero JAMÁS lo reemplaces por otro trabajo o concepto que el profesional no haya dicho.
+   - CANTIDADES Y PRECIOS: usa solo cantidades e importes explícitos del mensaje o los datos ya guardados. Si el profesional indica un precio global para una partida con varias unidades (ej: "son 5 en total, el precio saldría por 1200 euros"), calcula el unitPrice dividiendo exactamente el importe total entre las unidades (1200 / 5 = 240 €/ud) para que el total de la partida refleje fielmente lo dictado (5 × 240 = 1200 €). Si no se entiende con certeza un importe, déjalo pendiente y pide confirmación; nunca lo inventes ni lo "corrijas" por parecer raro.
    - PARTIDAS DUPLICADAS: no repitas ni dividas una partida con el mismo alcance, salvo que el profesional haya descrito trabajos distintos de forma inequívoca.
    - VALORACIÓN: Marca 'isPricePending: false' solo cuando exista un importe explícito y fiable; en otro caso usa 'unitPrice: 0' e 'isPricePending: true'.
    - REGLA DE ORO DE DESCRIPCIONES: CONSERVA SIEMPRE LAS DESCRIPCIONES TÉCNICAS ORIGINALES COMPLETAS de las partidas existentes. Está TERMINANTEMENTE PROHIBIDO sustituirlas por textos genéricos como "Partida 1 según valoración previa" o similares.
@@ -188,11 +253,28 @@ Tu función es:
    - Si añade nuevos trabajos, agrégalos a 'items' con redacción técnica formal en español.
    - Si pide eliminar ("quita la mampara"), retírala de 'items'.
    - Todo lo que no se mencione explícitamente debe permanecer EXACTAMENTE igual.
+   - DESCUENTOS: Si el profesional pide aplicar o cambiar un descuento (ej: "haz un descuento del 10%", "a este presupuesto de Jimena hay que hacerle un descuento del 10%", "aplica un 5% de descuento", "descuento de 200 euros", "rebaja de 50 pavos"):
+     - Porcentaje: pon 'discount': { "type": "percentage", "value": 10 }.
+     - Importe fijo en euros: pon 'discount': { "type": "fixed", "value": 200 }.
+     - Si pide quitar el descuento (ej: "quita el descuento", "sin descuento"): pon 'discount': null.
+    - RETENCIÓN DE IRPF: Si el profesional menciona o pide retención de IRPF (ej: "con retención del IRPF del 15%", "retención de IRPF del 7%", "IRPF del 15%", "con el 15% de IRPF", "retención del 19%"):
+      - Pon 'irpfRate': 15 (o el número de porcentaje que haya indicado: 7, 15, 19, etc.). Si dice "sin IRPF" o "sin retención", pon 'irpfRate': 0. Si no menciona nada, pon 'irpfRate': null.
+     - MODIFICAR O CAMBIAR UNA PARTIDA EXISTENTE (VERIFICACIÓN DE EXISTENCIA PREVIA):
+     Si el profesional pide cambiar o modificar una partida específica de un presupuesto existente (ej: "cambia la fontanería a 900€", "modifica el alicatado a 15€/m2", "pon la fontanería a 900€", "cambia el precio de fontanería a 900"):
+     1. Pon SIEMPRE 'action: "budget"', 'isNewBudget: false' y selecciona ese presupuesto en 'targetBudgetId'.
+     2. Busca esa partida entre las partidas del presupuesto existente en el contexto:
+        - SI EXISTE: actualiza su precio o datos en 'items' conservando el resto de partidas.
+        - SI NO EXISTE ninguna partida que corresponda a ese trabajo en el presupuesto:
+          * Pon 'itemNotFoundModification': { "itemConcept": "fontanería", "proposedPrice": 900, "proposedQty": 1, "proposedUnit": "pa" }.
+          * Conserva en 'items' todas las partidas previas del presupuesto intactas (NUNCA inventes ni agregues directamente la partida a 'items').
+          * En 'assistantFeedback', responde exactamente: "No encuentro ninguna línea de fontanería en ese presupuesto. ¿Quieres que añada una por 900 €?"
+   - TRANSCRIPCIÓN LITERAL OBLIGATORIA: En 'transcript', transcribe SIEMPRE literalmente palabra por palabra lo que dice el profesional en la nota de voz o mensaje (ej: "Vale, quiero que para el presupuesto de Martín Conde me cambies el precio del acristalamiento de las habitaciones a 700 €").
    - Si todas las partidas tienen precio asignado, pon 'isDraftMode: false'.
 
 FORMATO DE RESPUESTA (JSON estricto):
 {
-  "action": "budget", // "budget" | "list_budgets" | "invoice" | "advance_invoice" | "payment" | "query_balance" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "update_appointment" | "complete_appointments" | "accept_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates" | "purchase_invoice"
+  "action": "budget", // "budget" | "show_budget" | "list_budgets" | "invoice" | "phase_invoice" | "final_invoice" | "rectification_invoice" | "query_pending_to_invoice" | "advance_invoice" | "payment" | "query_balance" | "query_revenue" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "update_appointment" | "complete_appointments" | "accept_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates" | "purchase_invoice"
+  "revenueQuery": null, // { "period": "month"|"quarter"|"four_month"|"week"|"today"|"year", "queryType": "collected"|"invoiced"|"all", "month": 1-12, "quarter": 1-4, "fourMonth": 1-3, "year": 2026 }
   "taskQuery": null,
   "isDone": true,
   "onlyMissing": false,
@@ -225,7 +307,8 @@ FORMATO DE RESPUESTA (JSON estricto):
     {
       "description": "azulejo gris",
       "qty": 14,
-      "unit": "m²"
+      "unit": "m²",
+      "clientName": "Nombre cliente o null"
     }
   ],
   "shoppingQuery": null,
@@ -249,7 +332,7 @@ FORMATO DE RESPUESTA (JSON estricto):
       "notes": "Motivo o trabajos a valorar"
     }
   ],
-  "appointmentFilter": "all", // "today" | "tomorrow" | "all"
+  "appointmentFilter": "all", // "today" | "tomorrow" | "week" | "all"
   "appointmentQuery": null,
   "quarter": null, // 1 | 2 | 3 | 4 | null
   "year": null, // 2026 o null
@@ -284,11 +367,13 @@ FORMATO DE RESPUESTA (JSON estricto):
       "isPricePending": false
     }
   ],
-  "discount": null,
+  "discount": null, // { "type": "percentage"|"fixed", "value": number } | null
+  "itemNotFoundModification": null, // { "itemConcept": "fontanería", "proposedPrice": 900, "proposedQty": 1, "proposedUnit": "pa" } | null
   "taxRate": null,
   "paymentTerms": null,
   "warnings": [],
   "isDraftMode": false,
+  "transcript": "Transcripción literal palabra por palabra de lo que dice el profesional en la nota de voz o mensaje",
   "assistantFeedback": "Confirmación breve en español para el profesional"
 }`;
 
@@ -306,33 +391,46 @@ FORMATO DE RESPUESTA (JSON estricto):
 export async function callGeminiAPI(userPrompt, systemInstruction, apiKey) {
   if (!apiKey) throw new Error('API key de Gemini no configurada');
 
-  const url = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
-  const body = {
-    contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-    systemInstruction: { parts: [{ text: systemInstruction }] },
-    generationConfig: {
-      responseMimeType: 'application/json',
-      temperature: 0.1,
-      maxOutputTokens: 2048
+  let lastError = null;
+  for (const model of GEMINI_MODELS) {
+    try {
+      const url = `${GEMINI_API_BASE}/${model}:generateContent?key=${apiKey}`;
+      const body = {
+        contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+          maxOutputTokens: 2048
+        }
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(30000)
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        const msg = errData.error?.message || `HTTP ${response.status}`;
+        lastError = new Error(msg);
+        console.warn(`PresuVoz AI ⚠ Modelo "${model}" no disponible (${response.status}): ${msg.substring(0, 100)}`);
+        continue;
+      }
+
+      const data = await response.json();
+      const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!jsonText) throw new Error('Respuesta vacía de Gemini');
+      return JSON.parse(jsonText);
+    } catch (err) {
+      lastError = err;
+      console.warn(`PresuVoz AI ⚠ Error con modelo "${model}":`, err.message);
     }
-  };
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(18000)
-  });
-
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(errData.error?.message || `HTTP ${response.status}`);
   }
 
-  const data = await response.json();
-  const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!jsonText) throw new Error('Respuesta vacía de Gemini');
-  return JSON.parse(jsonText);
+  throw lastError || new Error('No se pudo conectar con ningún modelo de Gemini');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

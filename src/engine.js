@@ -34,9 +34,27 @@ export class PresuVozEngine {
    */
   detectTaxRate(text, fallbackRate = 0.21) {
     const lower = String(text || '').toLowerCase();
-    if (/\b(?:iva\s+)?exent[oa]s?\b|\biva\s+(?:del?\s*)?0\s*%/.test(lower)) return 0;
-    const explicit = lower.match(/\biva\s+(?:general\s+)?(?:del?\s*)?(4|5|10|21)\s*%/);
+    if (/\b(?:iva\s+)?exent[oa]s?\b|\biva\s+(?:del?\s*|al?\s*)?0\s*%/.test(lower)) return 0;
+    const explicit = lower.match(/\biva\s+(?:general\s+)?(?:(?:de|del|al?)\s+)?(4|5|10|21)\s*%/);
     if (explicit) return Number(explicit[1]) / 100;
+    return fallbackRate;
+  }
+
+  /**
+   * Extrae la retención de IRPF dictada por el usuario o toma el configurado para la empresa.
+   * @param {string} text - Transcripción del audio o mensaje
+   * @param {number} fallbackRate - Tipo de IRPF por defecto (ej: 0 o de la empresa)
+   * @returns {number} Porcentaje de retención (ej: 15 para 15%, 7 para 7%, 0 si no aplica)
+   */
+  detectIrpfRate(text, fallbackRate = 0) {
+    const lower = String(text || '').toLowerCase();
+    if (/\b(?:sin\s+irpf|sin\s+retenci[oó]n|irpf\s+(?:del?\s*|al?\s*)?0\s*%)\b/.test(lower)) return 0;
+    const explicit = lower.match(/\b(?:retenci[oó]n\s+(?:del?\s+)?(?:irpf\s+)?|irpf\s+)(?:(?:de|del|al?)\s+)?(\d{1,2}|siete|quince|diecinueve)\s*%/i);
+    if (explicit) {
+      const wordMap = { 'siete': 7, 'quince': 15, 'diecinueve': 19 };
+      const val = wordMap[explicit[1].toLowerCase()] || parseInt(explicit[1], 10);
+      if (Number.isFinite(val) && val >= 0 && val <= 100) return val;
+    }
     return fallbackRate;
   }
 
@@ -47,11 +65,17 @@ export class PresuVozEngine {
    */
   extractTerms(text, company = {}) {
     const lower = text.toLowerCase();
-    const configuredAdvance = Number(company.defaultAdvance ?? 30);
-    let advancePercentage = Number.isFinite(configuredAdvance) && configuredAdvance >= 0 && configuredAdvance <= 100
-      ? configuredAdvance
+    let configuredAdvance = company.defaultAdvance ?? company.default_advance;
+    if ((configuredAdvance === undefined || configuredAdvance === null) && (company.paymentTerms || company.payment_terms)) {
+      const termsStr = String(company.paymentTerms || company.payment_terms);
+      const m = termsStr.match(/(\d{1,2})\s*%\s*(?:al\s*empezar|al\s*inicio|de\s*adelanto|de\s*anticipo|por\s*adelantado)/i);
+      if (m) configuredAdvance = parseInt(m[1], 10);
+    }
+    const parsedAdvance = Number(configuredAdvance ?? 30);
+    let advancePercentage = Number.isFinite(parsedAdvance) && parsedAdvance >= 0 && parsedAdvance <= 100
+      ? parsedAdvance
       : 30;
-    const configuredValidity = Number(company.quoteValidityDays ?? 15);
+    const configuredValidity = Number(company.quoteValidityDays ?? company.quote_validity_days ?? 15);
     let validityDays = Number.isInteger(configuredValidity) && configuredValidity > 0 && configuredValidity <= 365
       ? configuredValidity
       : 15;
@@ -211,7 +235,15 @@ export class PresuVozEngine {
     subtotal = Number(subtotal.toFixed(2));
     const taxableBase = Number((subtotal - discountAmount).toFixed(2));
     const taxAmount = Number((taxableBase * taxRate).toFixed(2));
-    const totalAmount = Number((taxableBase + taxAmount).toFixed(2));
+
+    // Retención de IRPF: dictada expresamente en audio/texto o configurada en la empresa
+    const configuredIrpf = rawInput.company?.irpfRate ?? this.company?.irpfRate ?? 0;
+    const irpfRate = rawInput.irpfRate !== undefined
+      ? Number(rawInput.irpfRate)
+      : this.detectIrpfRate(rawText, Number(configuredIrpf));
+    const irpfAmount = irpfRate > 0 ? Number(((taxableBase * irpfRate) / 100).toFixed(2)) : 0;
+
+    const totalAmount = Number((taxableBase + taxAmount - irpfAmount).toFixed(2));
     const advanceAmount = Number(((totalAmount * terms.advancePercentage) / 100).toFixed(2));
 
     const budgetId = `PRE-${new Date().getFullYear()}-${randomBytes(8).toString('hex').toUpperCase()}`;
@@ -237,6 +269,8 @@ export class PresuVozEngine {
         taxableBase,
         taxRatePercentage: Math.round(taxRate * 100),
         taxAmount,
+        irpfRatePercentage: irpfRate,
+        irpfAmount,
         totalAmount,
         advancePercentage: terms.advancePercentage,
         advanceAmount,
@@ -420,16 +454,46 @@ export class PresuVozEngine {
 
 
     const taxRate = (budget.financials?.taxRatePercentage ?? 21) / 100;
-    const taxableBase = Number((rawAmount / (1 + taxRate)).toFixed(2));
-    const taxAmount = Number((rawAmount - taxableBase).toFixed(2));
-    const totalAmount = Number((taxableBase + taxAmount).toFixed(2));
+    const irpfRate = Number(options.irpfRate !== undefined ? options.irpfRate : (budget.financials?.irpfRatePercentage !== undefined ? budget.financials.irpfRatePercentage : (comp.irpfRate || 0)));
+
+    const isTaxBase = Boolean(paymentData.isTaxBase ?? options.isTaxBase);
+    let taxableBase, taxAmount, irpfAmount, totalAmount;
+
+    if (isTaxBase) {
+      taxableBase = Number(rawAmount.toFixed(2));
+      taxAmount = Number((taxableBase * taxRate).toFixed(2));
+      irpfAmount = irpfRate > 0 ? Number((taxableBase * (irpfRate / 100)).toFixed(2)) : 0;
+      totalAmount = Number((taxableBase + taxAmount - irpfAmount).toFixed(2));
+    } else {
+      taxableBase = Number((rawAmount / (1 + taxRate - (irpfRate / 100))).toFixed(2));
+      taxAmount = Number((taxableBase * taxRate).toFixed(2));
+      irpfAmount = irpfRate > 0 ? Number((taxableBase * (irpfRate / 100)).toFixed(2)) : 0;
+      totalAmount = Number((taxableBase + taxAmount - irpfAmount).toFixed(2));
+    }
+
+    const invoiceType = (options.type || paymentData.type || 'ANTICIPO').toUpperCase();
+    const isHito = invoiceType === 'HITO';
+
+    const priorInvoices = options.priorInvoices || budget.advanceInvoices || [];
+    const priorOfType = priorInvoices.filter(inv => (inv.type || 'ANTICIPO').toUpperCase() === invoiceType);
+    const seq = options.seq || (isHito ? priorOfType.length + 1 : 1);
 
     const addressPart = budget.client?.address ? ` en ${budget.client.address}` : '';
-    const itemDesc = options.concept || `Entrega a cuenta / Anticipo por aceptación de presupuesto ${budget.id || ''}${addressPart}`;
+    const itemDesc = options.concept || paymentData.concept || (isHito
+      ? `Certificación / Hito de obra: Entrega a cuenta por avance de trabajos en ${budget.id || ''}${addressPart}`
+      : `Entrega a cuenta / Anticipo por aceptación de presupuesto ${budget.id || ''}${addressPart}`);
+
+    const invoiceNaming = formatInvoiceNaming(invoiceType, budget.id || 'PRE-2026', seq);
+
+    const legalNote = isHito
+      ? 'Factura de certificación / hito de obra emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA y RD 1619/2012.'
+      : 'Factura de anticipo emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA y RD 1619/2012.';
 
     const advanceInvoice = {
       id: invoiceId,
-      type: 'ANTICIPO',
+      displayNumber: invoiceNaming,
+      naming: invoiceNaming,
+      type: invoiceType,
       budgetId: budget.id || 'PRE-2026',
       issueDate: today,
       operationDate: paymentData.date || today,
@@ -462,19 +526,149 @@ export class PresuVozEngine {
         taxableBase,
         taxRatePercentage: budget.financials?.taxRatePercentage ?? 21,
         taxAmount,
+        irpfRatePercentage: irpfRate,
+        irpfAmount,
         totalAmount,
         advanceAmount: 0,
         remainingAmount: 0
       },
       status: 'PAGADA',
       paymentMethod: paymentData.method || 'Transferencia bancaria / Bizum',
-      legalNote: 'Factura de anticipo emitida conforme al Art. 75.Dos de la Ley 37/1992 del IVA y RD 1619/2012.'
+      legalNote
     };
 
     if (!budget.advanceInvoices) budget.advanceInvoices = [];
     budget.advanceInvoices.push(advanceInvoice);
 
     return advanceInvoice;
+  }
+
+  /**
+   * Genera una Factura Rectificativa legal conforme al Art. 15 del Real Decreto 1619/2012
+   * y Art. 80 de la Ley 37/1992 del IVA.
+   *
+   * @param {object} originalInvoice - Factura original emitida a rectificar
+   * @param {object} [options] - Opciones de rectificación:
+   *   - reason: Causa o motivo legal de la rectificación (obligatorio por RD 1619/2012)
+   *   - amount: Importe a rectificar (si se omite, anulación/abono total)
+   *   - isTaxBase: Si el importe especificado corresponde a la base imponible
+   *   - isFullRefund: Forzar anulación total
+   *   - items: Partidas rectificadas específicas
+   *   - seq: Secuencial de la factura rectificativa
+   *   - id: ID personalizado
+   * @returns {object} Factura rectificativa formal
+   */
+  createRectificationInvoice(originalInvoice, options = {}) {
+    if (!originalInvoice) {
+      throw new Error('No se puede generar factura rectificativa sin una factura original de referencia.');
+    }
+
+    const year = new Date().getFullYear();
+    const origFin = originalInvoice.financials || {};
+    const origTotal = Number(origFin.totalAmount ?? originalInvoice.total_amount ?? originalInvoice.totalAmount ?? 0);
+    const origBase = Number(origFin.taxableBase ?? originalInvoice.taxBase ?? 0);
+    const origTax = Number(origFin.taxAmount ?? originalInvoice.taxAmount ?? 0);
+    const origTaxRate = Number(origFin.taxRatePercentage ?? originalInvoice.taxRate ?? (originalInvoice.tax_rate ?? 21));
+    const origIrpfRate = Number(origFin.irpfRatePercentage ?? originalInvoice.irpfRate ?? 0);
+    const taxRate = origTaxRate / 100;
+    const irpfRate = origIrpfRate / 100;
+
+    const today = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const seq = options.seq || 1;
+    const budgetId = originalInvoice.budgetId || originalInvoice.budget_id || 'PRE-2026';
+    const invoiceNaming = formatInvoiceNaming('RECTIFICATIVA', budgetId, seq);
+
+    const isPartial = options.amount !== undefined && options.amount !== null && !options.isFullRefund;
+    const rawReason = options.reason || 'Corrección de importes y conceptos conforme al Art. 15 del RD 1619/2012';
+
+    let taxableBase, taxAmount, irpfAmount, totalAmount;
+
+    if (!isPartial) {
+      // Rectificación / Abono total de la factura original (valores negativos que anulan fiscalmente la factura previa)
+      taxableBase = -Math.abs(Number(origBase.toFixed(2)));
+      taxAmount = -Math.abs(Number(origTax.toFixed(2)));
+      irpfAmount = origFin.irpfAmount ? -Math.abs(Number(Number(origFin.irpfAmount).toFixed(2))) : 0;
+      totalAmount = -Math.abs(Number(origTotal.toFixed(2)));
+    } else {
+      // Rectificación parcial por importe específico
+      const inputAmount = Number(options.amount);
+      const isTaxBase = Boolean(options.isTaxBase);
+      if (isTaxBase) {
+        taxableBase = -Math.abs(Number(inputAmount.toFixed(2)));
+        taxAmount = Number((taxableBase * taxRate).toFixed(2));
+        irpfAmount = irpfRate > 0 ? Number((taxableBase * irpfRate).toFixed(2)) : 0;
+        totalAmount = Number((taxableBase + taxAmount - irpfAmount).toFixed(2));
+      } else {
+        const grossAmount = Math.abs(inputAmount);
+        const baseCalc = grossAmount / (1 + taxRate - irpfRate);
+        taxableBase = -Number(baseCalc.toFixed(2));
+        taxAmount = Number((taxableBase * taxRate).toFixed(2));
+        irpfAmount = irpfRate > 0 ? Number((taxableBase * irpfRate).toFixed(2)) : 0;
+        totalAmount = -Number(grossAmount.toFixed(2));
+      }
+    }
+
+    const origDisplayNum = originalInvoice.displayNumber || originalInvoice.naming || originalInvoice.invoiceNumber || originalInvoice.visibleNumber || originalInvoice.id;
+    const origDate = originalInvoice.issueDate || originalInvoice.createdAt || today;
+
+    const items = options.items || [
+      {
+        id: 'item-rect-1',
+        description: `Rectificación de Factura nº ${origDisplayNum} de fecha ${origDate} (Motivo: ${rawReason})`,
+        qty: 1,
+        unit: 'pa',
+        unitPrice: taxableBase,
+        total: taxableBase
+      }
+    ];
+
+    const legalNote = `Factura rectificativa emitida conforme al artículo 15 del Real Decreto 1619/2012 y artículo 80 de la Ley 37/1992 del IVA. Rectifica a la factura original nº ${origDisplayNum} de fecha ${origDate}. Causa: ${rawReason}.`;
+
+    const invoiceId = options.id || `INV-REC-${originalInvoice.id}-${String(seq).padStart(3, '0')}`;
+
+    return {
+      id: invoiceId,
+      displayNumber: invoiceNaming,
+      naming: invoiceNaming,
+      type: 'RECTIFICATIVA',
+      invoiceType: 'RECTIFICATIVA',
+      series: 'R',
+      budgetId,
+      rectifiesInvoiceId: originalInvoice.id,
+      rectifies_invoice_id: originalInvoice.id,
+      rectifiedInvoiceNumber: origDisplayNum,
+      rectifiedInvoiceDate: origDate,
+      rectificationReason: rawReason,
+      isRectification: true,
+      issueDate: today,
+      operationDate: today,
+      company: {
+        ...this.company,
+        ...(originalInvoice.company || {}),
+        ...(options.company || {})
+      },
+      client: {
+        ...(originalInvoice.client || {}),
+        ...(options.client || {})
+      },
+      items,
+      financials: {
+        subtotal: taxableBase,
+        discountPercentage: 0,
+        discountAmount: 0,
+        taxableBase,
+        taxRatePercentage: origTaxRate,
+        taxAmount,
+        irpfRatePercentage: origIrpfRate,
+        irpfAmount,
+        totalAmount,
+        advanceAmount: 0,
+        remainingAmount: 0
+      },
+      status: 'EMITIDA',
+      paymentMethod: originalInvoice.paymentMethod || 'Transferencia bancaria / Bizum',
+      legalNote
+    };
   }
 
   /**
@@ -505,17 +699,52 @@ export class PresuVozEngine {
     const today = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
     const operationDate = options.operationDate || today;
 
+    const invoiceType = options.type || 'FINAL';
+    const rawItems = options.items && options.items.length > 0 ? options.items : budget.items;
+    const items = rawItems.map(item => ({
+      id: item.id || `item-${Math.random().toString(36).substring(2, 7)}`,
+      description: item.description,
+      qty: item.qty || 1,
+      unit: item.unit || 'pa',
+      unitPrice: item.unitPrice || 0,
+      total: item.total || 0
+    }));
+
     const fin = budget.financials || {};
-    const totalAmount = fin.totalAmount || 0;
-    const paidSoFar = budget.paymentSummary?.totalPaid || 0;
+    const isPartialItems = Boolean(options.items && options.items.length > 0 && options.items.length !== budget.items.length);
 
-    // Retención de IRPF si la empresa/autónomo lo tiene configurado
-    const irpfRate = Number(comp.irpfRate || 0);
-    const irpfAmount = irpfRate > 0 ? Number(((fin.taxableBase || 0) * (irpfRate / 100)).toFixed(2)) : 0;
-    const adjustedTotalAmount = Number((totalAmount - irpfAmount).toFixed(2));
+    let itemsSubtotal = 0;
+    let itemsDiscountAmount = 0;
+    let itemsTaxableBase = 0;
+    let itemsTaxAmount = 0;
+    let irpfAmount = 0;
+    let adjustedTotalAmount = 0;
 
-    // Verificar si existen facturas de anticipo emitidas formalmente
-    const advanceInvoices = options.advanceInvoices || budget.advanceInvoices || [];
+    const discountRate = (fin.discountPercentage || 0) / 100;
+    const taxRate = (fin.taxRatePercentage ?? 21) / 100;
+    const irpfRate = Number(options.irpfRate !== undefined ? options.irpfRate : (budget.financials?.irpfRatePercentage !== undefined ? budget.financials.irpfRatePercentage : (comp.irpfRate || 0)));
+
+    if (isPartialItems) {
+      itemsSubtotal = items.reduce((sum, it) => sum + (Number(it.total) || 0), 0);
+      itemsDiscountAmount = Number((itemsSubtotal * discountRate).toFixed(2));
+      itemsTaxableBase = Number((itemsSubtotal - itemsDiscountAmount).toFixed(2));
+      itemsTaxAmount = Number((itemsTaxableBase * taxRate).toFixed(2));
+      irpfAmount = irpfRate > 0 ? Number((itemsTaxableBase * (irpfRate / 100)).toFixed(2)) : 0;
+      adjustedTotalAmount = Number((itemsTaxableBase + itemsTaxAmount - irpfAmount).toFixed(2));
+    } else {
+      itemsSubtotal = fin.subtotal || items.reduce((sum, it) => sum + (Number(it.total) || 0), 0);
+      itemsDiscountAmount = fin.discountAmount || Number((itemsSubtotal * discountRate).toFixed(2));
+      itemsTaxableBase = fin.taxableBase || Number((itemsSubtotal - itemsDiscountAmount).toFixed(2));
+      itemsTaxAmount = fin.taxAmount || Number((itemsTaxableBase * taxRate).toFixed(2));
+      const rawTotal = fin.totalAmount !== undefined && fin.irpfAmount !== undefined
+        ? Number((itemsTaxableBase + itemsTaxAmount).toFixed(2))
+        : (fin.totalAmount || (itemsTaxableBase + itemsTaxAmount));
+      irpfAmount = irpfRate > 0 ? Number((itemsTaxableBase * (irpfRate / 100)).toFixed(2)) : 0;
+      adjustedTotalAmount = Number((rawTotal - irpfAmount).toFixed(2));
+    }
+
+    // Verificar si existen facturas de anticipo emitidas formalmente (se deducen en factura FINAL u ordinaria)
+    const advanceInvoices = (invoiceType === 'FINAL' || invoiceType === 'ORDINARIA') ? (options.advanceInvoices || budget.advanceInvoices || []) : [];
     let advanceTaxableBase = 0;
     let advanceTaxAmount = 0;
     let advanceTotalAmount = 0;
@@ -533,16 +762,24 @@ export class PresuVozEngine {
         taxableBase: b,
         taxAmount: t,
         total: tot,
-        description: `Deducción por anticipo percibido según Factura nº ${adv.id} de fecha ${adv.issueDate || adv.operationDate}`
+        description: (adv.type === 'HITO' || String(adv.naming || '').includes('Hito'))
+          ? `Deducción por hito / certificación facturada según Factura nº ${adv.naming || adv.id} de fecha ${adv.issueDate || adv.operationDate}`
+          : `Deducción por anticipo percibido según Factura nº ${adv.naming || adv.id} de fecha ${adv.issueDate || adv.operationDate}`
       };
     });
 
     const advanceAmount = Number(advanceTotalAmount.toFixed(2));
     const remainingAmount = Number(Math.max(0, adjustedTotalAmount - advanceAmount).toFixed(2));
 
+    const isSettlement = Boolean(advanceDeductions.length > 0);
+    const invoiceNaming = formatInvoiceNaming(isSettlement ? 'FINAL' : invoiceType, budget.id, options.seq || 1);
+
     const invoice = {
       id: invoiceId,
-      type: 'FINAL',
+      displayNumber: invoiceNaming,
+      naming: invoiceNaming,
+      type: invoiceType,
+      phaseName: options.phaseName || undefined,
       budgetId: budget.id,
       issueDate: today,
       operationDate,
@@ -558,22 +795,15 @@ export class PresuVozEngine {
         phone: options.clientPhone || budget.client?.phone || null,
         email: options.clientEmail || budget.client?.email || null
       },
-      items: budget.items.map(item => ({
-        id: item.id,
-        description: item.description,
-        qty: item.qty || 1,
-        unit: item.unit || 'pa',
-        unitPrice: item.unitPrice || 0,
-        total: item.total || 0
-      })),
+      items,
       advanceDeductions: advanceDeductions.length > 0 ? advanceDeductions : undefined,
       financials: {
-        subtotal: fin.subtotal || 0,
+        subtotal: itemsSubtotal,
         discountPercentage: fin.discountPercentage || 0,
-        discountAmount: fin.discountAmount || 0,
-        taxableBase: fin.taxableBase || 0,
+        discountAmount: itemsDiscountAmount,
+        taxableBase: itemsTaxableBase,
         taxRatePercentage: fin.taxRatePercentage ?? 21,
-        taxAmount: fin.taxAmount || 0,
+        taxAmount: itemsTaxAmount,
         irpfRatePercentage: irpfRate,
         irpfAmount,
         totalAmount: adjustedTotalAmount,
@@ -615,7 +845,8 @@ export class PresuVozEngine {
     }
 
     const totalAmount = budget.financials?.totalAmount || 0;
-    const previouslyPaid = budget.payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const paymentsSum = budget.payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const previouslyPaid = Math.max(paymentsSum, budget.paymentSummary?.totalPaid || 0);
     const newTotalPaid = Number((previouslyPaid + amount).toFixed(2));
     const newRemaining = Number(Math.max(0, totalAmount - newTotalPaid).toFixed(2));
 
@@ -630,13 +861,38 @@ export class PresuVozEngine {
     let receiptId = paymentData.id;
     if (!receiptId) {
       do {
-        receiptId = `REC-${year}-${String(Math.floor(100 + Math.random() * 900))}`;
+        receiptId = `REC-${year}-${String(Math.floor(100000 + Math.random() * 900000))}`;
       } while (budget.payments.some(p => p.id === receiptId));
     }
     const dateStr = paymentData.date || new Date().toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' });
 
+    let receiptType = paymentData.type;
+    if (!receiptType) {
+      if (newRemaining === 0) {
+        receiptType = 'FINAL';
+      } else if (previouslyPaid === 0 || (paymentData.concept && paymentData.concept.toLowerCase().includes('anticipo'))) {
+        receiptType = 'ANTICIPO';
+      } else {
+        receiptType = 'HITO';
+      }
+    }
+
+    let seq = 1;
+    if (receiptType === 'HITO' || receiptType === 'FASE' || receiptType === 'PARCIAL') {
+      const priorHitos = (budget.payments || []).filter(p => {
+        const t = (p.type || '').toUpperCase();
+        return t === 'HITO' || t === 'FASE' || t === 'PARCIAL';
+      });
+      seq = priorHitos.length + 1;
+    }
+
+    const receiptNaming = formatReceiptNaming(receiptType, budget.id, seq);
+
     const receipt = {
       id: receiptId,
+      displayNumber: receiptNaming,
+      naming: receiptNaming,
+      type: receiptType,
       budgetId: budget.id || 'PRE-2026',
       date: dateStr,
       amount,
@@ -653,6 +909,9 @@ export class PresuVozEngine {
 
     budget.payments.push({
       id: receiptId,
+      displayNumber: receiptNaming,
+      naming: receiptNaming,
+      type: receiptType,
       amount,
       method: receipt.method,
       concept: receipt.concept,
@@ -699,4 +958,64 @@ export class PresuVozEngine {
       payments
     };
   }
+}
+
+export function getBudgetClientNumber(budgetId) {
+  if (!budgetId) return '1';
+  const m = String(budgetId).match(/(\d+)$/);
+  if (m) {
+    const parsed = parseInt(m[1], 10);
+    return isNaN(parsed) ? m[1] : String(parsed);
+  }
+  const m2 = String(budgetId).match(/(\d+)/g);
+  if (m2 && m2.length > 0) {
+    const last = m2[m2.length - 1];
+    const parsed = parseInt(last, 10);
+    return isNaN(parsed) ? last : String(parsed);
+  }
+  return '1';
+}
+
+export function getBudgetYear(budgetId) {
+  if (!budgetId) return new Date().getFullYear();
+  const m = String(budgetId).match(/(?:PRE)?(20\d\d)/i);
+  return m ? m[1] : new Date().getFullYear();
+}
+
+export function formatInvoiceNaming(type, budgetId, seq = 1) {
+  const year = getBudgetYear(budgetId);
+  const clientNum = getBudgetClientNumber(budgetId);
+  const seqStr = String(seq || 1).padStart(3, '0');
+
+  let typeWord = 'Final';
+  const upper = String(type || '').toUpperCase();
+  if (upper === 'ANTICIPO') {
+    typeWord = 'Anticipo';
+  } else if (upper === 'FASE' || upper === 'HITO') {
+    typeWord = 'Hito';
+  } else if (upper === 'RECTIFICATIVA') {
+    typeWord = 'Rectificativa';
+  } else if (upper === 'FINAL') {
+    typeWord = 'Final';
+  }
+
+  return `Factura_${typeWord}_${year}-${clientNum}-${seqStr}`;
+}
+
+export function formatReceiptNaming(type, budgetId, seq = 1) {
+  const year = getBudgetYear(budgetId);
+  const clientNum = getBudgetClientNumber(budgetId);
+  const seqStr = String(seq || 1).padStart(3, '0');
+
+  let typeWord = 'Final';
+  const upper = String(type || '').toUpperCase();
+  if (upper === 'ANTICIPO') {
+    typeWord = 'Anticipo';
+  } else if (upper === 'FASE' || upper === 'HITO' || upper === 'PARCIAL') {
+    typeWord = 'Hito';
+  } else if (upper === 'FINAL' || upper === 'LIQUIDADO') {
+    typeWord = 'Final';
+  }
+
+  return `Recibo_${typeWord}_${year}-${clientNum}-${seqStr}`;
 }

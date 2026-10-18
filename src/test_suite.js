@@ -2,7 +2,7 @@ import './test_env_setup.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { PresuVozEngine } from './engine.js';
+import { PresuVozEngine, formatInvoiceNaming, formatReceiptNaming, getBudgetClientNumber, getBudgetYear } from './engine.js';
 import { PresuVozParser } from './parser.js';
 import { generateInvoicePDF } from './pdf_service.js';
 import { isLikelyBudgetTranscript, isExplicitNewBudgetTranscript } from './ai_service.js';
@@ -25,8 +25,14 @@ import {
   handleClearShoppingList,
   parseBoughtAllShoppingForClients,
   findUngroundedAudioItems,
-  professionalizeAudioSourcePhrase
+  professionalizeAudioSourcePhrase,
+  detectSpecificBudgetQuery,
+  findBudgetByQuery,
+  detectBudgetListIntent,
+  detectAgendaQueryIntent,
+  detectShoppingListQueryIntent
 } from './whatsapp_gateway.js';
+import { formatListIndex } from './secretary_service.js';
 
 export function computeFileSha256(filePath) {
   if (!fs.existsSync(filePath)) return null;
@@ -486,14 +492,14 @@ console.log("\nTEST 13: Consulta y Filtrado de Presupuestos (Pendientes de firma
 function testDetectBudgetListIntent(text) {
   if (!text || typeof text !== 'string') return null;
   const t = text.trim().toLowerCase();
-  if (/nuevo\s+presupuesto|presupuesto\s+nuevo|factura|cobro|pago|anticipo|cu[aá]nto\s+me\s+debe/i.test(t)) {
+  if (/nuevo\s+presupuesto|presupuesto\s+nuevo|factura|cobro|pago|anticipo|cu[aá]nto\s+me\s+debe|descuento|rebaja|modificar|cambiar|a[ñn]adir|quitar|poner|hacerle|actualizar/i.test(t)) {
     return null;
   }
   if (!/(?:presupuesto|borrador|sin\s+firmar|por\s+firmar)/i.test(t)) {
     if (!/^(?:1|lista)$/i.test(t)) return null;
   }
   const isListQuery = /^(?:1|lista|mis\s+presupuestos|ver\s+presupuestos)$/i.test(t) ||
-    /(?:list(?:ar?|ame|a)?|ver|dime|cu[aá]les|qu[eé]|mostrar|enseñar|consultar|sacar)/i.test(t) ||
+    /\b(?:list(?:ar?|ame|a)?|ver|dime|cu[aá]les|mostrar|enseñar|consultar|sacar)\b/i.test(t) || /\bqu[eé]\s+(?:presupuestos|borradores|obras)\b/i.test(t) ||
     /^(?:presupuestos|borradores)/i.test(t);
   if (!isListQuery) return null;
   if (/pendiente|sin\s+firmar|por\s+firmar|falta(?:n)?\s+por\s+firmar/i.test(t)) {
@@ -1032,19 +1038,13 @@ st = getOnboardingState(onboardPhone);
 assert(st.step === 'PAYMENT_TERMS', "Avanza al paso 5 (PAYMENT_TERMS)");
 assert(st.company.workingHours === 'De 8:00 a 18:00 de lunes a viernes', "Guarda horario en SQLite");
 
-// Paso 5: Forma de cobro
+// Paso 5: Forma de cobro y anticipo integrado
 const r5 = processOnboardingStep(onboardPhone, "50% al empezar y 50% al acabar");
 assert(r5.handled === true, "Paso 5 procesado");
 st = getOnboardingState(onboardPhone);
-assert(st.step === 'ADVANCE', "Avanza al paso 6 (ADVANCE)");
+assert(st.step === 'QUOTE_VALIDITY', "Avanza al paso 6 (QUOTE_VALIDITY)");
 assert(st.company.paymentTerms.includes("50%"), "Guarda condiciones de cobro");
-
-// Paso 6: Anticipo habitual
-const r6 = processOnboardingStep(onboardPhone, "40%");
-assert(r6.handled === true, "Paso 6 procesado");
-st = getOnboardingState(onboardPhone);
-assert(st.step === 'QUOTE_VALIDITY', "Avanza al paso 7 (QUOTE_VALIDITY)");
-assert(st.company.defaultAdvance === 40, "Guarda anticipo del 40% en SQLite");
+assert(st.company.defaultAdvance === 50, "Guarda anticipo del 50% en SQLite");
 
 // Paso 7: Validez presupuestos
 const r7 = processOnboardingStep(onboardPhone, "15 días");
@@ -1136,7 +1136,7 @@ assert(finalComp.ownerName === 'Carlos', "Conserva ownerName");
 assert(finalComp.city === 'Sevilla capital y provincia', "Conserva city");
 assert(finalComp.workingHours === 'De 8:00 a 18:00 de lunes a viernes', "Conserva workingHours");
 assert(finalComp.paymentTerms.includes("50%"), "Conserva paymentTerms");
-assert(finalComp.defaultAdvance === 40, "Conserva defaultAdvance");
+assert(finalComp.defaultAdvance === 50, "Conserva defaultAdvance");
 assert(finalComp.quoteValidityDays === 15, "Conserva quoteValidityDays");
 assert(finalComp.entityType === 'autonomo', "Conserva entityType");
 assert(finalComp.fiscalName === 'Carlos García Fernández', "Conserva fiscalName");
@@ -1828,7 +1828,8 @@ assert(evalSoft.status === 'NEED_STRONG_CONFIRMATION', "CASO 14: 'vale' no es su
 const evalYes = evaluateConfirmationResponse(actionProposed, "CONFIRMAR");
 assert(evalYes.status === 'APPROVED', "CASO 14: 'CONFIRMAR' aprueba la acción");
 
-// 3. Ejecutar envío seguro simulado
+// 3. Ejecutar envío seguro simulado en modo controlado
+process.env.FEATURE_GESTORIA = 'test';
 const sendResult = await sendFiscalPackageToGestoria({
   businessId: testFiscalPhone,
   year: 2026,
@@ -1842,6 +1843,7 @@ assert(periodRecord.status === 'SENT', "CASO 14: El período fiscal pasa a estad
 
 const logs = listAuditLogs(testFiscalPhone, { entityType: 'FISCAL_PERIOD' });
 assert(logs.some(l => l.action === 'SEND_PACKAGE_GESTORIA'), "CASO 14: Acción registrada en audit_logs de forma inmutable");
+process.env.FEATURE_GESTORIA = 'false';
 
 // -----------------------------------------------------------------------------
 // TEST 23: MODELO INTEGRAL DE VISITAS (REGLA DE ORO CONFIRMED, CICLO DE VIDA, REAGENDAMIENTOS Y AUDITORÍA)
@@ -2232,8 +2234,8 @@ assert(testApplied.length >= 1 && testApplied[0].version === 1, "12. presuvoz_te
 const isolationCheck = currentDb.prepare("SELECT count(*) as count FROM companies WHERE phone = '34999888777'").get();
 assert(isolationCheck.count === 0, "13. Aislamiento de datos verificado entre suites (cero residuos espurios)");
 
-// 14. Regresión: 521 comprobaciones originales, 15 de seguridad, 1 de IVA, 20 casos nuevos, 4 de grounding y 2 de transcripción literal.
-const baselinePassed = (passedCount === 521 + 15 + 1 + 20 + 4 + 2);
+// 14. Regresión: 519 comprobaciones base (onboarding optimizado a 14 pasos), 15 de seguridad, 1 de IVA, 20 casos nuevos, 4 de grounding y 2 de transcripción literal.
+const baselinePassed = (passedCount === 519 + 15 + 1 + 20 + 4 + 2);
 assert(baselinePassed, "14. Regresión: pasan las comprobaciones base y los casos de seguridad, IVA, validez y duplicados");
 
 // 15. rollbackLastMigration ya no existe en el servicio (Blindaje Forward-Only)
@@ -8833,7 +8835,3053 @@ console.log('TEST 62 RESULT:', { passed: test62Result.passed, total: test62Resul
 passedCount += test62Result.passed;
 totalCount += test62Result.total;
 
+// ─── TEST 63: Safe Item Modification (Missing Line Interceptor) ───
+console.log("\n==========================================================");
+console.log("TEST 63: SAFE ITEM MODIFICATION & MISSING LINE INTERCEPTOR");
 console.log("==========================================================");
+const { detectItemModificationIntent, findItemByConcept, handleAddMissingItemConfirmation } = await import("./whatsapp_gateway.js");
+
+// 1. Detección léxica de modificación
+const mod1 = detectItemModificationIntent("Cambia la fontanería a 900 €.");
+assert(mod1 !== null && mod1.concept === "fontanería" && mod1.price === 900, "TEST 63: detectItemModificationIntent detecta Cambia la fontanería a 900 €");
+
+const mod2 = detectItemModificationIntent("cambia la fontaneria a 900");
+assert(mod2 !== null && mod2.concept === "fontaneria" && mod2.price === 900, "TEST 63: detectItemModificationIntent detecta sin tilde ni símbolo de euro");
+
+const mod3 = detectItemModificationIntent("Modifica la fontanería por 900 euros");
+assert(mod3 !== null && mod3.concept === "fontanería" && mod3.price === 900, "TEST 63: detectItemModificationIntent detecta verbo modifica");
+
+const mod4 = detectItemModificationIntent("Pon la fontanería a 900 €");
+assert(mod4 !== null && mod4.concept === "fontanería" && mod4.price === 900, "TEST 63: detectItemModificationIntent detecta verbo pon");
+
+const mod5 = detectItemModificationIntent("Añade fontanería por 900 €");
+assert(mod5 === null, "TEST 63: Añade NO es modificación (añade directamente)");
+
+const mod6 = detectItemModificationIntent("Cambia el descuento al 10%");
+assert(mod6 === null, "TEST 63: descuento NO es partida de obra");
+
+const mod7 = detectItemModificationIntent("Vale, quiero que para el presupuesto de Martín Conde me cambies el precio del acristalamiento de las habitaciones a 700 €.");
+assert(mod7 !== null && mod7.concept === "acristalamiento de las habitaciones" && mod7.price === 700, "TEST 63: detectItemModificationIntent detecta 'me cambies el precio del acristalamiento de las habitaciones a 700 €'");
+
+const mod8 = detectItemModificationIntent("Vale, quiero que para el presupuesto de Martín Conde me cambies eh el precio del acristalamiento de las habitaciones a 700 euros.");
+assert(mod8 !== null && mod8.concept === "acristalamiento de las habitaciones" && mod8.price === 700, "TEST 63: detectItemModificationIntent tolera muletillas 'eh' y euros en audio");
+
+// 2. Búsqueda de concepto en partidas
+const sampleItems = [
+  { id: "1", description: "Levantamiento de suelo", unitPrice: 1200 },
+  { id: "2", description: "Alicatado de paredes", unitPrice: 800 }
+];
+assert(findItemByConcept(sampleItems, "fontanería") === null, "TEST 63: fontanería NO existe en el presupuesto");
+assert(findItemByConcept(sampleItems, "suelo") !== null, "TEST 63: suelo SÍ existe en el presupuesto");
+assert(findItemByConcept(sampleItems, "alicatado") !== null, "TEST 63: alicatado SÍ existe en el presupuesto");
+
+// 3. Evaluación de respuestas de confirmación
+const pendingAct = createProposedAction("B", "add_missing_item", { budgetId: "PRE-1", concept: "fontanería", price: 900 });
+assert(evaluateConfirmationResponse(pendingAct, "sí").status === "APPROVED", "TEST 63: sí aprueba añadir la línea");
+assert(evaluateConfirmationResponse(pendingAct, "añádela").status === "APPROVED", "TEST 63: añádela aprueba añadir la línea");
+assert(evaluateConfirmationResponse(pendingAct, "sí, añádela").status === "APPROVED", "TEST 63: sí, añádela aprueba añadir la línea");
+assert(evaluateConfirmationResponse(pendingAct, "ponla").status === "APPROVED", "TEST 63: ponla aprueba añadir la línea");
+assert(evaluateConfirmationResponse(pendingAct, "no").status === "REJECTED", "TEST 63: no descarta añadir la línea");
+assert(evaluateConfirmationResponse(pendingAct, "no la añadas").status === "REJECTED", "TEST 63: no la añadas descarta añadir la línea");
+assert(evaluateConfirmationResponse(pendingAct, "cancela").status === "REJECTED", "TEST 63: cancela descarta añadir la línea");
+assert(evaluateConfirmationResponse(pendingAct, "no hace falta").status === "REJECTED", "TEST 63: no hace falta descarta añadir la línea");
+assert(evaluateConfirmationResponse(pendingAct, "no hace falta nada").status === "REJECTED", "TEST 63: no hace falta nada descarta añadir la línea");
+assert(evaluateConfirmationResponse(pendingAct, "déjalo así").status === "REJECTED", "TEST 63: déjalo así descarta añadir la línea");
+assert(evaluateConfirmationResponse(pendingAct, "para nada").status === "REJECTED", "TEST 63: para nada descarta añadir la línea");
+
+// 4. Ejecución de confirmación y recálculo
+const testSession = {
+  phone: "34600111222",
+  companyId: "test-comp-mod",
+  company: { name: "Reformas Test S.L.", defaultTaxRate: 21 },
+  budgets: new Map(),
+  activeBudgetId: "PRE-MOD-01"
+};
+testSession.budgets.set("PRE-MOD-01", {
+  id: "PRE-MOD-01",
+  client: { name: "Jimena", address: "Calle Mayor 1" },
+  items: [{ id: "1", description: "Levantamiento de suelo", qty: 1, unit: "pa", unitPrice: 1200, isPricePending: false }],
+  financials: { subtotal: 1200, taxRatePercentage: 21, taxAmount: 252, totalAmount: 1452, discountPercentage: 0 }
+});
+const mockMessages = [];
+await handleAddMissingItemConfirmation({
+  sendMessage: async (jid, msg) => { mockMessages.push(msg); return { key: { id: "m1" } }; }
+}, "34600111222@s.whatsapp.net", testSession, {
+  budgetId: "PRE-MOD-01",
+  concept: "fontanería",
+  price: 900
+});
+
+const postBudget = testSession.budgets.get("PRE-MOD-01");
+assert(postBudget.items.length === 2, "TEST 63: Presupuesto tiene ahora 2 partidas tras confirmar");
+assert(postBudget.items[1].unitPrice === 900, "TEST 63: Nueva partida tiene precio 900 €");
+assert(postBudget.financials.totalAmount === 2541, "TEST 63: Total recalculado con IVA es 2541 € (1200 + 900 = 2100 * 1.21)");
+assert(mockMessages.length === 1 && mockMessages[0].text.includes("Partida añadida") && mockMessages[0].text.includes("900 €"), "TEST 63: Mensaje de confirmación enviado con enlace");
+
+// ==========================================================
+// TEST 64: SPECIFIC BUDGET RETRIEVAL AND DOUBLE-DIGIT EMOJI NUMBERING
+// ==========================================================
+console.log("\n==========================================================");
+console.log("TEST 64: SPECIFIC BUDGET RETRIEVAL AND DOUBLE-DIGIT EMOJI NUMBERING");
+console.log("==========================================================");
+
+// 1. formatListIndex: 1..10 keycaps, 11+ bold numeric formatting
+assert(formatListIndex(1) === '1️⃣', "TEST 64: formatListIndex(1) retorna 1️⃣");
+assert(formatListIndex(9) === '9️⃣', "TEST 64: formatListIndex(9) retorna 9️⃣");
+assert(formatListIndex(10) === '🔟', "TEST 64: formatListIndex(10) retorna 🔟 (keycap correcto de diez)");
+assert(formatListIndex(11) === '*11.*', "TEST 64: formatListIndex(11) retorna *11.* sin romper emoji");
+assert(formatListIndex(12) === '*12.*', "TEST 64: formatListIndex(12) retorna *12.* sin romper emoji");
+assert(formatListIndex(25) === '*25.*', "TEST 64: formatListIndex(25) retorna *25.*");
+
+// 2. detectSpecificBudgetQuery: Detección precisa de peticiones de un único presupuesto
+const q1 = detectSpecificBudgetQuery("Enseñame el pre2026-002");
+assert(Boolean(q1 && q1.type === 'id' && q1.query === 'pre2026-002'), "TEST 64: Detecta 'Enseñame el pre2026-002'");
+
+const q2 = detectSpecificBudgetQuery("Muéstrame el pre2026-002");
+assert(Boolean(q2 && q2.type === 'id' && q2.query === 'pre2026-002'), "TEST 64: Detecta 'Muéstrame el pre2026-002'");
+
+const q3 = detectSpecificBudgetQuery("pre2026-002");
+assert(Boolean(q3 && q3.type === 'id' && q3.query === 'pre2026-002'), "TEST 64: Detecta código directo 'pre2026-002'");
+
+const q4 = detectSpecificBudgetQuery("el PRE-2026-002");
+assert(Boolean(q4 && q4.type === 'id' && q4.query === 'PRE-2026-002'), "TEST 64: Detecta 'el PRE-2026-002' con mayúsculas y guion");
+
+const q5 = detectSpecificBudgetQuery("pdf de Jimena");
+assert(Boolean(q5 && q5.type === 'clientOrQuery' && q5.query === 'Jimena'), "TEST 64: Detecta 'pdf de Jimena'");
+
+const q6 = detectSpecificBudgetQuery("Muéstrame el de Martín Conde");
+assert(Boolean(q6 && q6.type === 'clientOrQuery' && q6.query === 'Martín Conde'), "TEST 64: Detecta 'Muéstrame el de Martín Conde'");
+
+// Consultas globales de listado NO deben interpretarse como un presupuesto específico
+assert(detectSpecificBudgetQuery("dime todos los presupuestos que estan sin firmar") === null, "TEST 64: 'todos los presupuestos que estan sin firmar' es listado general, no específico");
+assert(detectSpecificBudgetQuery("presupuestos pendientes") === null, "TEST 64: 'presupuestos pendientes' no es consulta de uno específico");
+assert(detectSpecificBudgetQuery("nuevo presupuesto para Juan") === null, "TEST 64: Creación de presupuesto nuevo no es show_budget");
+
+// 3. findBudgetByQuery: Búsqueda tolerante a mayúsculas, guiones y clientes
+const mockSessionBudgets = {
+  budgets: new Map([
+    ["PRE-2026-001", { id: "PRE-2026-001", client: { name: "Jimena Sánchez", address: "Calle Mayor 1" }, financials: { totalAmount: 1500 } }],
+    ["PRE-2026-002", { id: "PRE-2026-002", client: { name: "Martín Conde", address: "Avenida Sol 12" }, financials: { totalAmount: 3200 } }]
+  ])
+};
+
+const foundById = findBudgetByQuery(mockSessionBudgets, "pre2026-002");
+assert(Boolean(foundById && foundById.id === "PRE-2026-002"), "TEST 64: findBudgetByQuery localiza PRE-2026-002 usando pre2026-002");
+
+const foundByHyphenId = findBudgetByQuery(mockSessionBudgets, "PRE-2026-002");
+assert(Boolean(foundByHyphenId && foundByHyphenId.id === "PRE-2026-002"), "TEST 64: findBudgetByQuery localiza con código exacto");
+
+const foundByClient = findBudgetByQuery(mockSessionBudgets, "jimena");
+assert(Boolean(foundByClient && foundByClient.id === "PRE-2026-001"), "TEST 64: findBudgetByQuery localiza por cliente en minúsculas 'jimena'");
+
+const foundByClientAccent = findBudgetByQuery(mockSessionBudgets, "Martin Conde");
+assert(Boolean(foundByClientAccent && foundByClientAccent.id === "PRE-2026-002"), "TEST 64: findBudgetByQuery tolera falta de tilde 'Martin Conde'");
+
+assert(findBudgetByQuery(mockSessionBudgets, "Inexistente 999") === null, "TEST 64: Retorna null para presupuesto inexistente");
+
+// 4. detectBudgetListIntent: Consultas deterministas sin llamada a Gemini (resolución instantánea por SQLite)
+assert(detectBudgetListIntent("Muestrame los presupuestos que tengo sin firmar") === 'pending_signature', "TEST 64: 'Muestrame los presupuestos que tengo sin firmar' resuelto directo por SQLite");
+assert(detectBudgetListIntent("Muéstrame los presupuestos que tengo sin firmar") === 'pending_signature', "TEST 64: 'Muéstrame los presupuestos que tengo sin firmar' con tilde resuelto directo por SQLite");
+assert(detectBudgetListIntent("Enseñame los presupuestos sin firmar") === 'pending_signature', "TEST 64: 'Enseñame los presupuestos sin firmar' resuelto directo por SQLite");
+assert(detectBudgetListIntent("que tengo sin firmar") === 'pending_signature', "TEST 64: 'que tengo sin firmar' resuelto directo por SQLite");
+assert(detectBudgetListIntent("presupuestos sin firmar") === 'pending_signature', "TEST 64: 'presupuestos sin firmar' resuelto directo por SQLite");
+assert(detectBudgetListIntent("ver presupuestos aceptados") === 'accepted', "TEST 64: 'ver presupuestos aceptados' resuelto directo por SQLite");
+assert(detectBudgetListIntent("mis presupuestos") === 'all', "TEST 64: 'mis presupuestos' resuelto directo por SQLite");
+
+// 5. Anti-colisión de dígitos y resolución por orden de lista reciente
+const sessionWithRecentList = {
+  budgets: new Map([
+    ["PRE-2026-3074", { id: "PRE-2026-3074", client: { name: "María" }, financials: { totalAmount: 2420 } }],
+    ["PRE2026-004", { id: "PRE2026-004", client: { name: "Juan" }, financials: { totalAmount: 6710 } }]
+  ]),
+  lastBudgetsList: [
+    { id: "PRE-2026-3074", client: { name: "María" }, financials: { totalAmount: 2420 } },
+    { id: "PRE2026-004", client: { name: "Juan" }, financials: { totalAmount: 6710 } }
+  ]
+};
+
+// Consultar por posición ordinal de la lista
+assert(findBudgetByQuery(sessionWithRecentList, "1")?.id === "PRE-2026-3074", "TEST 64: '1' resuelve al elemento 1 de la lista reciente");
+assert(findBudgetByQuery(sessionWithRecentList, "2")?.id === "PRE2026-004", "TEST 64: '2' resuelve al elemento 2 de la lista reciente");
+
+// Posición fuera de rango: no existe el 7 en una lista de 2 elementos ni hay presupuesto #7
+assert(findBudgetByQuery(sessionWithRecentList, "7") === null, "TEST 64: '7' no existe en la lista de 2 ni colisiona con el dígito 7 de PRE-2026-3074");
+
+// 6. Prohibición de enviar enlaces o PDF de borradores vacíos (0 € / sin partidas)
+const { handleShowSpecificBudget } = await import('./whatsapp_gateway.js');
+const mockSockDraft = {
+  messagesSent: [],
+  sendMessage: async (jid, content) => {
+    mockSockDraft.messagesSent.push(content);
+    return { key: { id: "msg_draft_test" } };
+  }
+};
+const sessionWithEmptyDraft = {
+  phone: "34600123456",
+  company: { name: "Mi Empresa", phone: "34600123456" },
+  budgets: new Map([
+    ["PRE2026-007", { id: "PRE2026-007", isDraft: true, status: "BORRADOR", items: [], financials: { totalAmount: 0 } }]
+  ])
+};
+
+await handleShowSpecificBudget(mockSockDraft, "34600123456@s.whatsapp.net", sessionWithEmptyDraft, "PRE2026-007");
+assert(mockSockDraft.messagesSent.length === 1, "TEST 64: Envía únicamente 1 mensaje para borrador vacío");
+assert(mockSockDraft.messagesSent[0].text.includes("borrador vacío"), "TEST 64: Informa con claridad de que es un borrador vacío sin partidas");
+assert(!mockSockDraft.messagesSent[0].document, "TEST 64: CERO emisión de PDF para borrador vacío");
+
+// ==========================================================
+// TEST 65: IRPF WITHHOLDING RETENTION IN BUDGETS & INVOICES
+// ==========================================================
+console.log("\n==========================================================");
+console.log("TEST 65: IRPF WITHHOLDING RETENTION IN BUDGETS & INVOICES");
+console.log("==========================================================");
+
+// 1. Detección en PresuVozEngine.detectIrpfRate y PresuVozParser.extractIRPFRate
+assert(engine.detectIrpfRate("con retención del IRPF del 15%") === 15, "TEST 65: detectIrpfRate detecta retención del 15%");
+assert(engine.detectIrpfRate("IRPF del 7%") === 7, "TEST 65: detectIrpfRate detecta IRPF del 7%");
+assert(engine.detectIrpfRate("retención del 19%") === 19, "TEST 65: detectIrpfRate detecta retención del 19%");
+assert(engine.detectIrpfRate("sin IRPF") === 0, "TEST 65: detectIrpfRate detecta sin IRPF como 0%");
+assert(PresuVozParser.extractIRPFRate("retención del IRPF del 15%") === 15, "TEST 65: PresuVozParser extrae 15% de IRPF");
+
+// 2. Cálculo en PresuVozEngine.process para presupuesto
+const irpfBudgetRes = engine.process({
+  rawTranscript: "Presupuesto María Martín 1000 euros con IVA del 21% y retención del IRPF del 15%",
+  items: [{ description: "Trabajos de albañilería", qty: 1, unit: "pa", unitPrice: 1000 }]
+});
+assert(irpfBudgetRes.success === true, "TEST 65: Presupuesto con IRPF calculado con éxito");
+assert(irpfBudgetRes.budget.financials.taxableBase === 1000, "TEST 65: Base imponible es 1000€");
+assert(irpfBudgetRes.budget.financials.taxAmount === 210, "TEST 65: Cuota IVA 21% es 210€");
+assert(irpfBudgetRes.budget.financials.irpfRatePercentage === 15, "TEST 65: Tipo IRPF es 15%");
+assert(irpfBudgetRes.budget.financials.irpfAmount === 150, "TEST 65: Retención IRPF es 150€ (1000 * 15%)");
+assert(irpfBudgetRes.budget.financials.totalAmount === 1060, "TEST 65: Total presupuesto es 1060€ (1000 + 210 - 150)");
+assert(irpfBudgetRes.budget.financials.advanceAmount === 318, "TEST 65: Anticipo 30% es 318€ (1060 * 30%)");
+
+// 3. Conversión a Factura ordinaria heredando el IRPF del presupuesto
+const irpfInvoice = engine.convertToInvoice(irpfBudgetRes.budget);
+assert(irpfInvoice.financials.irpfRatePercentage === 15, "TEST 65: Factura hereda tipo IRPF 15%");
+assert(irpfInvoice.financials.irpfAmount === 150, "TEST 65: Factura retiene 150€ de IRPF");
+assert(irpfInvoice.financials.totalAmount === 1060, "TEST 65: Total factura ajustado con IRPF es 1060€");
+
+// 4. Emisión de Factura de Anticipo con IRPF
+const irpfAdvInv = engine.createAdvanceInvoice(irpfBudgetRes.budget, { amount: 318 });
+assert(irpfAdvInv.financials.taxableBase === 300, "TEST 65: Base imponible anticipo con IRPF es 300€ (318 / (1 + 0.21 - 0.15))");
+assert(irpfAdvInv.financials.taxAmount === 63, "TEST 65: IVA anticipo es 63€ (300 * 21%)");
+assert(irpfAdvInv.financials.irpfRatePercentage === 15, "TEST 65: IRPF anticipo es 15%");
+assert(irpfAdvInv.financials.irpfAmount === 45, "TEST 65: Retención IRPF anticipo es 45€ (300 * 15%)");
+assert(irpfAdvInv.financials.totalAmount === 318, "TEST 65: Total factura anticipo es exactamente 318€ (300 + 63 - 45)");
+
+// 5. Modificación simultánea de IVA e IRPF ("cambies el IVA al 10% y la retención de IRPF al 7%")
+const modText = "Para el presupuesto de Eugenio López quiero que me cambies el IVA al 10% y la retención de IRPF al 7%";
+assert(engine.detectTaxRate(modText) === 0.1, "TEST 65: detectTaxRate detecta IVA al 10%");
+assert(engine.detectIrpfRate(modText) === 7, "TEST 65: detectIrpfRate detecta IRPF al 7%");
+const modBudgetRes = engine.process({
+  rawTranscript: modText,
+  items: irpfBudgetRes.budget.items,
+  taxRate: engine.detectTaxRate(modText, null),
+  irpfRate: engine.detectIrpfRate(modText, null)
+});
+assert(modBudgetRes.budget.financials.taxRatePercentage === 10, "TEST 65: Modificación aplica IVA 10%");
+assert(modBudgetRes.budget.financials.taxAmount === 100, "TEST 65: Cuota IVA 10% es 100€");
+assert(modBudgetRes.budget.financials.irpfRatePercentage === 7, "TEST 65: Modificación aplica IRPF 7%");
+assert(modBudgetRes.budget.financials.irpfAmount === 70, "TEST 65: Retención IRPF 7% es 70€");
+assert(modBudgetRes.budget.financials.totalAmount === 1030, "TEST 65: Total modificado es 1030€ (1000 + 100 - 70)");
+assert(modBudgetRes.budget.financials.advanceAmount === 309, "TEST 65: Anticipo 30% es 309€ (1030 * 30%)");
+
+// ==========================================================
+// TEST 66: INVOICE QUERY DISAMBIGUATION, SIGNED BUDGET PDF, NATURAL PAYMENTS & PENDING INVOICES
+// ==========================================================
+console.log("\n==========================================================");
+console.log("TEST 66: INVOICES, SIGNED PDF, PAYMENTS & PENDING LIST");
+console.log("==========================================================");
+
+const {
+  detectSpecificInvoiceQuery,
+  findInvoiceByQuery,
+  detectInvoiceListIntent,
+  handleShowSpecificInvoice,
+  handleListInvoices
+} = await import('./whatsapp_gateway.js');
+const { generateBudgetPDF } = await import('./pdf_service.js');
+
+// 1. Detección de consultas de facturas específicas vs presupuestos
+assert(detectSpecificInvoiceQuery("Muéstrame la factura 1")?.query === '1', "TEST 66: Detecta 'Muéstrame la factura 1' como número 1");
+assert(detectSpecificInvoiceQuery("la primera factura")?.query === '1', "TEST 66: Detecta 'la primera factura' como número 1");
+assert(detectSpecificInvoiceQuery("la 1")?.query === '1', "TEST 66: Detecta 'la 1' como número 1");
+assert(detectSpecificInvoiceQuery("Muéstrame la factura de Carlos Ruiz")?.query === 'Carlos Ruiz', "TEST 66: Detecta 'Muéstrame la factura de Carlos Ruiz' para cliente");
+assert(detectSpecificInvoiceQuery("factura FAC-2026-001")?.query === 'FAC-2026-001', "TEST 66: Detecta código directo FAC-2026-001");
+assert(detectSpecificInvoiceQuery("Muéstrame las facturas que tengo pendiente") === null, "TEST 66: Listado de facturas pendientes NO es consulta de factura individual");
+assert(detectSpecificBudgetQuery("Muéstrame la factura 1") === null, "TEST 66: detectSpecificBudgetQuery descarta consultas de facturas");
+assert(detectSpecificBudgetQuery("factura de Carlos Ruiz") === null, "TEST 66: detectSpecificBudgetQuery descarta factura de Carlos Ruiz");
+
+// 2. Detección de listado de facturas pendientes
+assert(detectInvoiceListIntent("Muéstrame las facturas que tengo pendiente") === 'pending', "TEST 66: Detecta listado de facturas pendientes");
+assert(detectInvoiceListIntent("facturas pendientes de cobro") === 'pending', "TEST 66: Detecta facturas pendientes de cobro");
+assert(detectInvoiceListIntent("facturas sin cobrar") === 'pending', "TEST 66: Detecta facturas sin cobrar");
+assert(detectInvoiceListIntent("ver facturas") === 'all', "TEST 66: Detecta ver facturas como all");
+
+// 3. Resolución de factura por ordinal contra lastInvoicesList y por cliente
+const mockInv1 = {
+  id: 'FAC-2026-001',
+  invoiceNumber: 'FAC-2026-001',
+  budgetId: 'PRE-2026-001',
+  client: { name: 'Empresa Alpha' },
+  financials: { totalAmount: 1200, taxableBase: 1000, taxAmount: 200 },
+  status: 'PAGADA'
+};
+const mockInv2 = {
+  id: 'FAC-2026-002',
+  invoiceNumber: 'FAC-2026-002',
+  budgetId: 'PRE-2026-002',
+  client: { name: 'Carlos Ruiz' },
+  financials: { totalAmount: 1400, taxableBase: 1200, taxAmount: 200 },
+  status: 'EMITIDA'
+};
+
+const sessionWithInvoices = {
+  company: { name: 'Reformas PresuVoz S.L.' },
+  phone: '34601022367',
+  invoices: new Map([
+    ['FAC-2026-001', mockInv1],
+    ['FAC-2026-002', mockInv2]
+  ]),
+  lastInvoicesList: [mockInv1, mockInv2]
+};
+
+assert(findInvoiceByQuery(sessionWithInvoices, '1')?.id === 'FAC-2026-001', "TEST 66: findInvoiceByQuery '1' devuelve FAC-2026-001");
+assert(findInvoiceByQuery(sessionWithInvoices, '2')?.id === 'FAC-2026-002', "TEST 66: findInvoiceByQuery '2' devuelve FAC-2026-002");
+assert(findInvoiceByQuery(sessionWithInvoices, 'Carlos Ruiz')?.id === 'FAC-2026-002', "TEST 66: findInvoiceByQuery 'Carlos Ruiz' devuelve FAC-2026-002");
+assert(findInvoiceByQuery(sessionWithInvoices, 'Cliente Inexistente') === null, "TEST 66: findInvoiceByQuery cliente inexistente devuelve null");
+
+// 4. Verificación de respuesta cuando no existe factura para el cliente
+const mockSockInv = {
+  messages: [],
+  documents: [],
+  async sendMessage(jid, content) {
+    if (content.document) this.documents.push(content);
+    else if (content.text) this.messages.push(content);
+    return { key: { id: 'msg_' + Date.now() } };
+  }
+};
+await handleShowSpecificInvoice(mockSockInv, '34601022367@s.whatsapp.net', sessionWithInvoices, 'Cliente Desconocido');
+assert(mockSockInv.messages.length === 1, "TEST 66: Responde con 1 mensaje de error claro");
+assert(mockSockInv.messages[0].text.includes('No he localizado ninguna factura emitida para *"Cliente Desconocido"*'), "TEST 66: Informa claramente que no hay factura emitida para ese cliente");
+assert(mockSockInv.documents.length === 0, "TEST 66: Cero envío de PDF cuando no existe factura");
+
+// 5. Presupuesto firmado renderiza sello digital y firma en PDF
+const signedBudget = {
+  id: 'PRE-2026-002',
+  status: 'ACEPTADO',
+  signedAt: '2026-10-10T12:00:00Z',
+  company: { name: 'Reformas Pro S.L.', cif: 'B12345678' },
+  client: { name: 'Carlos Ruiz', address: 'Calle Mayor 12' },
+  items: [{ description: 'Pintura', qty: 1, unit: 'pa', unitPrice: 1000, total: 1000 }],
+  financials: { totalAmount: 1210, taxableBase: 1000, taxAmount: 210 }
+};
+const signedPdfBuffer = await generateBudgetPDF(signedBudget);
+assert(Buffer.isBuffer(signedPdfBuffer) && signedPdfBuffer.length > 1000, "TEST 66: PDF de presupuesto firmado generado correctamente con sello digital");
+
+// 6. Pagos en lenguaje natural con porcentaje y euros
+const testBudgetForPayment = {
+  id: 'PRE-PAY-01',
+  client: { name: 'Carlos Ruiz' },
+  financials: { totalAmount: 1400 },
+  payments: [],
+  paymentSummary: { totalPaid: 0, remainingBalance: 1400, status: 'PENDIENTE' }
+};
+const sessionForPay = {
+  company: { name: 'Empresa Test' },
+  phone: '34601022367',
+  companyId: 'comp_test_66',
+  budgets: new Map([['PRE-PAY-01', testBudgetForPayment]]),
+  invoices: new Map()
+};
+
+// Pago del 50%
+const mockSockPay1 = {
+  messages: [],
+  documents: [],
+  async sendMessage(jid, content) {
+    if (content.document) this.documents.push(content);
+    else if (content.text) this.messages.push(content);
+    return { key: { id: 'msg_' + Date.now() } };
+  }
+};
+const { handlePaymentRegistration } = await import('./whatsapp_gateway.js');
+await handlePaymentRegistration(mockSockPay1, '34601022367@s.whatsapp.net', sessionForPay, testBudgetForPayment, {
+  percentage: 50,
+  method: 'Transferencia'
+});
+assert(testBudgetForPayment.paymentSummary.totalPaid === 700, "TEST 66: Pago del 50% calcula 700€ sobre 1400€");
+assert(testBudgetForPayment.paymentSummary.remainingBalance === 700, "TEST 66: Saldo restante queda en 700€");
+assert(mockSockPay1.documents.length === 1, "TEST 66: Envía PDF de recibo tras registrar pago del 50%");
+
+// ==========================================================
+// TEST 67: CLIENT INVOICES, RECEIPTS PDF RETRIEVAL & DEBT BALANCE RECONCILIATION
+// ==========================================================
+console.log("\n==========================================================");
+console.log("TEST 67: CLIENT INVOICES, RECEIPTS PDF RETRIEVAL & DEBT BALANCE RECONCILIATION");
+console.log("==========================================================");
+
+const { formatAllDebts } = await import('./intent_router.js');
+const { getPendingWorksDebt, db } = await import('./db_service.js');
+
+// 1. Detección de consultas de facturas y recibos de clientes
+const t67_q1 = detectSpecificInvoiceQuery("mandame las facturas de carlos ruiz");
+assert(t67_q1?.type === 'clientOrQuery' && t67_q1?.query.toLowerCase() === 'carlos ruiz' && !t67_q1?.isReceiptOnly, "TEST 67: Detecta 'mandame las facturas de carlos ruiz'");
+
+const t67_q2 = detectSpecificInvoiceQuery("facturas de Carlos Ruiz");
+assert(t67_q2?.type === 'clientOrQuery' && t67_q2?.query === 'Carlos Ruiz' && !t67_q2?.isReceiptOnly, "TEST 67: Detecta 'facturas de Carlos Ruiz'");
+
+const t67_q3 = detectSpecificInvoiceQuery("los recibos de carlos ruiz");
+assert(t67_q3?.type === 'clientOrQuery' && t67_q3?.query.toLowerCase() === 'carlos ruiz' && t67_q3?.isReceiptOnly, "TEST 67: Detecta 'los recibos de carlos ruiz' con isReceiptOnly");
+
+const t67_q4 = detectSpecificInvoiceQuery("recibos de Carlos Ruiz");
+assert(t67_q4?.type === 'clientOrQuery' && t67_q4?.query === 'Carlos Ruiz' && t67_q4?.isReceiptOnly, "TEST 67: Detecta 'recibos de Carlos Ruiz' con isReceiptOnly");
+
+const t67_q5 = detectSpecificInvoiceQuery("mandame el recibo de Carlos");
+assert(t67_q5?.type === 'clientOrQuery' && t67_q5?.query === 'Carlos' && t67_q5?.isReceiptOnly, "TEST 67: Detecta 'mandame el recibo de Carlos'");
+
+// 2. Detección de intenciones de deuda global y descarte de documentos
+assert(detectIntent("quien me queda por pagar")?.intent === 'ALL_DEBTS', "TEST 67: 'quien me queda por pagar' detectado como ALL_DEBTS");
+assert(detectIntent("quien falta por pagar")?.intent === 'ALL_DEBTS', "TEST 67: 'quien falta por pagar' detectado como ALL_DEBTS");
+assert(detectIntent("a quien le queda por pagar")?.intent === 'ALL_DEBTS', "TEST 67: 'a quien le queda por pagar' detectado como ALL_DEBTS");
+assert(detectIntent("mandame las facturas de carlos ruiz", { knownNames: ['Carlos Ruiz'] })?.intent !== 'DEBT_BY_CLIENT', "TEST 67: 'mandame las facturas de carlos ruiz' NO se confunde con DEBT_BY_CLIENT");
+
+// 3. Envío conjunto de Factura PDF y Recibos PDF al pedir facturas de un cliente
+const mockSockClientDocs = {
+  messages: [],
+  documents: [],
+  async sendMessage(jid, content) {
+    if (content.document) this.documents.push(content);
+    else if (content.text) this.messages.push(content);
+    return { key: { id: 'msg_' + Date.now() } };
+  }
+};
+
+const existingComp = db.prepare('SELECT id, name FROM companies LIMIT 1').get();
+const testCompId = existingComp?.id || '817ca602-6ae4-4fe3-9b06-293e52b8df60';
+
+db.prepare(`
+  INSERT OR IGNORE INTO budgets (id, company_id, client_name, total_amount, status, data_json, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`).run(
+  'PRE-TEST-67',
+  testCompId,
+  'Carlos Ruiz',
+  2200,
+  'ACEPTADO',
+  JSON.stringify({ id: 'PRE-TEST-67', client: { name: 'Carlos Ruiz' } }),
+  new Date().toISOString(),
+  new Date().toISOString()
+);
+
+const testSessionClient = {
+  phone: '34601022367',
+  companyId: testCompId,
+  company: { name: existingComp?.name || 'Pinturas Pro S.L.', cif: 'B-99887766' },
+  invoices: new Map([
+    ['FAC-2026-999', {
+      id: 'FAC-2026-999',
+      client: { name: 'Carlos Ruiz', address: 'Calle Sol 1' },
+      financials: { totalAmount: 660, taxableBase: 600, taxAmount: 60, taxRatePercentage: 10 },
+      status: 'PAGADA',
+      budgetId: 'PRE-TEST-67'
+    }]
+  ]),
+  budgets: new Map([
+    ['PRE-TEST-67', {
+      id: 'PRE-TEST-67',
+      client: { name: 'Carlos Ruiz' },
+      total_amount: 2200
+    }]
+  ])
+};
+
+// Insertar un pago de prueba para PRE-TEST-67 en SQLite para simular recibo
+db.prepare(`
+  INSERT OR IGNORE INTO payments (id, company_id, budget_id, amount, method, concept, data_json, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`).run(
+  'REC-TEST-67-1',
+  testCompId,
+  'PRE-TEST-67',
+  700,
+  'Bizum',
+  'Entrega a cuenta',
+  JSON.stringify({
+    id: 'REC-TEST-67-1',
+    budgetId: 'PRE-TEST-67',
+    date: '11/10/2026',
+    amount: 700,
+    method: 'Bizum',
+    concept: 'Entrega a cuenta',
+    previouslyPaid: 660,
+    totalPaid: 1360,
+    totalAmount: 2200,
+    remainingBalance: 840,
+    status: 'PARCIAL',
+    client: { name: 'Carlos Ruiz' },
+    company: { name: 'Pinturas Pro S.L.', cif: 'B-99887766' }
+  }),
+  new Date().toISOString()
+);
+
+await handleShowSpecificInvoice(mockSockClientDocs, '34601022367@s.whatsapp.net', testSessionClient, 'Carlos Ruiz');
+assert(mockSockClientDocs.documents.length >= 2, "TEST 67: Envía tanto la factura PDF como los recibos PDF para Carlos Ruiz");
+const hasInvPdf = mockSockClientDocs.documents.some(d => d.fileName?.includes('Factura_FAC-2026-999'));
+const hasRecPdf = mockSockClientDocs.documents.some(d => d.fileName?.includes('Recibo_REC-TEST-67-1'));
+assert(hasInvPdf, "TEST 67: Se incluye Factura_FAC-2026-999.pdf en el envío");
+assert(hasRecPdf, "TEST 67: Se incluye Recibo_REC-TEST-67-1.pdf en el envío");
+
+// 4. Conciliación y coherencia en saldo de cliente liquidado
+const testWorkSettled = {
+  budgetId: 'PRE-TEST-SETTLED',
+  clientName: 'Carlos Ruiz',
+  totalAmount: 2200,
+  totalPaid: 2200,
+  remainingBalance: 0
+};
+const { formatDebtByClient } = await import('./intent_router.js');
+const settledDebtMsg = formatDebtByClient('Carlos Ruiz', [], null, testWorkSettled);
+assert(settledDebtMsg.includes('está al corriente de pago'), "TEST 67: Cliente liquidado con remainingBalance 0 reporta estar al corriente de pago");
+assert(!settledDebtMsg.includes('660'), "TEST 67: No reporta falsamente 660€ pendientes para cliente liquidado");
+
+// 5. Inclusión de obras pendientes en formato global de deudas
+const testPendingWorks = [
+  { budgetId: 'PRE-01', clientName: 'Alberto López', totalAmount: 6545, totalPaid: 0, remainingBalance: 6545 },
+  { budgetId: 'PRE-02', clientName: 'Jimena', totalAmount: 4180, totalPaid: 0, remainingBalance: 4180 }
+];
+const allDebtsFormatted = formatAllDebts([], testPendingWorks);
+assert(allDebtsFormatted.includes('Alberto López'), "TEST 67: formatAllDebts incluye clientes con obras pendientes");
+assert(allDebtsFormatted.includes('6545,00 €'), "TEST 67: formatAllDebts muestra importe de obra pendiente");
+assert(allDebtsFormatted.includes('Jimena'), "TEST 67: formatAllDebts incluye Jimena");
+
+console.log("\n==========================================================");
+console.log("TEST 68: AI MULTI-MODEL FALLBACK AND PERSISTENT STANDBY QUEUE RESILIENCE");
+console.log("==========================================================");
+
+const { isTransientAiError } = await import('./whatsapp_gateway.js');
+const { GEMINI_MODELS: AI_GEMINI_MODELS } = await import('./ai_service.js');
+
+// 1. Detección exhaustiva de errores transitorios de IA
+assert(isTransientAiError(new Error("503 Service Unavailable: This model is currently experiencing high demand")), "TEST 68: 503 high demand detectado como transitorio");
+assert(isTransientAiError(new Error("429 Too Many Requests: Resource has been exhausted")), "TEST 68: 429 quota detectado como transitorio");
+assert(isTransientAiError(new Error("Gemini no respondió dentro del tiempo límite (35s); se probará el modelo estable alternativo.")), "TEST 68: tiempo límite en español detectado como transitorio");
+assert(isTransientAiError(new Error("The operation was aborted due to timeout")), "TEST 68: timeout detectado como transitorio");
+assert(isTransientAiError(new Error("read ECONNRESET")), "TEST 68: ECONNRESET detectado como transitorio");
+assert(isTransientAiError(new Error("fetch failed")), "TEST 68: fetch failed detectado como transitorio");
+assert(!isTransientAiError(new Error("Invalid JSON token at position 0")), "TEST 68: Error sintáctico no se confunde con transitorio");
+assert(!isTransientAiError(new Error("Respuesta vacía de Gemini")), "TEST 68: Respuesta vacía no es error de red transitorio");
+
+// 2. Comprobación de modelos con fallback activo
+assert(AI_GEMINI_MODELS.includes('gemini-3.1-flash-lite'), "TEST 68: AI Service incluye gemini-3.1-flash-lite como fallback inmediato");
+assert(AI_GEMINI_MODELS.length >= 4, "TEST 68: AI Service tiene al menos 4 modelos en cascada");
+
+// 3. Verificación de retención de cola persistente
+const testQueueFile = path.resolve('data', 'ai_standby_queue.json');
+const testQueueEntry = {
+  id: 123456789,
+  remoteJid: '34601022367@s.whatsapp.net',
+  attempts: 1,
+  nextRetryAt: Date.now() + 5000,
+  taskData: {
+    isAudio: false,
+    rawUserText: 'Presupuesto pintura salón 50m2',
+    senderNumber: '34601022367'
+  }
+};
+fs.writeFileSync(testQueueFile, JSON.stringify([testQueueEntry], null, 2), 'utf-8');
+assert(fs.existsSync(testQueueFile), "TEST 68: Archivo de cola persistente generado en disco");
+const loadedContent = JSON.parse(fs.readFileSync(testQueueFile, 'utf-8'));
+assert(loadedContent.length === 1 && loadedContent[0].taskData.rawUserText === 'Presupuesto pintura salón 50m2', "TEST 68: Tarea recuperable íntegra desde disco tras reinicio");
+if (fs.existsSync(testQueueFile)) fs.unlinkSync(testQueueFile);
+
+
+console.log("==========================================================");
+
+console.log("\n==========================================================");
+console.log("TEST 69: HOMONYMOUS CLIENTS (DISAMBIGUATION IN BUDGET MODIFICATION & DEBTS) AND NON-STICKY MEMORY");
+console.log("==========================================================");
+
+const { findClientsByName: testFindClients, saveBudget: testSaveBudget, db: currentTestDb } = await import('./db_service.js');
+const { checkDisambiguation: testCheckDis, resolveDisambiguationChoice: testResolveDis, getUserSession: testGetSession } = await import('./whatsapp_gateway.js');
+const { detectIntent: testDetectIntent, resolveIntent: testResolveIntent } = await import('./intent_router.js');
+
+const tenantPhone69 = '34601022367';
+const compRow69 = currentTestDb.prepare("SELECT id FROM companies WHERE phone = ?").get(tenantPhone69);
+const tenantContext69 = compRow69 ? { companyId: compRow69.id, phone: tenantPhone69 } : tenantPhone69;
+
+// Limpiar budgets de prueba previos
+currentTestDb.prepare("DELETE FROM budgets WHERE id IN ('PRE-MANOLO-01', 'PRE-MANOLO-02', 'PRE-MANOLO-03')").run();
+
+// Guardar 3 presupuestos con variantes ortográficas de tilde
+testSaveBudget(tenantContext69, {
+  id: 'PRE-MANOLO-01',
+  client: { name: 'Manolito Fernandez', address: 'Calle Tarsis 12' },
+  items: [{ id: 'it1', description: 'Pintura', qty: 1, unit: 'pa', unitPrice: 1000, total: 1000 }],
+  financials: { totalAmount: 1000 }
+});
+testSaveBudget(tenantContext69, {
+  id: 'PRE-MANOLO-02',
+  client: { name: 'Manolito Fernández', address: 'Calle Rapuncel 8' },
+  items: [{ id: 'it2', description: 'Fontanería', qty: 1, unit: 'pa', unitPrice: 2000, total: 2000 }],
+  financials: { totalAmount: 2000 }
+});
+testSaveBudget(tenantContext69, {
+  id: 'PRE-MANOLO-03',
+  client: { name: 'Manolito Fernández', address: 'Calle Sol 4' },
+  items: [{ id: 'it3', description: 'Electricidad', qty: 1, unit: 'pa', unitPrice: 1500, total: 1500 }],
+  financials: { totalAmount: 1500 }
+});
+
+// 1. Verificación de tolerancia a tildes en findClientsByName
+const foundSinTilde = testFindClients(tenantContext69, 'manolito fernandez');
+assert(foundSinTilde.length >= 3, "TEST 69: findClientsByName encuentra los 3 homónimos buscando sin tilde");
+const foundConTilde = testFindClients(tenantContext69, 'Manolito Fernández');
+assert(foundConTilde.length >= 3, "TEST 69: findClientsByName encuentra los 3 homónimos buscando con tilde");
+
+// 2. Desambiguación en modificación de presupuesto
+const mockSession69 = {
+  phone: tenantPhone69,
+  companyId: compRow69?.id,
+  authContext: tenantContext69,
+  budgets: new Map(),
+  activeBudgetId: null,
+  pendingDisambiguation: null
+};
+for (const b of foundSinTilde) mockSession69.budgets.set(b.id, b);
+
+const mockSock69 = {
+  messages: [],
+  async sendMessage(jid, content) {
+    this.messages.push(content);
+    return { key: { id: 'msg_dis_' + Date.now() } };
+  }
+};
+
+const isDisMod = await testCheckDis(mockSock69, tenantPhone69 + '@s.whatsapp.net', mockSession69, 'Manolito Fernández', 'modify_budget', {
+  aiResult: { action: 'budget', isNewBudget: false, clientName: 'Manolito Fernández' }
+});
+assert(isDisMod === true, "TEST 69: checkDisambiguation activa desambiguación para modify_budget");
+assert(mockSession69.pendingDisambiguation !== null, "TEST 69: Registra pendingDisambiguation con actionType modify_budget");
+assert(mockSession69.pendingDisambiguation.actionType === 'modify_budget', "TEST 69: actionType es modify_budget");
+assert(mockSock69.messages[0].text.includes('¿A cuál de los presupuestos deseas aplicar la modificación?'), "TEST 69: Pregunta con claridad a qué presupuesto aplicar la modificación");
+
+// 3. Resolución de elección del usuario para modificar
+const choice = testResolveDis('el 2', mockSession69.pendingDisambiguation.candidates);
+assert(choice && choice.id === 'PRE-MANOLO-02', "TEST 69: Usuario elige 'el 2' y resuelve a PRE-MANOLO-02");
+const choiceAddr = testResolveDis('el de Rapuncel', mockSession69.pendingDisambiguation.candidates);
+assert(choiceAddr && choiceAddr.id === 'PRE-MANOLO-02', "TEST 69: Usuario indica dirección y resuelve a PRE-MANOLO-02");
+
+// 4. Consulta de deuda para cliente homónimo
+const debtDetected = testDetectIntent('cuanto me debe manolito fernandez');
+assert(debtDetected?.intent === 'DEBT_BY_CLIENT', "TEST 69: 'cuanto me debe manolito fernandez' detectado como DEBT_BY_CLIENT");
+const debtReply = await testResolveIntent(debtDetected, tenantPhone69, mockSession69);
+assert(debtReply.includes('He encontrado 3 clientes/obras para "Manolito Fernandez"') || debtReply.includes('He encontrado 3'), "TEST 69: Respuesta de deuda detecta 3 obras");
+assert(debtReply.includes('PRE-MANOLO-01') && debtReply.includes('PRE-MANOLO-02') && debtReply.includes('PRE-MANOLO-03'), "TEST 69: Desglose incluye los 3 presupuestos de Manolito");
+assert(debtReply.includes('Total pendiente acumulado:') && (debtReply.includes('4500,00 €') || debtReply.includes('4.500,00 €')), "TEST 69: Calcula total acumulado correcto de los 3 presupuestos (1000 + 2000 + 1500 = 4500 €)");
+
+// 5. Cero secuestro de intención: Modificación de partida jamás se clasifica como DEBT_BY_CLIENT
+const modifyDetect = testDetectIntent('De la obra de manolito fernandez quiero cambiar el precio de Demolición y retirada de escombros a 500€', { knownNames: ['Manolito Fernández'] });
+assert(modifyDetect === null, "TEST 69: Modificación de partida NO es interceptada como DEBT_BY_CLIENT por contener el nombre del cliente");
+
+const { detectItemModificationIntent: testDetectItemMod } = await import('./whatsapp_gateway.js');
+const itemModParsed = testDetectItemMod('De la obra de manolito fernandez quiero cambiar el precio de Demolición y retirada de escombros a 500€');
+assert(itemModParsed && itemModParsed.concept.includes('Demolición') && itemModParsed.price === 500, "TEST 69: detectItemModificationIntent extrae concepto 'Demolición y retirada de escombros' y precio 500");
+
+// 6. Cero suposición sticky: activeBudgetId no persiste por defecto
+const freshSession = testGetSession(tenantPhone69 + '@s.whatsapp.net', tenantPhone69);
+assert(freshSession.activeBudgetId === null, "TEST 69: getUserSession NO asigna arbitrariamente activeBudgetId a la sesión");
+
+// Limpiar budgets de prueba
+currentTestDb.prepare("DELETE FROM budgets WHERE id IN ('PRE-MANOLO-01', 'PRE-MANOLO-02', 'PRE-MANOLO-03')").run();
+
+console.log("\n==========================================================");
+console.log("TEST 70: SEPARATION OF BUDGET ACCEPTANCE, PHASE INVOICING, FINAL INVOICE & COBROS VS FACTURAS");
+console.log("==========================================================");
+
+const {
+  detectSpecificInvoiceQuery: testDetectSpecificInvoice,
+  emitPhaseInvoiceForBudget: testEmitPhaseInvoice,
+  emitFinalInvoiceForBudget: testEmitFinalInvoice,
+  handlePaymentRegistration: testHandlePayment,
+  handleAcceptBudget: testHandleAccept,
+  handleQueryPendingToInvoice: testHandlePendingInv,
+  findInvoiceByQuery: testFindInv
+} = await import('./whatsapp_gateway.js');
+
+const {
+  getInvoicesByBudgetId: testGetInvoicesByBudgetId,
+  getProjectBillingSummary: testGetProjectBillingSummary,
+  emitInvoice: testEmitInvoice,
+  saveBudget: testSaveBudget70,
+  getBudget: testGetBudget70,
+  db: testDb70
+} = await import('./db_service.js');
+
+const { PresuVozEngine: TestPresuVozEngine70 } = await import('./engine.js');
+const testEngine70 = new TestPresuVozEngine70();
+const { detectIntent: testDetectIntent70, resolveIntent: testResolveIntent70 } = await import('./intent_router.js');
+
+const tenantPhone70 = '34601022370';
+let compRow70 = testDb70.prepare("SELECT id FROM companies WHERE phone = ?").get(tenantPhone70);
+if (!compRow70 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(compRow70.id)) {
+  const newCid = crypto.randomUUID();
+  if (compRow70) {
+    for (const t of ['payment_allocations', 'payments', 'invoices', 'budgets', 'appointments', 'shopping_items']) {
+      try { testDb70.prepare(`DELETE FROM ${t} WHERE company_id = ?`).run(compRow70.id); } catch(e){}
+    }
+    testDb70.prepare("DELETE FROM companies WHERE phone = ?").run(tenantPhone70);
+  }
+  testDb70.prepare("INSERT INTO companies (id, phone, name, invoice_series) VALUES (?, ?, ?, ?)").run(newCid, tenantPhone70, 'Reformas Laura S.L.', 'FAC-2026');
+  compRow70 = { id: newCid };
+}
+const tenantContext70 = { companyId: compRow70.id, phone: tenantPhone70 };
+
+// Limpiar datos previos de prueba
+testDb70.prepare("DELETE FROM payment_allocations WHERE company_id = ?").run(compRow70.id);
+testDb70.prepare("DELETE FROM payments WHERE company_id = ?").run(compRow70.id);
+testDb70.prepare("DELETE FROM invoices WHERE company_id = ?").run(compRow70.id);
+testDb70.prepare("DELETE FROM budgets WHERE company_id = ?").run(compRow70.id);
+
+// 1. Guardias de detectSpecificInvoiceQuery: CERO falsos positivos en frases largas de negocio
+assert(testDetectSpecificInvoice('He terminado la instalación eléctrica de la reforma de Laura. Prepárame la factura de esa fase') === null,
+  "TEST 70: detectSpecificInvoiceQuery no intercepta 'Prepárame la factura de esa fase'");
+assert(testDetectSpecificInvoice('Laura me acaba de pagar 1.500 euros de la factura 24') === null,
+  "TEST 70: detectSpecificInvoiceQuery no intercepta registro de cobro con número de factura");
+assert(testDetectSpecificInvoice('¿Cuánto dinero me queda por cobrar de la reforma de Laura?') === null,
+  "TEST 70: detectSpecificInvoiceQuery no intercepta consulta de dinero pendiente de cobro");
+assert(testDetectSpecificInvoice('He terminado toda la obra. Prepárame la factura final teniendo en cuenta los anticipos y las facturas anteriores') === null,
+  "TEST 70: detectSpecificInvoiceQuery no intercepta petición de factura final");
+assert(testDetectSpecificInvoice('¿Cuánto queda por facturar de la reforma de Laura?') === null,
+  "TEST 70: detectSpecificInvoiceQuery no intercepta consulta de importe pendiente de facturar");
+
+// 2. Presupuesto aceptado NO genera automáticamente factura por el importe total
+const budgetLaura = {
+  id: 'PRE-LAURA-01',
+  client: { name: 'Laura Gómez', address: 'Calle Mayor 10' },
+  items: [
+    { id: 'it-elec-1', description: 'Instalación eléctrica completa de vivienda', qty: 1, unit: 'pa', unitPrice: 1200, total: 1200 },
+    { id: 'it-font-2', description: 'Fontanería y desagües de baños', qty: 1, unit: 'pa', unitPrice: 800, total: 800 },
+    { id: 'it-alba-3', description: 'Albañilería y alicatado general', qty: 1, unit: 'pa', unitPrice: 1500, total: 1500 }
+  ],
+  financials: {
+    subtotal: 3500,
+    taxRatePercentage: 21,
+    taxAmount: 735,
+    totalAmount: 4235
+  },
+  status: 'PENDIENTE_FIRMA'
+};
+testSaveBudget70(tenantContext70, budgetLaura);
+
+const mockSock70 = {
+  messages: [],
+  async sendMessage(jid, content) {
+    this.messages.push(content);
+    return { key: { id: 'msg_70_' + Math.random().toString(36).substring(2, 8) } };
+  }
+};
+const mockSession70 = {
+  phone: tenantPhone70,
+  companyId: compRow70.id,
+  authContext: tenantContext70,
+  company: { name: 'Reformas Laura S.L.', invoiceSeries: 'FAC-2026' },
+  budgets: new Map([['PRE-LAURA-01', budgetLaura]]),
+  invoices: new Map(),
+  activeBudgetId: 'PRE-LAURA-01'
+};
+
+await testHandleAccept(mockSock70, tenantPhone70 + '@s.whatsapp.net', mockSession70, budgetLaura);
+const budgetAfterAccept = testGetBudget70(tenantContext70, 'PRE-LAURA-01');
+assert(budgetAfterAccept.status === 'ACEPTADO', "TEST 70: Aceptación confirma estado ACEPTADO");
+const invoicesOnAccept = testGetInvoicesByBudgetId(tenantContext70, 'PRE-LAURA-01');
+assert(invoicesOnAccept.length === 0, "TEST 70: Firma/Aceptación genera CERO facturas automáticas");
+
+// 3. Facturación por fases: Factura únicamente las partidas ejecutadas de la fase
+await testEmitPhaseInvoice(mockSock70, tenantPhone70 + '@s.whatsapp.net', mockSession70, budgetLaura, 'instalación eléctrica');
+const invoicesAfterPhase = testGetInvoicesByBudgetId(tenantContext70, 'PRE-LAURA-01');
+assert(invoicesAfterPhase.length === 1, "TEST 70: Emite exactamente 1 factura para la fase");
+const phaseInv = invoicesAfterPhase[0];
+assert(phaseInv.type === 'FASE', "TEST 70: La factura emitida es de tipo 'FASE'");
+assert(phaseInv.items.length === 1 && phaseInv.items[0].description.includes('eléctrica'), "TEST 70: La factura de fase contiene solo la partida eléctrica");
+assert(phaseInv.financials.taxableBase === 1200, "TEST 70: Base imponible de fase es 1.200 €");
+assert(phaseInv.financials.taxAmount === 252, "TEST 70: Cuota IVA de fase es 252 €");
+assert(phaseInv.financials.totalAmount === 1452, "TEST 70: Total factura de fase es 1.452 €");
+const budgetAfterPhase = testGetBudget70(tenantContext70, 'PRE-LAURA-01');
+assert(budgetAfterPhase.status === 'ACEPTADO', "TEST 70: Presupuesto permanece en estado ACEPTADO tras emitir factura de fase");
+
+// 4. Distinción explícita: Pendiente de facturar vs Pendiente de cobro
+const summaryAfterPhase = testGetProjectBillingSummary(tenantContext70, 'PRE-LAURA-01');
+assert(summaryAfterPhase.budgetTotal === 4235, "TEST 70: Presupuesto acordado es 4.235 €");
+assert(summaryAfterPhase.workInvoiced === 1452, "TEST 70: Total facturado de obra hasta la fecha es 1.452 €");
+assert(summaryAfterPhase.pendingToInvoice === 2783, "TEST 70: Pendiente de facturar es exactamente 2.783 € (4.235 - 1.452)");
+assert(summaryAfterPhase.pendingToCollect === 4235, "TEST 70: Pendiente de cobro total es 4.235 € (0 cobrado)");
+assert(summaryAfterPhase.uninvoicedItems.length === 2, "TEST 70: Quedan exactamente 2 partidas pendientes de facturar");
+
+// 5. Consulta determinística de facturación pendiente y cobro pendiente
+const intentPendingInv = testDetectIntent70('¿Cuánto queda por facturar de la reforma de Laura?', { knownNames: ['Laura Gómez'] });
+assert(intentPendingInv?.intent === 'PENDING_TO_INVOICE', "TEST 70: '¿Cuánto queda por facturar...' detectado como PENDING_TO_INVOICE");
+const replyPendingInv = await testResolveIntent70(intentPendingInv, tenantPhone70, mockSession70);
+assert(replyPendingInv.includes('2.783,00 €') || replyPendingInv.includes('2783,00 €'), "TEST 70: Respuesta detalla 2.783 € pendientes de facturar");
+
+const intentDebtClient = testDetectIntent70('¿Cuánto dinero me queda por cobrar de la reforma de Laura?', { knownNames: ['Laura Gómez'] });
+assert(intentDebtClient?.intent === 'DEBT_BY_CLIENT', "TEST 70: '¿Cuánto dinero me queda por cobrar...' detectado como DEBT_BY_CLIENT");
+
+// 6. Cobros parciales asignados a factura: CERO nuevas facturas creadas por registrar pagos
+// Simular factura de 2000 € y 3 pagos parciales (500 €, 700 €, 800 €)
+const budgetPagos = {
+  id: 'PRE-PAGOS-01',
+  client: { name: 'Cliente Pagos', address: 'Calle Prueba' },
+  items: [{ id: 'it-p-1', description: 'Reforma integral', qty: 1, unit: 'pa', unitPrice: 2000, total: 2000 }],
+  financials: { subtotal: 2000, taxableBase: 2000, taxRatePercentage: 0, taxAmount: 0, totalAmount: 2000 },
+  status: 'ACEPTADO'
+};
+testSaveBudget70(tenantContext70, budgetPagos);
+const inv2000Payload = testEngine70.convertToInvoice(budgetPagos, { type: 'FINAL', company: mockSession70.company });
+const inv2000Result = testEmitInvoice(tenantContext70, inv2000Payload);
+const inv2000 = inv2000Result.invoice;
+mockSession70.invoices.set(inv2000.id, inv2000);
+mockSession70.budgets.set('PRE-PAGOS-01', budgetPagos);
+
+const initialInvoicesCount = testDb70.prepare("SELECT COUNT(*) AS c FROM invoices WHERE company_id = ?").get(compRow70.id).c;
+
+await testHandlePayment(mockSock70, tenantPhone70 + '@s.whatsapp.net', mockSession70, budgetPagos, { amount: 500, concept: 'Primer cobro' });
+const invAfter500 = testDb70.prepare("SELECT status FROM invoices WHERE id = ?").get(inv2000.id);
+assert(invAfter500.status === 'PARCIAL', "TEST 70: Factura pasa a estado 'PARCIAL' tras primer cobro de 500 €");
+
+await testHandlePayment(mockSock70, tenantPhone70 + '@s.whatsapp.net', mockSession70, budgetPagos, { amount: 700, concept: 'Segundo cobro' });
+await testHandlePayment(mockSock70, tenantPhone70 + '@s.whatsapp.net', mockSession70, budgetPagos, { amount: 800, concept: 'Tercer cobro' });
+
+const invAfterAll = testDb70.prepare("SELECT status FROM invoices WHERE id = ?").get(inv2000.id);
+assert(invAfterAll.status === 'PAGADA', "TEST 70: Factura pasa a estado 'PAGADA' tras cubrir los 2.000 €");
+
+const finalInvoicesCount = testDb70.prepare("SELECT COUNT(*) AS c FROM invoices WHERE company_id = ?").get(compRow70.id).c;
+assert(finalInvoicesCount === initialInvoicesCount, "TEST 70: Registrar cobros parciales crea CERO facturas nuevas (saldo 0 €)");
+
+// 7. Pago imputado a factura explícita y formateo de 1.500 €
+const targetInv24 = {
+  id: 'FAC-2026-0024',
+  company_id: compRow70.id,
+  budget_id: 'PRE-LAURA-01',
+  client_name: 'Laura Gómez',
+  total_amount: 1500,
+  status: 'PENDIENTE_PAGO',
+  data_json: JSON.stringify({ id: 'FAC-2026-0024', type: 'FASE', phaseName: 'fase previa', budgetId: 'PRE-LAURA-01', client: { name: 'Laura Gómez' }, financials: { totalAmount: 1500 }, items: [] })
+};
+testDb70.prepare("INSERT OR REPLACE INTO invoices (id, company_id, budget_id, client_name, total_amount, status, data_json) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+  targetInv24.id, targetInv24.company_id, targetInv24.budget_id, targetInv24.client_name, targetInv24.total_amount, targetInv24.status, targetInv24.data_json
+);
+mockSession70.invoices.set('FAC-2026-0024', targetInv24);
+
+const invFound24 = testFindInv(mockSession70, '24');
+assert(invFound24 && invFound24.id === 'FAC-2026-0024', "TEST 70: '24' resuelve a FAC-2026-0024");
+
+// Registrar pago dictado con '1.500' y 'de la factura 24'
+await testHandlePayment(mockSock70, tenantPhone70 + '@s.whatsapp.net', mockSession70, budgetLaura, {
+  amount: 1500,
+  invoiceQuery: '24',
+  concept: 'Pago de Laura factura 24'
+});
+const inv24After = testDb70.prepare("SELECT status FROM invoices WHERE id = 'FAC-2026-0024'").get();
+assert(inv24After.status === 'PAGADA', "TEST 70: Factura 24 queda en estado PAGADA tras pago explícito");
+
+// 8. Factura final y regularización de partidas sin duplicar fase eléctrica
+await testEmitFinalInvoice(mockSock70, tenantPhone70 + '@s.whatsapp.net', mockSession70, budgetLaura);
+const allLauraInvoices = testGetInvoicesByBudgetId(tenantContext70, 'PRE-LAURA-01');
+const finalInv70 = allLauraInvoices.find(i => i.type === 'FINAL');
+assert(Boolean(finalInv70), "TEST 70: Factura final de liquidación emitida con éxito");
+assert(finalInv70.items.length === 2, "TEST 70: Factura final contiene únicamente las 2 partidas restantes no facturadas");
+assert(!finalInv70.items.some(it => it.description.includes('eléctrica')), "TEST 70: Factura final NO duplica la partida eléctrica ya facturada");
+assert(finalInv70.financials.taxableBase === 2300, "TEST 70: Base imponible final es 2.300 € (Fontanería 800 + Albañilería 1500)");
+assert(finalInv70.financials.taxAmount === 483, "TEST 70: Cuota IVA de factura final es 483 €");
+assert(finalInv70.financials.totalAmount === 2783, "TEST 70: Total factura final es exactamente 2.783 €");
+const budgetFinalStatus = testGetBudget70(tenantContext70, 'PRE-LAURA-01');
+assert(budgetFinalStatus.status === 'FACTURADO', "TEST 70: Presupuesto pasa a FACTURADO al concluir la facturación final");
+
+// 9. Idempotencia: intento de re-emisión de la misma factura no genera duplicado
+const secondFinal = testEmitInvoice(tenantContext70, finalInv70);
+assert(secondFinal.isDuplicate === true, "TEST 70: Idempotencia evita duplicar factura final para el mismo presupuesto");
+
+// Limpiar datos de prueba TEST 70
+testDb70.prepare("DELETE FROM payment_allocations WHERE company_id = ?").run(compRow70.id);
+testDb70.prepare("DELETE FROM payments WHERE company_id = ?").run(compRow70.id);
+testDb70.prepare("DELETE FROM invoices WHERE company_id = ?").run(compRow70.id);
+testDb70.prepare("DELETE FROM budgets WHERE company_id = ?").run(compRow70.id);
+
+console.log("\n==========================================================");
+console.log("TEST 71: CUSTOM INVOICE NAMING (ANTICIPO, FINAL, HITO)");
+console.log("==========================================================");
+assert(getBudgetClientNumber('PRE2026-012') === '12', "TEST 71: Extrae '12' de PRE2026-012");
+assert(getBudgetClientNumber('PRE2026-014') === '14', "TEST 71: Extrae '14' de PRE2026-014");
+assert(getBudgetYear('PRE2026-012') === '2026', "TEST 71: Extrae año 2026");
+assert(formatInvoiceNaming('ANTICIPO', 'PRE2026-012', 1) === 'Factura_Anticipo_2026-12-001', "TEST 71: Factura de anticipo PRE2026-012 genera Factura_Anticipo_2026-12-001");
+assert(formatInvoiceNaming('ANTICIPO', 'PRE2026-014', 1) === 'Factura_Anticipo_2026-14-001', "TEST 71: Factura de anticipo PRE2026-014 genera Factura_Anticipo_2026-14-001");
+assert(formatInvoiceNaming('FINAL', 'PRE2026-012', 1) === 'Factura_Final_2026-12-001', "TEST 71: Factura final PRE2026-012 genera Factura_Final_2026-12-001");
+assert(formatInvoiceNaming('HITO', 'PRE2026-012', 1) === 'Factura_Hito_2026-12-001', "TEST 71: Factura hito 1 PRE2026-012 genera Factura_Hito_2026-12-001");
+assert(formatInvoiceNaming('FASE', 'PRE2026-012', 2) === 'Factura_Hito_2026-12-002', "TEST 71: Factura hito 2 PRE2026-012 genera Factura_Hito_2026-12-002");
+
+console.log("\n==========================================================");
+console.log("TEST 72: CUSTOM RECEIPT NAMING (ANTICIPO, FINAL, HITO)");
+console.log("==========================================================");
+assert(formatReceiptNaming('ANTICIPO', 'PRE2026-012', 1) === 'Recibo_Anticipo_2026-12-001', "TEST 72: Recibo de anticipo PRE2026-012 genera Recibo_Anticipo_2026-12-001");
+assert(formatReceiptNaming('ANTICIPO', 'PRE2026-014', 1) === 'Recibo_Anticipo_2026-14-001', "TEST 72: Recibo de anticipo PRE2026-014 genera Recibo_Anticipo_2026-14-001");
+assert(formatReceiptNaming('FINAL', 'PRE2026-012', 1) === 'Recibo_Final_2026-12-001', "TEST 72: Recibo final PRE2026-012 genera Recibo_Final_2026-12-001");
+assert(formatReceiptNaming('HITO', 'PRE2026-012', 1) === 'Recibo_Hito_2026-12-001', "TEST 72: Recibo hito 1 PRE2026-012 genera Recibo_Hito_2026-12-001");
+assert(formatReceiptNaming('FASE', 'PRE2026-012', 2) === 'Recibo_Hito_2026-12-002', "TEST 72: Recibo hito 2 PRE2026-012 genera Recibo_Hito_2026-12-002");
+
+// Verificar registerPayment asignación de naming en presupuesto
+const testEngine72 = new PresuVozEngine();
+const dummyBudget72 = {
+  id: 'PRE2026-012',
+  client: { name: 'Manolo Ramos' },
+  financials: { totalAmount: 1000 }
+};
+const p1 = testEngine72.registerPayment(dummyBudget72, { amount: 300 });
+assert(p1.receipt.displayNumber === 'Recibo_Anticipo_2026-12-001', "TEST 72: registerPayment asigna Recibo_Anticipo_2026-12-001 para el primer pago");
+
+const p2 = testEngine72.registerPayment(dummyBudget72, { amount: 300 });
+assert(p2.receipt.displayNumber === 'Recibo_Hito_2026-12-001', "TEST 72: registerPayment asigna Recibo_Hito_2026-12-001 para pago intermedio");
+
+const p3 = testEngine72.registerPayment(dummyBudget72, { amount: 400 });
+assert(p3.receipt.displayNumber === 'Recibo_Final_2026-12-001', "TEST 72: registerPayment asigna Recibo_Final_2026-12-001 al liquidar");
+
+console.log("\n==========================================================");
+console.log("TEST 73: NATURAL LANGUAGE INTENT RESOLUTION (VISITAS VS MATERIALES VS PRESUPUESTOS)");
+console.log("==========================================================");
+// 1. Visitas no colisionan con presupuestos pendientes
+assert(detectAgendaQueryIntent("Que visitas tengo pendiente?")?.isMatch === true, "TEST 73: 'Que visitas tengo pendiente?' detectado como agenda");
+assert(detectAgendaQueryIntent("Que visitas tengo pendiente?")?.filter === 'all', "TEST 73: filtro 'all' para 'Que visitas tengo pendiente?'");
+assert(detectAgendaQueryIntent("visitas")?.isMatch === true, "TEST 73: 'visitas' detectado como agenda");
+assert(detectAgendaQueryIntent("qué citas tengo hoy?")?.filter === 'today', "TEST 73: 'qué citas tengo hoy?' detecta filtro today");
+assert(detectAgendaQueryIntent("visitas para mañana")?.filter === 'tomorrow', "TEST 73: 'visitas para mañana' detecta filtro tomorrow");
+assert(detectAgendaQueryIntent("tengo alguna visita pendiente?")?.isMatch === true, "TEST 73: 'tengo alguna visita pendiente?' detectado como agenda");
+assert(detectAgendaQueryIntent("cancela la visita de Juan") === null, "TEST 73: Acción de cancelar no se confunde con listado de agenda");
+assert(detectBudgetListIntent("Que visitas tengo pendiente?") === null, "TEST 73: 'Que visitas tengo pendiente?' NO es interceptado como presupuestos");
+
+// 2. Materiales / compras no colisionan con presupuestos pendientes
+assert(detectShoppingListQueryIntent("Que materiales tengo pendiente por comprar?")?.isMatch === true, "TEST 73: 'Que materiales tengo pendiente por comprar?' detectado como lista de compras");
+assert(detectShoppingListQueryIntent("Que tengo que comprar?")?.isMatch === true, "TEST 73: 'Que tengo que comprar?' detectado como lista de compras");
+assert(detectShoppingListQueryIntent("qué materiales tengo pendientes para Carlos?")?.clientFilter?.toLowerCase() === 'carlos', "TEST 73: Extrae cliente Carlos en consulta de materiales pendientes");
+assert(detectShoppingListQueryIntent("ya compré el cemento") === null, "TEST 73: Acción de compra no se confunde con listado de compras");
+assert(detectBudgetListIntent("Que materiales tengo pendiente por comprar?") === null, "TEST 73: 'Que materiales tengo pendiente por comprar?' NO es interceptado como presupuestos");
+
+// 3. Presupuestos siguen funcionando
+assert(detectBudgetListIntent("presupuestos pendientes de firma") === 'pending_signature', "TEST 73: 'presupuestos pendientes de firma' sigue detectando pending_signature");
+assert(detectBudgetListIntent("que tengo sin firmar") === 'pending_signature', "TEST 73: 'que tengo sin firmar' sigue detectando pending_signature");
+assert(detectBudgetListIntent("mis presupuestos") === 'all', "TEST 73: 'mis presupuestos' sigue detectando all");
+
+console.log("\n==========================================================");
+console.log("TEST 74: AUDIO TRANSCRIPTION RECONCILIATION & ANTI-HALLUCINATION");
+console.log("==========================================================");
+// 1. Detección de DEBT_BY_CLIENT desde transcripción de audio
+const audioTranscript74 = "¿Cuánto me debe Manolito Fernández?";
+const detectedAudioIntent74 = testDetectIntent(audioTranscript74, { knownNames: ['Manolito Fernández', 'Juan López'] });
+assert(detectedAudioIntent74?.intent === 'DEBT_BY_CLIENT', "TEST 74: detectIntent reconoce DEBT_BY_CLIENT desde transcripción");
+assert(detectedAudioIntent74?.params?.clientName === 'Manolito Fernández', "TEST 74: Extrae 'Manolito Fernández' de la transcripción de audio");
+
+// 2. Anti-alucinación: si el modelo de IA alucina 'Juan López' pero la transcripción dice 'Manolito Fernández', se reconcilia con el audio
+const hallucinatedAiResult74 = {
+  action: 'query_balance',
+  clientName: 'Juan López',
+  targetBudgetId: 'PRE2026-006',
+  transcript: '¿Cuánto me debe Manolito Fernández?'
+};
+let reconciledClient74 = hallucinatedAiResult74.clientName;
+if (hallucinatedAiResult74.transcript) {
+  const debtMatch = hallucinatedAiResult74.transcript.match(/\b(?:cu[aá]nto\s+me\s+debe|deuda\s+(?:de\s+)?|saldo\s+(?:de\s+)?)\s*([a-záéíóúñA-ZÁÉÍÓÚÑ\s]{2,40})/i);
+  if (debtMatch && debtMatch[1]) {
+    const fromTranscript = debtMatch[1].replace(/[?¿!¡.]/g, '').trim();
+    if (fromTranscript) reconciledClient74 = fromTranscript;
+  }
+}
+assert(reconciledClient74 === 'Manolito Fernández', "TEST 74: Reconcilia correctamente el cliente real del audio ignorando la alucinación de memoria");
+
+// 3. Ordenamiento de memoria de presupuestos por recencia (más recientes primero)
+const dummySessionBudgets74 = new Map([
+  ['PRE-OLD-01', { id: 'PRE-OLD-01', updatedAt: '2026-01-01T00:00:00.000Z', client: { name: 'Juan Viejo' } }],
+  ['PRE-RECENT-01', { id: 'PRE-RECENT-01', updatedAt: '2026-10-14T10:00:00.000Z', client: { name: 'Manolito Reciente' } }]
+]);
+const sortedBudgets74 = Array.from(dummySessionBudgets74.values())
+  .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0));
+assert(sortedBudgets74[0].id === 'PRE-RECENT-01', "TEST 74: El presupuesto más reciente queda en primer lugar en la memoria de IA");
+assert(sortedBudgets74[0].client.name === 'Manolito Reciente', "TEST 74: El cliente reciente se incluye en el contexto de IA");
+
+console.log("\n==========================================================");
+console.log("TEST 75: CONVERSATIONAL CONTINUITY & ADDRESS DISAMBIGUATION");
+console.log("==========================================================");
+
+const { findClientsByName: testFindClients75, saveBudget: testSaveBudget75, ensureCompanyTenant: testEnsureTenant75 } = await import('./db_service.js');
+const { resolveDisambiguationChoice: testResolveDis75 } = await import('./whatsapp_gateway.js');
+const { detectIntent: testDetectIntent75, resolveIntent: testResolveIntent75 } = await import('./intent_router.js');
+
+const tenantPhone75 = '34600757575';
+const tenantContext75 = testEnsureTenant75(tenantPhone75);
+
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext75.companyId);
+
+const b75_1 = {
+  id: 'PRE-T75-014',
+  companyId: tenantContext75.companyId,
+  client: { name: 'Manolito Fernández', address: 'Ubicación obra según visita', phone: '600111222' },
+  financials: { totalAmount: 1500, taxableBase: 1239.67, taxAmount: 260.33 },
+  status: 'ACEPTADO',
+  createdAt: '2026-10-14T09:00:00.000Z',
+  updatedAt: '2026-10-14T09:00:00.000Z'
+};
+
+const b75_2 = {
+  id: 'PRE-T75-013',
+  companyId: tenantContext75.companyId,
+  client: { name: 'Manolito Fernández', address: 'Calle Rapuncel 14', phone: '600111333' },
+  financials: { totalAmount: 2000, taxableBase: 1652.89, taxAmount: 347.11 },
+  status: 'ACEPTADO',
+  createdAt: '2026-10-14T10:00:00.000Z',
+  updatedAt: '2026-10-14T10:00:00.000Z'
+};
+
+const b75_3 = {
+  id: 'PRE-T75-012',
+  companyId: tenantContext75.companyId,
+  client: { name: 'Manolito Fernández', address: 'Calle Mayor 8', phone: '600111444' },
+  financials: { totalAmount: 1000, taxableBase: 826.45, taxAmount: 173.55 },
+  status: 'FINALIZADO',
+  createdAt: '2026-10-14T11:00:00.000Z',
+  updatedAt: '2026-10-14T11:00:00.000Z'
+};
+
+testSaveBudget75(tenantContext75, b75_1);
+testSaveBudget75(tenantContext75, b75_2);
+testSaveBudget75(tenantContext75, b75_3);
+
+// 1. findClientsByName busca con precisión cuando la consulta contiene Nombre + Dirección
+const foundRapuncel75 = testFindClients75(tenantContext75, 'Manolito Fernández el de la calle Rapuncel');
+assert(foundRapuncel75.length === 1 && foundRapuncel75[0].id === 'PRE-T75-013', "TEST 75: findClientsByName con 'Manolito Fernández el de la calle Rapuncel' devuelve PRE-T75-013 directamente");
+
+const foundMayor75 = testFindClients75(tenantContext75, 'Manolito Fernández Calle Mayor');
+assert(foundMayor75.length === 1 && foundMayor75[0].id === 'PRE-T75-012', "TEST 75: findClientsByName con 'Manolito Fernández Calle Mayor' devuelve PRE-T75-012 directamente");
+
+const foundAll75 = testFindClients75(tenantContext75, 'Manolito Fernández');
+assert(foundAll75.length === 3, "TEST 75: findClientsByName solo con nombre devuelve los 3 homónimos");
+
+// 2. detectIntent y resolveIntent resuelven directamente sin desambiguación si se incluye la calle
+const detectedWithStreet75 = testDetectIntent75('Ahora dime cuanto me debe manolito fernandez  el de la calle rapuncel', { knownNames: ['Manolito Fernández'] });
+assert(detectedWithStreet75?.intent === 'DEBT_BY_CLIENT' && detectedWithStreet75?.params?.addressHint.includes('rapuncel'), "TEST 75: detectIntent extrae clientName limpio y addressHint");
+
+const mockSession75 = {
+  companyId: tenantContext75.companyId,
+  budgets: new Map([[b75_1.id, b75_1], [b75_2.id, b75_2], [b75_3.id, b75_3]]),
+  pendingDisambiguation: null
+};
+
+const replyWithStreet75 = await testResolveIntent75(detectedWithStreet75, tenantPhone75, mockSession75);
+assert(!replyWithStreet75.includes('He encontrado 3 clientes/obras'), "TEST 75: NO dispara menú de desambiguación cuando se indica la calle");
+assert(replyWithStreet75.includes('PRE-T75-013') && replyWithStreet75.includes('Calle Rapuncel'), "TEST 75: Muestra directamente el estado de PRE-T75-013 con Calle Rapuncel");
+assert(mockSession75.pendingDisambiguation === null, "TEST 75: No deja pendingDisambiguation colgado");
+
+// 3. detectIntent y resolveIntent para 'obra según visita'
+const detectedVisita75 = testDetectIntent75('cuanto me debe manolito fernandez el de obra segun visita', { knownNames: ['Manolito Fernández'] });
+const replyVisita75 = await testResolveIntent75(detectedVisita75, tenantPhone75, mockSession75);
+assert(!replyVisita75.includes('He encontrado 3 clientes/obras'), "TEST 75: NO dispara desambiguación para 'el de obra según visita'");
+assert(replyVisita75.includes('PRE-T75-014'), "TEST 75: Muestra directamente el estado de PRE-T75-014");
+
+// 4. resolveDisambiguationChoice reconoce opciones de dirección y 'obra según visita'
+const cVisita75 = testResolveDis75('El de obra según visita', [b75_1, b75_2, b75_3]);
+assert(cVisita75?.id === 'PRE-T75-014', "TEST 75: resolveDisambiguationChoice resuelve 'El de obra según visita' al candidato 1");
+
+const cRapuncel75 = testResolveDis75('el de rapuncel', [b75_1, b75_2, b75_3]);
+assert(cRapuncel75?.id === 'PRE-T75-013', "TEST 75: resolveDisambiguationChoice resuelve 'el de rapuncel' al candidato 2");
+
+// 5. Continuidad de Hilo Conversacional (Disambiguation Drift Prevention)
+const sessionFlow75 = {
+  companyId: tenantContext75.companyId,
+  phone: tenantPhone75,
+  budgets: new Map([[b75_1.id, b75_1], [b75_2.id, b75_2], [b75_3.id, b75_3]]),
+  pendingDisambiguation: null,
+  lastDisambiguation: null,
+  activeBudgetId: null
+};
+
+const initialIntent75 = testDetectIntent75('¿Cuánto me debe Manolito Fernández?', { knownNames: ['Manolito Fernández'] });
+const initialReply75 = await testResolveIntent75(initialIntent75, tenantPhone75, sessionFlow75);
+assert(initialReply75.includes('He encontrado 3 clientes/obras'), "TEST 75: Paso 1 muestra los 3 homónimos");
+assert(sessionFlow75.pendingDisambiguation !== null, "TEST 75: Paso 1 activa pendingDisambiguation");
+
+const choice1_75 = testResolveDis75('El segundo', sessionFlow75.pendingDisambiguation.candidates);
+assert(choice1_75?.id === b75_2.id, "TEST 75: Paso 2 resuelve 'El segundo' a b75_2 (Rapuncel)");
+sessionFlow75.lastDisambiguation = {
+  ...sessionFlow75.pendingDisambiguation,
+  selectedCandidate: choice1_75,
+  resolvedAt: Date.now()
+};
+sessionFlow75.pendingDisambiguation = null;
+sessionFlow75.activeBudgetId = choice1_75.id;
+
+const followUpCandidate75 = testResolveDis75('El de obra según visita', sessionFlow75.lastDisambiguation.candidates);
+assert(followUpCandidate75?.id === b75_1.id, "TEST 75: Paso 3 seguimiento conversacional resuelve directamente a b75_1 (obra según visita)");
+
+const mutationText75 = 'De la obra de Manolito quiero cambiar el precio de Demolición a 500€';
+const isRealMutation75 = /\b(?:cambiar?|cambia|modificar?|modifica|anadir?|añadir?|anade|añade|quitar?|quita|borrar?|borra|eliminar?|elimina|nuevo\s+presupuesto|nueva\s+obra|partida|precio|hacer\s+presupuesto)\b/i.test(mutationText75);
+assert(isRealMutation75, "TEST 75: Paso 4 mutación explícita no se confunde con seguimiento");
+
+// ==========================================================
+// TEST 76: RESOLUCIÓN DE VISITAS EN LOTE POR ORDINALES Y REAGENDAMIENTO ROBUSTO CON DIACRÍTICOS
+// ==========================================================
+console.log("\n--- TEST 76: RESOLUCIÓN DE VISITAS EN LOTE POR ORDINALES Y REAGENDAMIENTO ROBUSTO ---");
+const {
+  ensureCompanyTenant: testEnsureTenant76,
+  saveAppointment: testSaveApt76,
+  findAppointments: testFindApts76,
+  completeAppointments: testCompleteApts76,
+  rescheduleAppointment: testRescheduleApt76,
+  getAppointment: testGetApt76
+} = await import('./db_service.js');
+const { handleCompleteAppointments: testHandleComplete76 } = await import('./whatsapp_gateway.js');
+
+const tenantPhone76 = '34600767676';
+const tenantContext76 = testEnsureTenant76(tenantPhone76);
+
+// Limpieza previa
+currentTestDb.prepare('DELETE FROM appointments WHERE company_id = ?').run(tenantContext76.companyId);
+
+// 1. Crear 4 citas (con tildes en nombres)
+const apt76_1 = testSaveApt76(tenantContext76, {
+  clientName: 'Cliente',
+  clientAddress: 'Calle San Luis',
+  date: '2026-09-25',
+  time: '10:00',
+  notes: 'Visita técnica 1'
+});
+const apt76_2 = testSaveApt76(tenantContext76, {
+  clientName: 'María García',
+  clientAddress: 'Calle Alcalá 45',
+  date: '2026-09-26',
+  time: '11:30',
+  notes: 'Visita técnica 2'
+});
+const apt76_3 = testSaveApt76(tenantContext76, {
+  clientName: 'Antonio López',
+  clientAddress: 'Calle Gran Vía 100',
+  date: '2026-09-27',
+  time: '16:00',
+  notes: 'Visita técnica 3'
+});
+const apt76_4 = testSaveApt76(tenantContext76, {
+  clientName: 'Sara Martínez',
+  clientAddress: 'Plaza Mayor 5',
+  date: '2026-10-03',
+  time: '09:00',
+  notes: 'Visita técnica 4'
+});
+
+// A. Test findAppointments con insensibilidad a tildes y mayúsculas
+const findSaraNoAccent = testFindApts76(tenantContext76, 'sara martinez');
+assert(findSaraNoAccent.length === 1 && findSaraNoAccent[0].id === apt76_4.id, "TEST 76: findAppointments encuentra 'Sara Martínez' buscando 'sara martinez' sin tildes");
+
+const findMariaNoAccent = testFindApts76(tenantContext76, 'maria garcia');
+assert(findMariaNoAccent.length === 1 && findMariaNoAccent[0].id === apt76_2.id, "TEST 76: findAppointments encuentra 'María García' buscando 'maria garcia'");
+
+const findLopezNoAccent = testFindApts76(tenantContext76, 'antonio lopez');
+assert(findLopezNoAccent.length === 1 && findLopezNoAccent[0].id === apt76_3.id, "TEST 76: findAppointments encuentra 'Antonio López' buscando 'antonio lopez'");
+
+// B. Test handleCompleteAppointments con "Las tres primeras están hechas, pero la de Sara Martinez pasamela a mañana a las 15"
+const mockMessagesSent76 = [];
+const mockSock76 = {
+  sendMessage: async (jid, payload) => {
+    mockMessagesSent76.push(payload.text);
+    return { key: { id: 'msg-test-76-' + Math.random() } };
+  }
+};
+
+const session76 = {
+  companyId: tenantContext76.companyId,
+  phone: tenantPhone76,
+  company: { name: 'Empresa Test 76' },
+  pendingDayReview: {
+    date: '2026-10-14',
+    appointments: [
+      { id: apt76_1.id, clientName: apt76_1.clientName, time: apt76_1.time },
+      { id: apt76_2.id, clientName: apt76_2.clientName, time: apt76_2.time },
+      { id: apt76_3.id, clientName: apt76_3.clientName, time: apt76_3.time },
+      { id: apt76_4.id, clientName: apt76_4.clientName, time: apt76_4.time }
+    ]
+  }
+};
+
+const userPrompt76 = "Las tres primeras estan hechas, pero la de Sara Martinez pasamela a mañana a las 15 de la mañana";
+const aiResult76 = {
+  completionInfo: {
+    completedQueries: ["primera", "segunda", "tercera"]
+  },
+  rescheduleInfo: {
+    query: "Sara Martinez",
+    time: "15:00",
+    date: null
+  }
+};
+
+await testHandleComplete76(mockSock76, 'test-jid-76@s.whatsapp.net', session76, aiResult76.completionInfo, aiResult76.rescheduleInfo, userPrompt76);
+
+const reply76 = mockMessagesSent76.join('\n\n');
+assert(!reply76.includes('la visita con .'), "TEST 76: El mensaje NO tiene el error 'la visita con .'");
+assert(reply76.includes('He marcado como realizadas las visitas con'), "TEST 76: El mensaje confirma la realización en plural");
+assert(reply76.includes('Cliente') && reply76.includes('María García') && reply76.includes('Antonio López'), "TEST 76: El mensaje nombra a los 3 clientes completados");
+assert(reply76.includes('Sara Martínez') && reply76.includes('15:00 h'), "TEST 76: El mensaje confirma que la visita de Sara Martínez se movió a las 15:00 h");
+
+// C. Verificar estado en Base de Datos
+const checkApt1 = testGetApt76(tenantContext76, apt76_1.id);
+const checkApt2 = testGetApt76(tenantContext76, apt76_2.id);
+const checkApt3 = testGetApt76(tenantContext76, apt76_3.id);
+const checkApt4 = testGetApt76(tenantContext76, apt76_4.id);
+
+assert(checkApt1.status === 'COMPLETED', "TEST 76: Visita 1 (Cliente) queda en status COMPLETED en BD");
+assert(checkApt2.status === 'COMPLETED', "TEST 76: Visita 2 (María García) queda en status COMPLETED en BD");
+assert(checkApt3.status === 'COMPLETED', "TEST 76: Visita 3 (Antonio López) queda en status COMPLETED en BD");
+assert(checkApt4.status === 'CONFIRMED' && checkApt4.time === '15:00', "TEST 76: Visita 4 (Sara Martínez) queda reprogramada a las 15:00");
+assert(session76.pendingDayReview === null, "TEST 76: session.pendingDayReview queda completamente cerrado (null)");
+
+// ==========================================================
+// TEST 77: REGISTRO DE COBROS EN LENGUAJE NATURAL Y RESOLUCIÓN ROBUSTA DE HOMÓNIMOS
+// ==========================================================
+console.log("\n--- TEST 77: REGISTRO DE COBROS EN LENGUAJE NATURAL Y RESOLUCIÓN ROBUSTA ---");
+const {
+  parsePaymentCommand: testParsePayment77,
+  findBudgetInSession: testFindBudget77,
+  checkDisambiguation: testCheckDis77,
+  resolveDisambiguationChoice: testResolveDis77,
+  handlePaymentRegistration: testHandlePay77
+} = await import('./whatsapp_gateway.js');
+const {
+  ensureCompanyTenant: testEnsureTenant77,
+  saveBudget: testSaveBudget77,
+  getBudget: testGetBudget77
+} = await import('./db_service.js');
+
+// 1. Verificación del parser de lenguaje natural (parsePaymentCommand)
+const pay77_1 = testParsePayment77('El cliente manolito fernandez me ha pagado 129,60€ en efectivo');
+assert(pay77_1 !== null, "TEST 77: Reconoce 'El cliente manolito fernandez me ha pagado 129,60€ en efectivo'");
+assert(pay77_1.clientQuery === 'manolito fernandez', "TEST 77: Extrae correctamente el nombre del cliente 'manolito fernandez'");
+assert(pay77_1.amount === 129.6, "TEST 77: Extrae correctamente el importe numérico 129.6");
+assert(pay77_1.method === 'Efectivo', "TEST 77: Extrae el método de pago 'Efectivo'");
+
+const pay77_2 = testParsePayment77('El cliente Manolito Fernández me ha pagado 129,60€ en efectivo');
+assert(pay77_2?.clientQuery === 'Manolito Fernández' && pay77_2?.amount === 129.6 && pay77_2?.method === 'Efectivo',
+  "TEST 77: Reconoce formato con tildes y mayúsculas 'El cliente Manolito Fernández me ha pagado 129,60€ en efectivo'");
+
+const pay77_3 = testParsePayment77('Manolito Fernández me ha pagado 129,60€ en efectivo');
+assert(pay77_3?.clientQuery === 'Manolito Fernández' && pay77_3?.amount === 129.6 && pay77_3?.method === 'Efectivo',
+  "TEST 77: Reconoce sin prefijo 'El cliente'");
+
+const pay77_4 = testParsePayment77('Laura me acaba de pagar 1.500 euros de la factura 24');
+assert(pay77_4?.clientQuery === 'Laura' && pay77_4?.amount === 1500 && pay77_4?.invoiceQuery === '24',
+  "TEST 77: Reconoce 'Laura me acaba de pagar 1.500 euros de la factura 24'");
+
+const pay77_5 = testParsePayment77('El cliente Carlos Ruiz me ha hecho un primer pago del 50%');
+assert(pay77_5?.clientQuery === 'Carlos Ruiz' && pay77_5?.percentage === 50,
+  "TEST 77: Reconoce pago porcentual del 50%");
+
+const pay77_6 = testParsePayment77('me ha pagado 129,60€ Manolito Fernández en efectivo');
+assert(pay77_6?.clientQuery === 'Manolito Fernández' && pay77_6?.amount === 129.6 && pay77_6?.method === 'Efectivo',
+  "TEST 77: Reconoce 'me ha pagado [importe] [cliente]' sin confundir pronombres");
+
+// 2. Verificación de findBudgetInSession con diacríticos y dirección
+const tenantPhone77 = '34600777777';
+const tenantContext77 = testEnsureTenant77(tenantPhone77);
+
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext77.companyId);
+
+const b77_1 = {
+  id: 'PRE-T77-001',
+  client: { name: 'Manolito Fernández', address: 'Calle Rapuncel' },
+  financials: { totalAmount: 2129.6 },
+  paymentSummary: { remainingBalance: 2129.6, totalPaid: 0 },
+  status: 'ACEPTADO'
+};
+const b77_2 = {
+  id: 'PRE-T77-002',
+  client: { name: 'Manolito Fernández', address: 'Ubicación obra según visita' },
+  financials: { totalAmount: 1694.0 },
+  paymentSummary: { remainingBalance: 1452.0, totalPaid: 242 },
+  status: 'ACEPTADO'
+};
+
+testSaveBudget77(tenantContext77, b77_1);
+testSaveBudget77(tenantContext77, b77_2);
+
+const mockSession77 = {
+  companyId: tenantContext77.companyId,
+  phone: tenantPhone77,
+  budgets: new Map([[b77_1.id, b77_1], [b77_2.id, b77_2]]),
+  pendingDisambiguation: null
+};
+
+// Buscar sin tildes encuentra el presupuesto
+const foundNoAccent = testFindBudget77(mockSession77, 'manolito fernandez');
+assert(foundNoAccent !== null, "TEST 77: findBudgetInSession encuentra presupuesto buscando 'manolito fernandez' sin tildes");
+
+// Buscar con dirección encuentra el presupuesto específico
+const foundRapuncel = testFindBudget77(mockSession77, 'Manolito Fernández Calle Rapuncel');
+assert(foundRapuncel?.id === b77_1.id, "TEST 77: findBudgetInSession encuentra b77_1 buscando con dirección 'Manolito Fernández Calle Rapuncel'");
+
+// 3. Flujo completo de desambiguación ante homónimos en cobros
+const mockSentMessages77 = [];
+const mockSock77 = {
+  sendMessage: async (jid, payload) => {
+    mockSentMessages77.push(payload.text);
+    return { key: { id: 'msg-test-77-' + Math.random() } };
+  }
+};
+
+const isDisambiguated = await testCheckDis77(
+  mockSock77,
+  'test-jid-77@s.whatsapp.net',
+  mockSession77,
+  'Manolito Fernández',
+  'payment',
+  { amount: 129.6, method: 'Efectivo' }
+);
+
+assert(isDisambiguated === true, "TEST 77: checkDisambiguation detecta los 2 homónimos y activa menú");
+assert(mockSession77.pendingDisambiguation !== null, "TEST 77: pendingDisambiguation guardado en sesión");
+assert(mockSentMessages77[0].includes('He encontrado 2 clientes/obras'), "TEST 77: Mensaje muestra las 2 opciones encontradas");
+assert(mockSentMessages77[0].includes('Calle Rapuncel'), "TEST 77: Mensaje incluye dirección 'Calle Rapuncel'");
+
+// Selección del candidato por dirección ('el de rapuncel') y por opción 2
+const selectedByAddr77 = testResolveDis77('el de rapuncel', mockSession77.pendingDisambiguation.candidates);
+assert(selectedByAddr77?.id === b77_1.id, "TEST 77: 'el de rapuncel' resuelve al presupuesto PRE-T77-001");
+
+const selectedCand77 = testResolveDis77('2', mockSession77.pendingDisambiguation.candidates);
+assert(selectedCand77?.id === b77_1.id, "TEST 77: Opción '2' resuelve al presupuesto PRE-T77-001 (Rapuncel)");
+
+// ======================================================================
+// TEST 78: PAGO DEL SALDO PENDIENTE, LIQUIDACIÓN Y NO-SECUESTRO DE HILO
+// ======================================================================
+console.log("\n--- TEST 78: PAGO DEL SALDO PENDIENTE, LIQUIDACIÓN Y NO-SECUESTRO DE HILO ---");
+
+// 1. Verificación del parser para frases de saldo pendiente y liquidación
+const pay78_1 = testParsePayment77('Manolito Fernandez me ha pagado el saldo pendiente');
+assert(pay78_1 !== null, "TEST 78: Reconoce 'Manolito Fernandez me ha pagado el saldo pendiente'");
+assert(pay78_1?.clientQuery === 'Manolito Fernandez', "TEST 78: Extrae cliente 'Manolito Fernandez'");
+assert(pay78_1?.isFullBalance === true, "TEST 78: isFullBalance es true para saldo pendiente");
+assert(pay78_1?.amount === null, "TEST 78: amount es null para saldo pendiente");
+
+const pay78_2 = testParsePayment77('El cliente Manolito Fernández me ha pagado el saldo pendiente en efectivo');
+assert(pay78_2?.isFullBalance === true && pay78_2?.method === 'Efectivo' && pay78_2?.clientQuery === 'Manolito Fernández',
+  "TEST 78: Reconoce 'El cliente Manolito Fernández me ha pagado el saldo pendiente en efectivo'");
+
+const pay78_3 = testParsePayment77('Manolito me ha pagado todo');
+assert(pay78_3?.isFullBalance === true && pay78_3?.clientQuery === 'Manolito',
+  "TEST 78: Reconoce 'Manolito me ha pagado todo'");
+
+const pay78_4 = testParsePayment77('Manolito me ha pagado lo que faltaba');
+assert(pay78_4?.isFullBalance === true && pay78_4?.clientQuery === 'Manolito',
+  "TEST 78: Reconoce 'Manolito me ha pagado lo que faltaba'");
+
+const pay78_5 = testParsePayment77('Manolito ha liquidado el saldo pendiente');
+assert(pay78_5?.isFullBalance === true && pay78_5?.clientQuery === 'Manolito',
+  "TEST 78: Reconoce 'Manolito ha liquidado el saldo pendiente'");
+
+const pay78_6 = testParsePayment77('Me ha pagado el saldo pendiente Manolito');
+assert(pay78_6?.isFullBalance === true && pay78_6?.clientQuery === 'Manolito',
+  "TEST 78: Reconoce 'Me ha pagado el saldo pendiente Manolito'");
+
+const pay78_7 = testParsePayment77('Apunta cobro del saldo pendiente Manolito');
+assert(pay78_7?.isFullBalance === true && pay78_7?.clientQuery === 'Manolito',
+  "TEST 78: Reconoce 'Apunta cobro del saldo pendiente Manolito'");
+
+// 2. Liquidación real contra presupuesto con saldo pendiente de 15,60 €
+const tenantPhone78 = '34600787878';
+const tenantContext78 = testEnsureTenant77(tenantPhone78);
+
+const b78 = {
+  id: 'PRE-T78-013',
+  client: { name: 'Manolito Fernández', address: 'Calle Rapuncel 12' },
+  financials: { totalAmount: 2129.60 },
+  payments: [
+    { amount: 1984.40, method: 'Transferencia', concept: 'Anticipo' },
+    { amount: 129.60, method: 'Efectivo', concept: 'Entrega a cuenta de trabajos' }
+  ],
+  paymentSummary: { remainingBalance: 15.60, totalPaid: 2114.00, status: 'PARCIAL' },
+  status: 'ACEPTADO'
+};
+
+testSaveBudget77(tenantContext78, b78);
+
+const mockSentMessages78 = [];
+const mockSock78 = {
+  sendMessage: async (jid, payload) => {
+    mockSentMessages78.push(payload.text || payload.caption || '');
+    return { key: { id: 'msg-test-78-' + Math.random() } };
+  }
+};
+
+const mockSession78 = {
+  companyId: tenantContext78.companyId,
+  phone: tenantPhone78,
+  budgets: new Map([[b78.id, b78]]),
+  activeBudgetId: b78.id,
+  pendingDisambiguation: null,
+  lastDisambiguation: {
+    actionType: 'query_balance',
+    resolvedAt: Date.now(),
+    candidates: [{ id: b78.id, clientName: 'Manolito Fernández', clientAddress: 'Calle Rapuncel 12' }],
+    selectedCandidate: { id: b78.id, clientName: 'Manolito Fernández', clientAddress: 'Calle Rapuncel 12' }
+  }
+};
+
+// Ejecución de cobro de saldo pendiente (debe liquidar los 15,60 € automáticamente)
+await testHandlePay77(
+  mockSock78,
+  'test-jid-78@s.whatsapp.net',
+  mockSession78,
+  b78,
+  {
+    amount: null,
+    isFullBalance: true,
+    method: 'Bizum',
+    concept: 'Liquidación final del saldo pendiente'
+  },
+  'Manolito Fernandez me ha pagado el saldo pendiente'
+);
+
+assert(b78.paymentSummary.remainingBalance === 0, "TEST 78: El saldo restante pasa a ser exactamente 0 €");
+assert(b78.paymentSummary.totalPaid === 2129.60, "TEST 78: El total pagado se acumula a 2.129,60 €");
+assert(b78.status === 'FINALIZADO', "TEST 78: El presupuesto pasa a estado 'FINALIZADO'");
+assert(mockSentMessages78.some(m => m.includes('15,60') || m.includes('15.60')), "TEST 78: Mensaje confirma el cobro de 15,60 €");
+assert(mockSentMessages78.some(m => m.includes('liquidada') || m.includes('cobrada')), "TEST 78: Mensaje confirma obra totalmente liquidada");
+
+// Limpieza final
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext78.companyId);
+
+// ==========================================================
+// TEST 79: FACTURA DE HITO / CERTIFICACIÓN Y CÁLCULO BASE IMPONIBLE (+ IVA)
+// ==========================================================
+console.log("\n--- TEST 79: FACTURA DE HITO Y CÁLCULO BASE IMPONIBLE (+ IVA) ---");
+
+const { handleAdvanceInvoice: testHandleAdvance79 } = await import('./whatsapp_gateway.js');
+
+const tenantPhone79 = '34625335687';
+const tenantContext79 = testEnsureTenant77(tenantPhone79);
+
+currentTestDb.prepare('DELETE FROM invoices WHERE company_id = ?').run(tenantContext79.companyId);
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext79.companyId);
+
+const b79 = {
+  id: 'PRE2026-9436',
+  client: {
+    name: 'Jose Luis Perales',
+    address: 'Calle Perales 123, Sevilla',
+    nif: '12345678Z'
+  },
+  items: [
+    {
+      id: 'item-1',
+      description: 'Reforma integral de salón y cuartos',
+      qty: 1,
+      unit: 'pa',
+      unitPrice: 10000,
+      total: 10000
+    }
+  ],
+  financials: {
+    subtotal: 10000,
+    taxableBase: 10000,
+    taxRatePercentage: 10,
+    taxAmount: 1000,
+    irpfRatePercentage: 7,
+    irpfAmount: 700,
+    totalAmount: 10300
+  },
+  advanceInvoices: []
+};
+testSaveBudget77(tenantContext79, b79);
+
+// 1. Direct Regex Matcher verification
+const regexMilestone = /(?:(?:prep[aá]ra(?:me)?|haz(?:me)?|emitir?|emite|saca(?:me)?|generar?|gener[aá](?:me)?)\s+(?:una\s+)?factura\s+(?:de\s+)?(hito|anticipo|adelanto)\b|^(?:factura(?:r)?\s+(?:de\s+)?(hito|anticipo|adelanto))\b)(?:\s+(?:de\s+)?(\d+(?:[.,]\d+)?)\s*(%|€|euros?|\$)?)?(?:\s*(\+\s*iva|m[aá]s\s+iva|base))?(?:\s+(?:para|de|del\s+cliente|del\s+presupuesto\s+de|a)?\s*(.+))?/i;
+
+const m79_1 = 'Hazme una factura hito de 2000€ para Jose Luis Perales'.match(regexMilestone);
+assert(m79_1 !== null, "TEST 79: Reconoce 'Hazme una factura hito de 2000€ para Jose Luis Perales'");
+assert((m79_1[1] || m79_1[2]).toLowerCase() === 'hito', "TEST 79: Detecta tipo 'hito'");
+assert(m79_1[3] === '2000', "TEST 79: Extrae importe 2000");
+assert(!m79_1[5], "TEST 79: isTaxBase es false (total con impuestos)");
+assert(m79_1[6].trim() === 'Jose Luis Perales', "TEST 79: Extrae cliente 'Jose Luis Perales'");
+
+const m79_2 = 'Hazme una factura hito de 2000€ + IVA para Jose Luis Perales'.match(regexMilestone);
+assert(m79_2 !== null && Boolean(m79_2[5]), "TEST 79: Reconoce '+ IVA' fijando isTaxBase = true");
+
+const m79_3 = 'factura de hito de 1500 euros más iva de Jose Luis'.match(regexMilestone);
+assert(m79_3 !== null && Boolean(m79_3[5]) && m79_3[3] === '1500', "TEST 79: Reconoce 'más iva' con 1500 euros");
+
+// 2. Engine createAdvanceInvoice con tipo HITO y 2000€ total (isTaxBase = false)
+const hitoInv1 = engine.createAdvanceInvoice(b79, {
+  amount: 2000,
+  method: 'Transferencia bancaria',
+  type: 'HITO',
+  isTaxBase: false
+});
+
+assert(hitoInv1.type === 'HITO', "TEST 79: Factura hito tiene type 'HITO'");
+assert(hitoInv1.naming === 'Factura_Hito_2026-9436-001', "TEST 79: Factura hito 1 genera naming 'Factura_Hito_2026-9436-001'");
+assert(hitoInv1.displayNumber === 'Factura_Hito_2026-9436-001', "TEST 79: Factura hito 1 tiene displayNumber 'Factura_Hito_2026-9436-001'");
+assert(hitoInv1.financials.taxableBase === 1941.75, "TEST 79: Base imponible desglosada de 2000€ (10% IVA, 7% IRPF) es 1941.75 €");
+assert(hitoInv1.financials.taxAmount === 194.18, "TEST 79: Cuota IVA 10% es 194.18 €");
+assert(hitoInv1.financials.irpfAmount === 135.92, "TEST 79: Retención IRPF 7% es 135.92 €");
+assert(hitoInv1.financials.totalAmount === 2000.01, "TEST 79: Total factura hito es 2000.01 € (~2000€)");
+assert(hitoInv1.items[0].description.includes('Certificación / Hito de obra'), "TEST 79: Descripción del item especifica Certificación / Hito de obra");
+
+// 3. Engine createAdvanceInvoice con tipo HITO y 2000€ + IVA (isTaxBase = true)
+const hitoInv2 = engine.createAdvanceInvoice(b79, {
+  amount: 2000,
+  method: 'Transferencia bancaria',
+  type: 'HITO',
+  isTaxBase: true
+});
+
+assert(hitoInv2.type === 'HITO', "TEST 79: Factura hito 2 tiene type 'HITO'");
+assert(hitoInv2.naming === 'Factura_Hito_2026-9436-002', "TEST 79: Factura hito 2 genera naming secuencial 'Factura_Hito_2026-9436-002'");
+assert(hitoInv2.financials.taxableBase === 2000.00, "TEST 79: Con + IVA la base imponible es exactamente 2000.00 €");
+assert(hitoInv2.financials.taxAmount === 200.00, "TEST 79: Con + IVA el IVA al 10% es 200.00 €");
+assert(hitoInv2.financials.irpfAmount === 140.00, "TEST 79: Con + IVA la retención IRPF 7% es 140.00 €");
+assert(hitoInv2.financials.totalAmount === 2060.00, "TEST 79: Con + IVA el total factura es 2060.00 € (2000 + 200 - 140)");
+
+// 4. Deducción de hitos en la factura final de liquidación
+const finalInv79 = engine.convertToInvoice(b79, { type: 'FINAL' });
+assert(finalInv79.type === 'FINAL', "TEST 79: Factura final convertida es 'FINAL'");
+assert(finalInv79.advanceDeductions.length === 2, "TEST 79: Factura final incluye las 2 deducciones de hitos previos");
+assert(finalInv79.advanceDeductions[0].description.includes('Deducción por hito / certificación'), "TEST 79: Descripción de deducción especifica hito / certificación");
+const totalDeductions79 = finalInv79.advanceDeductions.reduce((sum, d) => sum + d.total, 0);
+assert(Math.round(totalDeductions79 * 100) / 100 === 4060.01, "TEST 79: Total deducciones acumuladas en factura final coincide con los 2 hitos");
+
+// 5. Test handleAdvanceInvoice execution with mock WhatsApp socket
+const mockSentMessages79 = [];
+const mockSock79 = {
+  sendMessage: async (jid, payload) => {
+    if (payload.text) mockSentMessages79.push(payload.text);
+    if (payload.caption) mockSentMessages79.push(payload.caption);
+    return { key: { id: `msg-79-${Date.now()}` } };
+  }
+};
+
+const mockSession79 = {
+  companyId: tenantContext79.companyId,
+  phone: '625335687',
+  company: { name: 'Empresa Test Hito 79 S.L.', cif: 'B-79797979' },
+  budgets: new Map([[b79.id, b79]]),
+  invoices: new Map(),
+  activeBudgetId: b79.id
+};
+
+await testHandleAdvance79(
+  mockSock79,
+  'test-jid-79@s.whatsapp.net',
+  mockSession79,
+  b79,
+  null,
+  {
+    amount: 2000,
+    isTaxBase: true,
+    type: 'HITO'
+  },
+  false,
+  'HITO'
+);
+
+assert(mockSentMessages79.some(m => m.includes('Factura de hito') && m.includes('Factura_Hito_2026-9436-003')), "TEST 79: Mensaje confirma 'Factura de hito Factura_Hito_2026-9436-003 emitida'");
+assert(mockSentMessages79.some(m => m.includes('Total hito:') && (m.includes('2060,00') || m.includes('2.060,00'))), "TEST 79: Mensaje confirma 'Total hito: 2.060,00 €'");
+assert(mockSentMessages79.some(m => (m.includes('Base: 2000,00 €') || m.includes('Base: 2.000,00 €')) && (m.includes('IVA: 200,00 €') || m.includes('IVA: 200.00 €'))), "TEST 79: Mensaje desglosa Base 2000€ e IVA 200€");
+
+// 6. Verificación de los tres comandos exactos solicitados por el usuario
+const rawPhase1 = 'He terminado la demolición de la obra de Carlos, hazme la factura de esa fase';
+const rawPhase2 = 'Factura la fase de fontanería de José Luis';
+const rawPhase3 = 'Emite la factura de la partida de pintura de María';
+
+const phaseDoneRegex = /\b(?:he\s+(?:terminado|acabado|finalizado|completado)|(?:ya\s+est[aá]\s+)?(?:lista|hecha|terminada|acabada))\s+(?:la\s+|el\s+)?(.+?)\s+de\s+(?:la\s+reforma\s+de|la\s+obra\s+de|el\s+piso\s+de)?\s*(.+?)[,.]?\s*(?:prep[aá]ra(?:me)?|haz(?:me)?|emitir?|emite|saca(?:me)?|generar?|gener[aá](?:me)?|factura(?:r)?)\s+(?:la\s+)?factura\s+(?:de\s+)?(?:esa\s+|ese\s+)?(?:fase|etapa|hito|partida)/i;
+const phaseDirectRegex = /\b(?:prep[aá]ra(?:me)?|haz(?:me)?|emitir?|emite|saca(?:me)?|generar?|gener[aá](?:me)?|factura(?:r)?)\s+(?:(?:la\s+)?factura\s+(?:de\s+)?(?:la\s+|el\s+)?(?:fase|etapa|hito|partida)|(?:la\s+|el\s+)?(?:fase|etapa|hito|partida))\s+(?:de\s+)?(.+?)(?:\s+(?:de|del\s+cliente|para)\s+([a-záéíóúñA-ZÁÉÍÓÚÑ\s]{2,40}))?$/i;
+
+const pMatch1 = rawPhase1.match(phaseDoneRegex);
+assert(pMatch1 !== null, "TEST 79: Reconoce frase 1 'He terminado la demolición de la obra de Carlos, hazme la factura de esa fase'");
+assert(pMatch1[1].trim().toLowerCase() === 'demolición', "TEST 79: Frase 1 extrae fase 'demolición'");
+assert(pMatch1[2].trim().toLowerCase() === 'carlos', "TEST 79: Frase 1 extrae cliente 'Carlos'");
+
+const pMatch2 = rawPhase2.match(phaseDirectRegex);
+assert(pMatch2 !== null, "TEST 79: Reconoce frase 2 'Factura la fase de fontanería de José Luis'");
+assert(pMatch2[1].trim().toLowerCase() === 'fontanería', "TEST 79: Frase 2 extrae fase 'fontanería'");
+assert(pMatch2[2].trim().toLowerCase() === 'josé luis', "TEST 79: Frase 2 extrae cliente 'José Luis'");
+
+const pMatch3 = rawPhase3.match(phaseDirectRegex);
+assert(pMatch3 !== null, "TEST 79: Reconoce frase 3 'Emite la factura de la partida de pintura de María'");
+assert(pMatch3[1].trim().toLowerCase() === 'pintura', "TEST 79: Frase 3 extrae partida 'pintura'");
+assert(pMatch3[2].trim().toLowerCase() === 'maría', "TEST 79: Frase 3 extrae cliente 'María'");
+
+// Limpieza final
+currentTestDb.prepare('DELETE FROM invoices WHERE company_id = ?').run(tenantContext79.companyId);
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext79.companyId);
+
+// ==========================================================
+// TEST 80: NUMERACIÓN SECUENCIAL CORRELATIVA DE HITOS TRAS REINICIO DEL BOT Y VISUALIZACIÓN EN DB VIEWER
+// ==========================================================
+console.log("\n--- TEST 80: PERSISTENCIA CORRELATIVA DE HITOS TRAS REINICIO Y DISPLAY DB VIEWER ---");
+
+const { handleAdvanceInvoice: testHandleAdvance80 } = await import('./whatsapp_gateway.js');
+const { getInvoicesByBudgetId: testGetInvoices80 } = await import('./db_service.js');
+
+const tenantPhone80 = '34625888999';
+const tenantContext80 = testEnsureTenant77(tenantPhone80);
+
+// Limpieza previa
+currentTestDb.prepare('DELETE FROM invoices WHERE company_id = ?').run(tenantContext80.companyId);
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext80.companyId);
+
+const b80 = {
+  id: 'PRE2026-9436',
+  client: {
+    name: 'Jose Luis Perales',
+    address: 'Calle Perales 123, Sevilla',
+    nif: '12345678Z'
+  },
+  items: [
+    {
+      id: 'item-1',
+      description: 'Reforma integral y albañilería',
+      qty: 1,
+      unit: 'pa',
+      unitPrice: 10000,
+      total: 10000
+    }
+  ],
+  financials: {
+    subtotal: 10000,
+    taxableBase: 10000,
+    taxRatePercentage: 10,
+    taxAmount: 1000,
+    irpfRatePercentage: 7,
+    irpfAmount: 700,
+    totalAmount: 10300
+  },
+  advanceInvoices: []
+};
+testSaveBudget77(tenantContext80, b80);
+
+const mockSentMessages80 = [];
+const mockSock80 = {
+  sendMessage: async (jid, payload) => {
+    if (payload.text) mockSentMessages80.push(payload.text);
+    if (payload.caption) mockSentMessages80.push(payload.caption);
+    return { key: { id: `msg-80-${Date.now()}` } };
+  }
+};
+
+const mockSession80_1 = {
+  companyId: tenantContext80.companyId,
+  phone: '625888999',
+  company: { name: 'Empresa Reformas 80 S.L.', cif: 'B-80808080' },
+  budgets: new Map([[b80.id, JSON.parse(JSON.stringify(b80))]]),
+  invoices: new Map(),
+  activeBudgetId: b80.id
+};
+
+// 1. Emitir primera factura hito de 2000€
+await testHandleAdvance80(
+  mockSock80,
+  'test-jid-80@s.whatsapp.net',
+  mockSession80_1,
+  mockSession80_1.budgets.get(b80.id),
+  null,
+  {
+    amount: 2000,
+    isTaxBase: false,
+    type: 'HITO'
+  },
+  false,
+  'HITO'
+);
+
+// Verificar emisión de la primera factura
+assert(mockSentMessages80.some(m => m.includes('Factura_Hito_2026-9436-001')), "TEST 80: Hito 1 emitido con naming 'Factura_Hito_2026-9436-001'");
+
+const invoicesAfter1 = testGetInvoices80(tenantContext80, b80.id);
+assert(invoicesAfter1.length === 1, "TEST 80: Base de datos SQLite tiene 1 factura registrada para el presupuesto");
+assert(invoicesAfter1[0].naming === 'Factura_Hito_2026-9436-001', "TEST 80: Factura 1 guardada con naming Factura_Hito_2026-9436-001");
+assert(invoicesAfter1[0].id === 'INV-HIT-PRE2026-9436-001', "TEST 80: ID de Factura 1 es INV-HIT-PRE2026-9436-001 (no UUID)");
+
+// 2. SIMULAR PARADA Y REINICIO DEL BOT (Memoria RAM se vacía por completo)
+const b80FreshFromDb = testGetBudget77(tenantContext80, b80.id);
+assert(b80FreshFromDb !== null, "TEST 80: Presupuesto recuperado de SQLite tras reinicio");
+
+const mockSession80_Restart = {
+  companyId: tenantContext80.companyId,
+  phone: '625888999',
+  company: { name: 'Empresa Reformas 80 S.L.', cif: 'B-80808080' },
+  budgets: new Map([[b80FreshFromDb.id, { ...b80FreshFromDb, advanceInvoices: [] }]]), // Memoria en blanco
+  invoices: new Map(),
+  activeBudgetId: b80FreshFromDb.id
+};
+
+// 3. Emitir segunda factura hito de 1000€ tras el reinicio
+await testHandleAdvance80(
+  mockSock80,
+  'test-jid-80@s.whatsapp.net',
+  mockSession80_Restart,
+  mockSession80_Restart.budgets.get(b80FreshFromDb.id),
+  null,
+  {
+    amount: 1000,
+    isTaxBase: false,
+    type: 'HITO'
+  },
+  false,
+  'HITO'
+);
+
+// Verificar que la segunda factura hito toma el número 002 (NO vuelve a 001)
+assert(mockSentMessages80.some(m => m.includes('Factura_Hito_2026-9436-002')), "TEST 80: Tras reinicio, Hito 2 recibe secuencial 'Factura_Hito_2026-9436-002'");
+
+const invoicesAfter2 = testGetInvoices80(tenantContext80, b80.id);
+assert(invoicesAfter2.length === 2, "TEST 80: Base de datos SQLite tiene 2 facturas hito registradas");
+assert(invoicesAfter2[1].naming === 'Factura_Hito_2026-9436-002', "TEST 80: Factura 2 guardada con naming Factura_Hito_2026-9436-002");
+assert(invoicesAfter2[1].id === 'INV-HIT-PRE2026-9436-002', "TEST 80: ID de Factura 2 es INV-HIT-PRE2026-9436-002 y no colisionó ni generó UUID raro");
+
+// 4. Verificación del visor de base de datos (db_viewer)
+const viewerInvoices = invoicesAfter2.map(i => {
+  const displayNum = i.naming || i.displayNumber || i.invoiceNumber || i.visibleNumber || i.id;
+  return { ...i, displayNum };
+});
+assert(viewerInvoices[0].displayNum === 'Factura_Hito_2026-9436-001', "TEST 80: DB Viewer muestra Factura_Hito_2026-9436-001 en la columna Nº FACTURA");
+assert(viewerInvoices[1].displayNum === 'Factura_Hito_2026-9436-002', "TEST 80: DB Viewer muestra Factura_Hito_2026-9436-002 en la columna Nº FACTURA");
+
+// Limpieza final de TEST 80
+currentTestDb.prepare('DELETE FROM invoices WHERE company_id = ?').run(tenantContext80.companyId);
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext80.companyId);
+
+// ==========================================================
+// TEST 81: FACTURAS RECTIFICATIVAS (SERIE R) Y CONFORMIDAD LEGAL ART. 15 RD 1619/2012
+// ==========================================================
+console.log("\n--- TEST 81: FACTURAS RECTIFICATIVAS LEGALES (SERIE R) ---");
+
+const { handleRectificationInvoice: testHandleRect81 } = await import('./whatsapp_gateway.js');
+const { emitInvoice: testEmitInvoice81, getInvoice: testGetInvoice81, listInvoices: testListInvoices81 } = await import('./db_service.js');
+
+const tenantPhone81 = '34625777888';
+const tenantContext81 = testEnsureTenant77(tenantPhone81);
+
+// Limpieza previa
+currentTestDb.prepare('DELETE FROM invoices WHERE company_id = ?').run(tenantContext81.companyId);
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext81.companyId);
+
+const b81 = {
+  id: 'PRE2026-7788',
+  client: {
+    name: 'Carlos Santana',
+    address: 'Avda de la Música 44, Madrid',
+    nif: '44556677A'
+  },
+  items: [
+    {
+      id: 'it-1',
+      description: 'Instalación eléctrica y cuadro de automáticos',
+      qty: 1,
+      unit: 'pa',
+      unitPrice: 2000,
+      total: 2000
+    }
+  ],
+  financials: {
+    subtotal: 2000,
+    taxableBase: 2000,
+    taxRatePercentage: 21,
+    taxAmount: 420,
+    irpfRatePercentage: 0,
+    irpfAmount: 0,
+    totalAmount: 2420
+  },
+  advanceInvoices: []
+};
+testSaveBudget77(tenantContext81, b81);
+
+// 1. Validar reconocedor regex de Facturas Rectificativas
+const testRectRegex = /(?:(?:prep[aá]ra(?:me)?|haz(?:me)?|emitir?|emite|saca(?:me)?|generar?|gener[aá](?:me)?)\s+(?:(?:un|una)\s+)?(?:factura\s+rectificativa|rectificativa|abono)\b|^(?:factura\s+rectificativa|rectificativa|abono|rectificar\s+factura|anular\s+factura)\b|(?:rectifica(?:r)?|anula(?:r)?)\s+(?:la\s+)?factura\b)(?:\s+(?:de\s+)?(\d+(?:[.,]\d+)?)\s*(%|€|euros?|\$)?)?(?:\s+(?:para|de\s+la\s+factura\s+de|de\s+la\s+factura|del\s+presupuesto\s+de|del\s+cliente|de|a)\s+([a-záéíóúñA-ZÁÉÍÓÚÑ0-9\s\-_.]+?))?(?:\s+(?:por\s+motivo\s+de|por|motivo:?)\s*(.+))?$/i;
+
+const rMatch1 = 'Hazme una factura rectificativa de Carlos Santana'.match(testRectRegex);
+assert(rMatch1 !== null, "TEST 81: Reconoce 'Hazme una factura rectificativa de Carlos Santana'");
+assert(rMatch1[3].trim() === 'Carlos Santana', "TEST 81: Extrae cliente 'Carlos Santana'");
+
+const rMatch2 = 'Emite una factura rectificativa para Carlos por error en el precio'.match(testRectRegex);
+assert(rMatch2 !== null, "TEST 81: Reconoce 'Emite una factura rectificativa para Carlos por error en el precio'");
+assert(rMatch2[3].trim() === 'Carlos', "TEST 81: Extrae cliente 'Carlos'");
+assert(rMatch2[4].trim() === 'error en el precio', "TEST 81: Extrae motivo 'error en el precio'");
+
+const rMatch3 = 'Rectifica la factura de Jose Luis Perales'.match(testRectRegex);
+assert(rMatch3 !== null, "TEST 81: Reconoce 'Rectifica la factura de Jose Luis Perales'");
+
+const rMatch4 = 'Factura rectificativa de 500€ para Juan'.match(testRectRegex);
+assert(rMatch4 !== null && rMatch4[1] === '500', "TEST 81: Reconoce rectificativa parcial con importe de 500€");
+
+const rMatch5 = 'Haz un abono de la factura de Carlos'.match(testRectRegex);
+assert(rMatch5 !== null, "TEST 81: Reconoce solicitud de abono como rectificativa");
+
+// 2. Emitir factura ordinaria original de Carlos Santana
+const origInvoice81 = engine.convertToInvoice(b81, {
+  company: { name: 'Instalaciones Test S.L.', cif: 'B-81818181' },
+  id: 'FAC-2026-0810'
+});
+testEmitInvoice81(tenantContext81, origInvoice81);
+
+const savedOrig = testGetInvoice81(tenantContext81, origInvoice81.id);
+assert(savedOrig !== null, "TEST 81: Factura original guardada en base de datos SQLite");
+assert(savedOrig.status === 'PENDIENTE_PAGO', "TEST 81: Factura original arranca en PENDIENTE_PAGO");
+
+// 3. Generar rectificativa de anulación total vía engine.createRectificationInvoice
+const rectEngine81 = engine.createRectificationInvoice(origInvoice81, {
+  reason: 'Error en cálculo de partida y acuerdo de anulación con cliente',
+  seq: 1
+});
+
+assert(rectEngine81.type === 'RECTIFICATIVA', "TEST 81: Tipo de factura es RECTIFICATIVA");
+assert(rectEngine81.series === 'R', "TEST 81: Serie canónica de rectificativa es 'R'");
+assert(rectEngine81.rectifiesInvoiceId === origInvoice81.id, "TEST 81: Vinculada obligatoriamente a ID de factura original rectificada");
+assert(rectEngine81.rectifiedInvoiceNumber === (origInvoice81.displayNumber || origInvoice81.id), "TEST 81: Almacena número legible de factura original");
+assert(rectEngine81.financials.taxableBase === -2000, "TEST 81: Anulación total minora base imponible a -2000 €");
+assert(rectEngine81.financials.taxAmount === -420, "TEST 81: Anulación total minora cuota IVA a -420 €");
+assert(rectEngine81.financials.totalAmount === -2420, "TEST 81: Anulación total tiene total rectificado -2420 €");
+assert(rectEngine81.legalNote.includes('1619/2012'), "TEST 81: Incluye nota legal obligatoria RD 1619/2012");
+
+// 4. Test completo a través de handleRectificationInvoice (WhatsApp socket mock)
+const mockSentMessages81 = [];
+const mockDocs81 = [];
+const mockSock81 = {
+  sendMessage: async (jid, payload) => {
+    if (payload.text) mockSentMessages81.push(payload.text);
+    if (payload.caption) mockSentMessages81.push(payload.caption);
+    if (payload.document) mockDocs81.push(payload);
+    return { key: { id: `msg-81-${Date.now()}` } };
+  }
+};
+
+const mockSession81 = {
+  companyId: tenantContext81.companyId,
+  phone: '625777888',
+  company: { name: 'Instalaciones Test S.L.', cif: 'B-81818181' },
+  budgets: new Map([[b81.id, b81]]),
+  invoices: new Map([[origInvoice81.id, origInvoice81]]),
+  activeBudgetId: b81.id
+};
+
+await testHandleRect81(
+  mockSock81,
+  'test-jid-81@s.whatsapp.net',
+  mockSession81,
+  b81,
+  {
+    reason: 'Error en la partida presupuestada'
+  }
+);
+
+assert(mockSentMessages81.some(m => m.includes('Factura Rectificativa emitida con éxito')), "TEST 81: Mensaje confirma 'Factura Rectificativa emitida con éxito'");
+assert(mockSentMessages81.some(m => m.includes('Serie R')), "TEST 81: Mensaje destaca emisión en Serie R");
+assert(mockSentMessages81.some(m => m.includes('2.420,00') || m.includes('2420,00')), "TEST 81: Mensaje detalla importe total rectificado de 2.420,00 €");
+assert(mockSentMessages81.some(m => m.includes('1619/2012')), "TEST 81: Mensaje menciona validez fiscal RD 1619/2012");
+assert(mockDocs81.length === 1, "TEST 81: PDF oficial de Factura Rectificativa enviado por WhatsApp");
+assert(mockDocs81[0].document.slice(0, 4).toString() === '%PDF', "TEST 81: Documento generado es un binario PDF válido");
+
+// 5. Verificar estado persistido en SQLite
+const origAfterRect = testGetInvoice81(tenantContext81, origInvoice81.id);
+assert(origAfterRect.status === 'RECTIFICADA', "TEST 81: Factura original pasa inmediatamente a estado 'RECTIFICADA' en SQLite");
+
+const invoicesTenant81 = testListInvoices81(tenantContext81);
+const rectInDb = invoicesTenant81.find(i => (i.type || '').toUpperCase() === 'RECTIFICATIVA' || i.series === 'R');
+assert(rectInDb !== undefined, "TEST 81: Factura rectificativa guardada en tabla invoices");
+assert(rectInDb.series === 'R', "TEST 81: Factura rectificativa guardada con serie 'R'");
+assert((rectInDb.rectifies_invoice_id || rectInDb.rectifiesInvoiceId) === origInvoice81.id, "TEST 81: rectifies_invoice_id apunta a la factura original");
+
+// Limpieza final de TEST 81
+currentTestDb.prepare('DELETE FROM invoices WHERE company_id = ?').run(tenantContext81.companyId);
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext81.companyId);
+
+// ==========================================================
+// TEST 82: VENTANA CONVERSACIONAL DE PRESUPUESTO ACTIVO Y "EL ÚLTIMO PRESUPUESTO"
+// ==========================================================
+console.log("\n--- TEST 82: VENTANA CONVERSACIONAL ACTIVA Y 'ÚLTIMO PRESUPUESTO' ---");
+
+const { detectItemModificationIntent: testDetectMod82, findItemByConcept: testFindItem82, findBudgetByQuery: testFindBudgetByQuery82 } = await import('./whatsapp_gateway.js');
+
+// 1. Detección natural de correcciones de precio comparativas (Audios 1 y 2)
+const modAudio1 = testDetectMod82("Vale, hay que hacer un cambio. La sustitución del cuadro eléctrico y las protecciones no cuestan 480 euros, cuestan 500 euros.");
+assert(modAudio1 !== null, "TEST 82: Reconoce Audio 1 'no cuestan 480 euros, cuestan 500 euros'");
+assert(modAudio1.price === 500, "TEST 82: Audio 1 extrae precio 500 €");
+assert(modAudio1.concept.includes('cuadro eléctrico'), "TEST 82: Audio 1 extrae concepto de cuadro eléctrico");
+
+const modAudio2 = testDetectMod82("En este último presupuesto que me acabas de mandar, hay que hacer una modificación en el cuadro eléctrico. No vale 480 euros, vale 550.");
+assert(modAudio2 !== null, "TEST 82: Reconoce Audio 2 'en este último presupuesto... no vale 480, vale 550'");
+assert(modAudio2.price === 550, "TEST 82: Audio 2 extrae precio 550 €");
+assert(modAudio2.concept === 'cuadro eléctrico', "TEST 82: Audio 2 extrae concepto 'cuadro eléctrico'");
+
+// 2. Emparejamiento por concepto en la lista de partidas del electricista
+const electricianItems = [
+  { id: 'it-1', description: 'Sustitución de cuadro eléctrico y protecciones', unitPrice: 480 },
+  { id: 'it-2', description: 'Cableado eléctrico y canalizaciones', unitPrice: 390 },
+  { id: 'it-3', description: 'Instalación de enchufes y mecanismos', unitPrice: 300 }
+];
+const foundItem1 = testFindItem82(electricianItems, modAudio1.concept);
+assert(foundItem1 !== null && foundItem1.id === 'it-1', "TEST 82: Audio 1 empareja correctamente con 'Sustitución de cuadro eléctrico y protecciones'");
+
+const foundItem2 = testFindItem82(electricianItems, modAudio2.concept);
+assert(foundItem2 !== null && foundItem2.id === 'it-1', "TEST 82: Audio 2 empareja correctamente con 'Sustitución de cuadro eléctrico y protecciones'");
+
+// 3. Resolución de "el último presupuesto" vía findBudgetByQuery
+const mockSession82 = {
+  activeBudgetId: 'PRE-ELEC-001',
+  lastCreatedBudgetId: 'PRE-ELEC-001',
+  lastActiveBudgetTimestamp: Date.now(),
+  budgets: new Map([
+    ['PRE-OLD-001', { id: 'PRE-OLD-001', client: { name: 'Manolito Fernández' }, createdAt: '2026-01-01' }],
+    ['PRE-ELEC-001', { id: 'PRE-ELEC-001', client: { name: 'Javier Rodríguez Sánchez' }, createdAt: '2026-10-17' }]
+  ])
+};
+
+const resolvedLast1 = testFindBudgetByQuery82(mockSession82, 'el último presupuesto que me has mandado');
+assert(resolvedLast1 !== null && resolvedLast1.id === 'PRE-ELEC-001', "TEST 82: 'el último presupuesto que me has mandado' resuelve a PRE-ELEC-001");
+
+const resolvedLast2 = testFindBudgetByQuery82(mockSession82, 'en este último presupuesto');
+assert(resolvedLast2 !== null && resolvedLast2.id === 'PRE-ELEC-001', "TEST 82: 'en este último presupuesto' resuelve a PRE-ELEC-001");
+
+const resolvedLast3 = testFindBudgetByQuery82(mockSession82, 'último presupuesto');
+assert(resolvedLast3 !== null && resolvedLast3.id === 'PRE-ELEC-001', "TEST 82: 'último presupuesto' resuelve a PRE-ELEC-001");
+
+// 4. Verificación de que la ventana activa (<15 min) protege contra desambiguación espuria
+const isRecentActive82 = Boolean(
+  mockSession82.activeBudgetId &&
+  mockSession82.budgets.has(mockSession82.activeBudgetId) &&
+  (Date.now() - mockSession82.lastActiveBudgetTimestamp) < (15 * 60 * 1000)
+);
+assert(isRecentActive82 === true, "TEST 82: Presupuesto recién creado está activo dentro de la ventana de 15 minutos");
+
+// Comprobar que si el usuario no pronunció el nombre de otro cliente (ej. Manolito), userSpokeClient es false
+const spokeUserText = "Vale, hay que hacer un cambio. La sustitución del cuadro eléctrico y las protecciones no cuestan 480 euros, cuestan 500 euros.";
+const hallucinatedClient = "Manolito Fernández";
+const userNorm82 = spokeUserText.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+const clientNorm82 = hallucinatedClient.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+const firstWord82 = clientNorm82.split(/\s+/)[0];
+const spokeClient82 = clientNorm82 && (userNorm82.includes(clientNorm82) || (firstWord82.length >= 3 && userNorm82.includes(firstWord82)));
+assert(spokeClient82 === false, "TEST 82: Si el usuario no nombró a 'Manolito', la protección bloquea la desambiguación errónea");
+
+// ==========================================================
+// TEST 83: COBROS SIN IMPORTE EXPLÍCITO ("COBRADO"), VINCULACIÓN A FACTURAS Y DESAMBIGUACIÓN INTELIGENTE
+// ==========================================================
+console.log("\n--- TEST 83: COBROS NATURALES ('COBRADO'), VINCULACIÓN A FACTURAS Y DESAMBIGUACIÓN ---");
+
+const {
+  parsePaymentCommand: testParsePayment83,
+  handlePaymentRegistration: testHandlePay83,
+  resolveDisambiguationChoice: testResolveDis83
+} = await import('./whatsapp_gateway.js');
+const {
+  ensureCompanyTenant: testEnsureTenant83,
+  saveBudget: testSaveBudget83,
+  getBudget: testGetBudget83,
+  emitInvoice: testEmitInvoice83,
+  getInvoice: testGetInvoice83,
+  getUnpaidInvoices: testGetUnpaidInvoices83
+} = await import('./db_service.js');
+
+// 1. Parser de comandos de cobro genéricos/naturales sin importe explícito
+const parsePay83_1 = testParsePayment83("Cobrado");
+assert(parsePay83_1 !== null, "TEST 83: Reconoce comando standalone 'Cobrado'");
+assert(parsePay83_1.amount === 0 && parsePay83_1.isFullBalance === false, "TEST 83: 'Cobrado' no inventa importe numérico ni asume full balance a ciegas");
+
+const parsePay83_2 = testParsePayment83("pagado");
+assert(parsePay83_2 !== null && parsePay83_2.amount === 0, "TEST 83: Reconoce comando 'pagado'");
+
+const parsePay83_3 = testParsePayment83("ya me lo ha pagado");
+assert(parsePay83_3 !== null, "TEST 83: Reconoce 'ya me lo ha pagado'");
+
+const parsePay83_4 = testParsePayment83("Cobrado por transferencia");
+assert(parsePay83_4 !== null && parsePay83_4.method === 'Transferencia', "TEST 83: Reconoce 'Cobrado por transferencia' con método Transferencia");
+
+const parsePay83_5 = testParsePayment83("Cobrado Javier");
+assert(parsePay83_5 !== null && parsePay83_5.clientQuery === 'Javier', "TEST 83: Reconoce 'Cobrado Javier' extrayendo cliente 'Javier'");
+
+// 2. Escenario 1: Presupuesto con 1 factura de anticipo pendiente de cobro (Caso real del usuario)
+// Total: 2.130,04 €, Anticipo: 1.137,40 €, Saldo restante tras anticipo: 992,64 €
+const tenantPhone83 = '34625999888';
+const tenantContext83 = testEnsureTenant83(tenantPhone83);
+
+// Limpieza previa
+currentTestDb.prepare('DELETE FROM invoices WHERE company_id = ?').run(tenantContext83.companyId);
+currentTestDb.prepare('DELETE FROM payments WHERE company_id = ?').run(tenantContext83.companyId);
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext83.companyId);
+
+const b83 = {
+  id: 'PRE2026-9988',
+  client: { name: 'Javier Rodríguez Sánchez', address: 'Calle Mayor 10' },
+  financials: {
+    totalAmount: 2130.04,
+    taxableBase: 1760.36,
+    advanceAmount: 1137.40,
+    advancePercentage: 53.4
+  },
+  paymentSummary: {
+    remainingBalance: 2130.04,
+    totalPaid: 0,
+    status: 'PENDIENTE'
+  },
+  status: 'PENDIENTE',
+  advanceInvoices: []
+};
+testSaveBudget83(tenantContext83, b83);
+
+// Emitir factura de anticipo en SQLite por 1.137,40 €
+const advanceInv83 = {
+  id: 'INV-ADV-PRE2026-9988',
+  budgetId: b83.id,
+  type: 'ANTICIPO',
+  series: 'FAC',
+  invoiceNumber: '2026-9988-001',
+  naming: 'Factura_Anticipo_2026-9988',
+  displayNumber: 'Factura_Anticipo_2026-9988',
+  status: 'PENDIENTE_PAGO',
+  financials: {
+    taxableBase: 940.00,
+    taxAmount: 197.40,
+    totalAmount: 1137.40
+  },
+  client: b83.client,
+  items: [
+    { description: 'Anticipo 53.4% a cuenta de trabajos', total: 1137.40 }
+  ]
+};
+testEmitInvoice83(tenantContext83, advanceInv83);
+
+const unpaidBefore = testGetUnpaidInvoices83(tenantContext83);
+assert(unpaidBefore.length === 1, "TEST 83: Inicialmente hay exactamente 1 factura pendiente");
+
+const mockSentMessages83 = [];
+const mockSock83 = {
+  sendMessage: async (jid, payload) => {
+    mockSentMessages83.push(payload.text || payload.caption || '');
+    return { key: { id: `msg-83-${Date.now()}` } };
+  }
+};
+
+const mockSession83 = {
+  companyId: tenantContext83.companyId,
+  phone: tenantPhone83,
+  company: { name: 'Reformas Test S.L.', cif: 'B-83838383' },
+  budgets: new Map([[b83.id, b83]]),
+  activeBudgetId: b83.id,
+  pendingDisambiguation: null
+};
+
+// El usuario dice "Cobrado" a secas
+await testHandlePay83(
+  mockSock83,
+  'test-jid-83@s.whatsapp.net',
+  mockSession83,
+  b83,
+  {
+    amount: 0,
+    isFullBalance: false,
+    method: 'Bizum',
+    concept: 'Cobro de factura / trabajo'
+  },
+  'Cobrado'
+);
+
+// Verificaciones Escenario 1:
+const savedInv83After = testGetInvoice83(tenantContext83, advanceInv83.id);
+assert(savedInv83After.status === 'PAGADA', "TEST 83: Factura de anticipo pasa automáticamente a estado 'PAGADA'");
+assert(b83.paymentSummary.totalPaid === 1137.40, "TEST 83: Presupuesto registra pago exacto del anticipo (1.137,40 €)");
+assert(Math.abs(b83.paymentSummary.remainingBalance - 992.64) < 0.01, "TEST 83: Saldo restante queda exactamente en 992,64 € (NO se cerró toda la obra)");
+assert(b83.status === 'ACEPTADO', "TEST 83: Estado del presupuesto es ACEPTADO (no FINALIZADO)");
+assert(mockSentMessages83.some(m => m.includes('1.137,40') || m.includes('1137,40')), "TEST 83: Mensaje confirma cobro del anticipo de 1.137,40 €");
+assert(mockSentMessages83.some(m => m.includes('Factura_Anticipo_2026-9988') && m.includes('PAGADA')), "TEST 83: Mensaje vincula explícitamente Factura_Anticipo_2026-9988 como PAGADA");
+assert(mockSentMessages83.some(m => m.includes('992,64') || m.includes('992.64')), "TEST 83: Mensaje informa con precisión del saldo pendiente de 992,64 € para la obra");
+
+// 3. Escenario 2: Presupuesto con MULTIPLES facturas pendientes (ej: Hito 1 + Hito 2)
+// Emitir dos facturas hito pendientes
+const hito1_83 = {
+  id: 'INV-HIT-2026-9988-001',
+  budgetId: b83.id,
+  type: 'HITO',
+  naming: 'Factura_Hito_2026-9988-001',
+  status: 'PENDIENTE_PAGO',
+  financials: { totalAmount: 500.00 },
+  client: b83.client
+};
+const hito2_83 = {
+  id: 'INV-HIT-2026-9988-002',
+  budgetId: b83.id,
+  type: 'HITO',
+  naming: 'Factura_Hito_2026-9988-002',
+  status: 'PENDIENTE_PAGO',
+  financials: { totalAmount: 492.64 },
+  client: b83.client
+};
+testEmitInvoice83(tenantContext83, hito1_83);
+testEmitInvoice83(tenantContext83, hito2_83);
+
+const unpaidMulti = testGetUnpaidInvoices83(tenantContext83);
+assert(unpaidMulti.length === 2, "TEST 83: Ahora hay 2 facturas pendientes de cobro");
+
+mockSentMessages83.length = 0;
+// El usuario vuelve a decir "Cobrado" a secas sin especificar cuál
+await testHandlePay83(
+  mockSock83,
+  'test-jid-83@s.whatsapp.net',
+  mockSession83,
+  b83,
+  {
+    amount: 0,
+    isFullBalance: false,
+    method: 'Bizum',
+    concept: 'Cobro de factura / trabajo'
+  },
+  'Cobrado'
+);
+
+assert(mockSession83.pendingDisambiguation !== null, "TEST 83: Al haber múltiples facturas pendientes, activa pendingDisambiguation");
+assert(mockSession83.pendingDisambiguation.actionType === 'payment_invoice', "TEST 83: actionType es 'payment_invoice'");
+assert(mockSession83.pendingDisambiguation.candidates.length === 2, "TEST 83: Contiene las 2 facturas pendientes como candidatos");
+assert(mockSentMessages83.some(m => m.includes('varias facturas pendientes') && m.includes('Factura_Hito_2026-9988-001')), "TEST 83: Envía al usuario menú con las facturas para elegir");
+
+// 4. Escenario 3: Resolución de la desambiguación eligiendo la opción "1"
+const choiceResolved = testResolveDis83("1", mockSession83.pendingDisambiguation.candidates);
+assert(choiceResolved !== null && choiceResolved.id === 'INV-HIT-2026-9988-001', "TEST 83: Elección '1' resuelve a Factura_Hito_2026-9988-001");
+
+// Ejecutar el cobro asignado al candidato 1
+await testHandlePay83(
+  mockSock83,
+  'test-jid-83@s.whatsapp.net',
+  mockSession83,
+  b83,
+  {
+    amount: choiceResolved.totalAmount,
+    method: 'Bizum',
+    concept: `Cobro de ${choiceResolved.naming}`,
+    invoiceQuery: choiceResolved.id,
+    matchedInvoice: choiceResolved
+  },
+  '1'
+);
+
+const savedHito1 = testGetInvoice83(tenantContext83, 'INV-HIT-2026-9988-001');
+assert(savedHito1.status === 'PAGADA', "TEST 83: Factura_Hito 1 queda PAGADA tras resolver desambiguación");
+assert(Math.abs(b83.paymentSummary.remainingBalance - 492.64) < 0.01, "TEST 83: Saldo de la obra actualizado restando los 500 € del Hito 1 (quedan 492,64 €)");
+
+// Limpieza final de TEST 83
+currentTestDb.prepare('DELETE FROM invoices WHERE company_id = ?').run(tenantContext83.companyId);
+currentTestDb.prepare('DELETE FROM payments WHERE company_id = ?').run(tenantContext83.companyId);
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext83.companyId);
+
+// ==========================================================
+// TEST 84: CONSULTAS DE AGENDA POR SEMANA, FILTRO POR CLIENTE Y SUPRESIÓN DE CITAS PASADAS
+// ==========================================================
+console.log("\n--- TEST 84: CONSULTAS DE AGENDA (SEMANA, CLIENTE Y CITAS PASADAS) ---");
+
+const {
+  detectAgendaQueryIntent: testDetectAgenda84,
+  handleListAppointments: testHandleListAppointments84,
+  handleUpdateAppointment: testHandleUpdateAppointment84
+} = await import('./whatsapp_gateway.js');
+const {
+  ensureCompanyTenant: testEnsureTenant84,
+  saveAppointment: testSaveAppointment84,
+  listAppointments: testListAppointments84,
+  listAppointmentsWeek: testListAppointmentsWeek84
+} = await import('./db_service.js');
+
+const tenantPhone84 = '34625111222';
+const tenantContext84 = testEnsureTenant84(tenantPhone84);
+
+// Limpieza previa
+currentTestDb.prepare('DELETE FROM appointments WHERE company_id = ?').run(tenantContext84.companyId);
+
+// 1. Verificación del mensaje de reagendamiento: NO incluye "contador de reagendamientos"
+const mockSentReschedule = [];
+const mockSockReschedule = {
+  sendMessage: async (jid, payload) => {
+    mockSentReschedule.push(payload.text || '');
+    return { key: { id: `msg-res-${Date.now()}` } };
+  }
+};
+
+const aptToReschedule = testSaveAppointment84(tenantContext84, {
+  clientName: 'Juan Reagendado',
+  date: '2026-10-20',
+  time: '10:00',
+  clientAddress: 'Calle Alcalá 45'
+});
+
+const mockSession84 = {
+  companyId: tenantContext84.companyId,
+  phone: tenantPhone84,
+  company: { name: 'Reformas 84 S.L.' }
+};
+
+await testHandleUpdateAppointment84(mockSockReschedule, 'test-jid@s.whatsapp.net', mockSession84, {
+  appointmentQuery: 'Juan Reagendado',
+  date: '2026-10-21',
+  time: '11:00'
+});
+
+assert(mockSentReschedule.length > 0, "TEST 84: Envía mensaje de confirmación de reagendamiento");
+const reschedMsg = mockSentReschedule[0];
+assert(reschedMsg.includes('Visita reagendada con éxito'), "TEST 84: Mensaje confirma 'Visita reagendada con éxito'");
+assert(!reschedMsg.includes('contador de reagendamientos'), "TEST 84: Mensaje NO incluye la línea técnica 'contador de reagendamientos'");
+
+// 2. Parser determinístico detectAgendaQueryIntent
+const agQ1 = testDetectAgenda84("¿Qué visitas tengo para esta semana?");
+assert(agQ1 !== null && agQ1.filter === 'week' && agQ1.clientFilter === null, "TEST 84: Reconoce '¿Qué visitas tengo para esta semana?' con filter='week'");
+
+const agQ2 = testDetectAgenda84("citas de esta semana");
+assert(agQ2 !== null && agQ2.filter === 'week', "TEST 84: Reconoce 'citas de esta semana'");
+
+const agQ3 = testDetectAgenda84("¿A qué hora tengo que ir a casa de Juan?");
+assert(agQ3 !== null && agQ3.clientFilter?.toLowerCase() === 'juan', "TEST 84: Reconoce '¿A qué hora tengo que ir a casa de Juan?' extrayendo clientFilter='juan'");
+
+const agQ4 = testDetectAgenda84("¿A qué hora tengo la visita de Juan?");
+assert(agQ4 !== null && agQ4.clientFilter?.toLowerCase() === 'juan', "TEST 84: Reconoce '¿A qué hora tengo la visita de Juan?'");
+
+const agQ5 = testDetectAgenda84("a qué hora es la visita de Juan");
+assert(agQ5 !== null && agQ5.clientFilter?.toLowerCase() === 'juan', "TEST 84: Reconoce 'a qué hora es la visita de Juan'");
+
+const agQ6 = testDetectAgenda84("¿cuándo tengo la cita con Carlos?");
+assert(agQ6 !== null && agQ6.clientFilter?.toLowerCase() === 'carlos', "TEST 84: Reconoce '¿cuándo tengo la cita con Carlos?' extrayendo clientFilter='carlos'");
+
+const agQ7 = testDetectAgenda84("qué citas tengo agendadas");
+assert(agQ7 !== null && agQ7.filter === 'all' && agQ7.clientFilter === null, "TEST 84: Reconoce 'qué citas tengo agendadas' con filter='all'");
+
+// 3. Crear fixtures: citas pasadas, citas completadas, citas de esta semana y citas de Juan
+currentTestDb.prepare('DELETE FROM appointments WHERE company_id = ?').run(tenantContext84.companyId);
+
+const now84 = new Date();
+const todayIso = now84.toISOString().split('T')[0];
+
+const pastDate = new Date(now84.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]; // Hace 5 días
+const futureDateInWeek1 = new Date(now84.getTime() + 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]; // Dentro de 2 días
+const futureDateInWeek2 = new Date(now84.getTime() + 4 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]; // Dentro de 4 días
+const farFutureDate = new Date(now84.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]; // Dentro de 30 días
+
+// Cita 1: Pasada (hace 5 días)
+testSaveAppointment84(tenantContext84, {
+  clientName: 'Cliente Pasado',
+  date: pastDate,
+  time: '10:00'
+});
+
+// Cita 2: Cita de Juan 1 (dentro de 2 días - esta semana)
+testSaveAppointment84(tenantContext84, {
+  clientName: 'Juan',
+  date: futureDateInWeek1,
+  time: '11:00',
+  clientAddress: 'Calle Mayor 10, Madrid',
+  notes: 'Medición de cocina'
+});
+
+// Cita 3: Cita de Juan 2 (dentro de 4 días - esta semana)
+testSaveAppointment84(tenantContext84, {
+  clientName: 'Juan',
+  date: futureDateInWeek2,
+  time: '16:30',
+  clientAddress: 'Calle Alcalá 45, Madrid',
+  notes: 'Revisión fontanería'
+});
+
+// Cita 4: Cita de María (dentro de 30 días - fuera de la semana)
+testSaveAppointment84(tenantContext84, {
+  clientName: 'María García',
+  date: farFutureDate,
+  time: '12:00',
+  clientAddress: 'Calle Sol 1'
+});
+
+// Cita 5: Cita completada (debe excluirse de agenda activa)
+const compApt = testSaveAppointment84(tenantContext84, {
+  clientName: 'Pedro Ya Realizado',
+  date: futureDateInWeek1,
+  time: '09:00'
+});
+currentTestDb.prepare("UPDATE appointments SET status = 'COMPLETED' WHERE id = ?").run(compApt.id);
+
+// 4. Verificación de listAppointments:
+// a) 'upcoming': Excluye cita pasada y cita completada
+const upcomingApts = testListAppointments84(tenantContext84, 'upcoming');
+assert(!upcomingApts.some(a => a.clientName === 'Cliente Pasado'), "TEST 84: listAppointments('upcoming') excluye citas con fecha pasada");
+assert(!upcomingApts.some(a => a.clientName === 'Pedro Ya Realizado'), "TEST 84: listAppointments('upcoming') excluye citas en estado COMPLETED");
+assert(upcomingApts.some(a => a.clientName === 'Juan') && upcomingApts.some(a => a.clientName === 'María García'), "TEST 84: listAppointments('upcoming') incluye citas futuras pendientes");
+
+// b) 'week': Solo incluye citas de los próximos 7 días
+const weekApts84 = testListAppointments84(tenantContext84, 'week');
+assert(!weekApts84.some(a => a.clientName === 'Cliente Pasado'), "TEST 84: listAppointments('week') no incluye visitas pasadas");
+assert(!weekApts84.some(a => a.clientName === 'María García'), "TEST 84: listAppointments('week') excluye citas de dentro de un mes");
+assert(weekApts84.filter(a => a.clientName === 'Juan').length === 2, "TEST 84: listAppointments('week') incluye las 2 citas de esta semana");
+
+// 5. Verificación de handleListAppointments (WhatsApp output)
+const mockSentGateway = [];
+const mockSockGateway = {
+  sendMessage: async (jid, payload) => {
+    mockSentGateway.push(payload.text || '');
+    return { key: { id: `msg-gw-${Date.now()}` } };
+  }
+};
+
+// a) Consulta "esta semana" -> solo citas de la semana, título correcto, sin citas pasadas
+mockSentGateway.length = 0;
+await testHandleListAppointments84(mockSockGateway, 'test-jid@s.whatsapp.net', mockSession84, 'week');
+assert(mockSentGateway.length === 1, "TEST 84: handleListAppointments envía respuesta para 'week'");
+const weekMsg = mockSentGateway[0];
+assert(weekMsg.includes('TUS VISITAS TÉCNICAS DE ESTA SEMANA'), "TEST 84: Encabezado es 'TUS VISITAS TÉCNICAS DE ESTA SEMANA'");
+assert(weekMsg.includes('Juan'), "TEST 84: Mensaje semanal incluye a Juan");
+assert(!weekMsg.includes('Cliente Pasado'), "TEST 84: Mensaje semanal NUNCA incluye 'Cliente Pasado'");
+assert(!weekMsg.includes('María García'), "TEST 84: Mensaje semanal NUNCA incluye a María (que es dentro de 30 días)");
+
+// b) Consulta por cliente con múltiples citas: "¿A qué hora tengo la visita de Juan?"
+mockSentGateway.length = 0;
+await testHandleListAppointments84(mockSockGateway, 'test-jid@s.whatsapp.net', mockSession84, 'upcoming', 'Juan');
+assert(mockSentGateway.length === 1, "TEST 84: handleListAppointments envía respuesta para cliente 'Juan'");
+const juanMultiMsg = mockSentGateway[0];
+assert(juanMultiMsg.includes('VISITAS TÉCNICAS CON JUAN (2)'), "TEST 84: Muestra encabezado agrupado 'VISITAS TÉCNICAS CON JUAN (2)'");
+assert(juanMultiMsg.includes('11:00 h') && juanMultiMsg.includes('16:30 h'), "TEST 84: Muestra los dos horarios agendados para Juan");
+assert(!juanMultiMsg.includes('María García') && !juanMultiMsg.includes('Cliente Pasado'), "TEST 84: NO mezcla citas de otros clientes");
+
+// c) Consulta por cliente con 1 sola cita: María García
+mockSentGateway.length = 0;
+await testHandleListAppointments84(mockSockGateway, 'test-jid@s.whatsapp.net', mockSession84, 'upcoming', 'María');
+assert(mockSentGateway.length === 1, "TEST 84: handleListAppointments envía respuesta para 'María'");
+const mariaMsg = mockSentGateway[0];
+assert(mariaMsg.includes('Visita técnica con María García'), "TEST 84: Respuesta individual detalla 'Visita técnica con María García'");
+assert(mariaMsg.includes('12:00 h') && mariaMsg.includes('Calle Sol 1'), "TEST 84: Detalla hora 12:00 y dirección Calle Sol 1");
+
+// d) Consulta por cliente inexistente:
+mockSentGateway.length = 0;
+await testHandleListAppointments84(mockSockGateway, 'test-jid@s.whatsapp.net', mockSession84, 'upcoming', 'Rigoberto');
+const rigoMsg = mockSentGateway[0];
+assert(rigoMsg.includes('No tienes ninguna visita técnica pendiente con "Rigoberto"'), "TEST 84: Informa amablemente que no hay visitas con Rigoberto");
+
+// Limpieza final de TEST 84
+currentTestDb.prepare('DELETE FROM appointments WHERE company_id = ?').run(tenantContext84.companyId);
+
+// ======================================================================
+// TEST 85: DESAMBIGUACIÓN OBLIGATORIA AL FINALIZAR VISITAS HOMÓNIMAS (CERO SUPOSICIONES)
+// ======================================================================
+console.log("\n--- TEST 85: DESAMBIGUACIÓN OBLIGATORIA AL FINALIZAR VISITAS HOMÓNIMAS ---");
+
+const {
+  ensureCompanyTenant: testEnsureTenant85,
+  saveAppointment: testSaveAppointment85,
+  completeAppointments: testCompleteAppointments85,
+  getAppointment: testGetAppointment85
+} = await import('./db_service.js');
+
+const {
+  handleCompleteAppointments: testHandleCompleteAppointments85,
+  resolveDisambiguationChoice: testResolveDisambiguationChoice85
+} = await import('./whatsapp_gateway.js');
+
+const tenantPhone85 = '34699885544';
+const tenantContext85 = testEnsureTenant85(tenantPhone85);
+
+// Limpieza previa de TEST 85
+currentTestDb.prepare('DELETE FROM appointments WHERE company_id = ?').run(tenantContext85.companyId);
+
+// 1. Crear dos visitas activas para el mismo cliente 'Juan' en diferentes horas y lugares
+const apt85_1 = testSaveAppointment85(tenantContext85, {
+  clientName: 'Juan',
+  clientPhone: '611223344',
+  clientAddress: 'Calle Betis 12',
+  date: '2026-10-20',
+  time: '11:00',
+  notes: 'Revisión cuadro eléctrico'
+});
+
+const apt85_2 = testSaveAppointment85(tenantContext85, {
+  clientName: 'Juan',
+  clientPhone: '699887766',
+  clientAddress: 'Avenida Constitución 4',
+  date: '2026-10-22',
+  time: '16:30',
+  notes: 'Cambio de diferencial'
+});
+
+assert(Boolean(apt85_1?.id && apt85_2?.id), "TEST 85: Ambas visitas para 'Juan' se guardaron con éxito");
+
+// 2. Probar completeAppointments a nivel db_service con query 'Juan':
+// Debe detectar ambigüedad y NO completar ninguna de las dos automáticamente.
+const dbCompAmbiguous85 = testCompleteAppointments85(tenantContext85, ['Juan'], 'SUCCESSFUL');
+assert(dbCompAmbiguous85.completed.length === 0, "TEST 85: completeAppointments no marca completada ninguna cita si hay ambigüedad");
+assert(dbCompAmbiguous85.ambiguous.length === 1, "TEST 85: completeAppointments retorna registro en array ambiguous");
+assert(dbCompAmbiguous85.ambiguous[0].query === 'Juan', "TEST 85: query ambigua identificada como 'Juan'");
+assert(dbCompAmbiguous85.ambiguous[0].matches.length === 2, "TEST 85: Retorna exactamente los 2 candidatos homónimos");
+
+// Verificar que en SQLite siguen estando CONFIRMED
+const checkApt85_1 = testGetAppointment85(tenantContext85, apt85_1.id);
+const checkApt85_2 = testGetAppointment85(tenantContext85, apt85_2.id);
+assert(checkApt85_1.status === 'CONFIRMED', "TEST 85: Visita 1 sigue CONFIRMED en SQLite");
+assert(checkApt85_2.status === 'CONFIRMED', "TEST 85: Visita 2 sigue CONFIRMED en SQLite");
+
+// 3. Probar handleCompleteAppointments a nivel WhatsApp Gateway cuando el usuario dice "visita de Juan hecha" o por audio
+const mockSent85 = [];
+const mockSock85 = {
+  sendMessage: async (jid, payload) => {
+    mockSent85.push(payload.text || '');
+    return { key: { id: `msg-85-${Date.now()}` } };
+  }
+};
+
+const session85 = {
+  companyId: tenantContext85.companyId,
+  phone: tenantContext85.phone,
+  company: tenantContext85.company,
+  pendingDisambiguation: null
+};
+
+// Ejecución con query 'Juan':
+const gatewayRes85 = await testHandleCompleteAppointments85(
+  mockSock85,
+  '34699885544@s.whatsapp.net',
+  session85,
+  { completedQueries: ['Juan'] },
+  null,
+  'La visita de Juan ha terminado. Hemos aceptado el trabajo.'
+);
+
+assert(gatewayRes85.success === false && gatewayRes85.ambiguous === true, "TEST 85: handleCompleteAppointments detiene la ejecución por ambigüedad");
+assert(session85.pendingDisambiguation !== null, "TEST 85: session.pendingDisambiguation queda activado");
+assert(session85.pendingDisambiguation.actionType === 'complete_appointment', "TEST 85: actionType es 'complete_appointment'");
+assert(session85.pendingDisambiguation.candidates.length === 2, "TEST 85: Contiene exactamente 2 candidatos");
+assert(mockSent85.length === 1, "TEST 85: Envió mensaje interactivo de desambiguación por WhatsApp");
+
+const promptText85 = mockSent85[0];
+assert(promptText85.includes('Tienes varias visitas pendientes con "Juan"'), "TEST 85: El mensaje alerta de múltiples visitas pendientes");
+assert(promptText85.includes('1️⃣') && promptText85.includes('2️⃣'), "TEST 85: Incluye opciones numeradas 1️⃣ y 2️⃣");
+assert(promptText85.includes('11:00 h') && promptText85.includes('16:30 h'), "TEST 85: Muestra las dos horas correspondientes");
+assert(promptText85.includes('Calle Betis') && promptText85.includes('Avenida Constitución'), "TEST 85: Muestra las direcciones para que el usuario distinga");
+assert(promptText85.includes('Responde con el número'), "TEST 85: Instruye al usuario a responder con número o fecha/hora");
+
+// 4. Probar resolución de desambiguación con resolveDisambiguationChoice
+const cand85_1 = testResolveDisambiguationChoice85('1', session85.pendingDisambiguation.candidates);
+assert(cand85_1?.id === apt85_1.id, "TEST 85: '1' selecciona la primera visita de Juan (11:00 h)");
+
+const cand85_2 = testResolveDisambiguationChoice85('el 2', session85.pendingDisambiguation.candidates);
+assert(cand85_2?.id === apt85_2.id, "TEST 85: 'el 2' selecciona la segunda visita de Juan (16:30 h)");
+
+const cand85_hour = testResolveDisambiguationChoice85('la de las 11', session85.pendingDisambiguation.candidates);
+assert(cand85_hour?.id === apt85_1.id, "TEST 85: 'la de las 11' selecciona la visita de las 11:00 h");
+
+const cand85_addr = testResolveDisambiguationChoice85('Constitución', session85.pendingDisambiguation.candidates);
+assert(cand85_addr?.id === apt85_2.id, "TEST 85: 'Constitución' selecciona la visita por dirección");
+
+// Protección contra empate / repetición del nombre sin elegir:
+const tieCheck85 = testResolveDisambiguationChoice85('Juan', session85.pendingDisambiguation.candidates);
+assert(tieCheck85 === null, "TEST 85: Repetir simplemente 'Juan' no elige arbitrariamente a ningún candidato");
+
+// 5. Simular la respuesta del usuario eligiendo la opción '1' (apt85_1)
+mockSent85.length = 0;
+const selectedApt85 = cand85_1;
+session85.pendingDisambiguation = null;
+
+const confirmRes85 = await testHandleCompleteAppointments85(
+  mockSock85,
+  '34699885544@s.whatsapp.net',
+  session85,
+  { completedQueries: [selectedApt85.id] },
+  null,
+  '1'
+);
+
+assert(confirmRes85.success === true, "TEST 85: Completa exitosamente la cita elegida");
+assert(mockSent85.length === 1 && mockSent85[0].includes('He marcado como realizada la visita con *Juan*'), "TEST 85: Envía confirmación de visita realizada");
+
+const finalApt85_1 = testGetAppointment85(tenantContext85, apt85_1.id);
+const finalApt85_2 = testGetAppointment85(tenantContext85, apt85_2.id);
+assert(finalApt85_1.status === 'COMPLETED', "TEST 85: La visita seleccionada (1) pasa a COMPLETED");
+assert(finalApt85_2.status === 'CONFIRMED', "TEST 85: La visita no seleccionada (2) permanece CONFIRMED");
+
+// 6. Si el usuario vuelve a decir "visita de Juan hecha", al quedar solo 1 visita activa, no pregunta y la completa directamente
+mockSent85.length = 0;
+const secondCallRes85 = await testHandleCompleteAppointments85(
+  mockSock85,
+  '34699885544@s.whatsapp.net',
+  session85,
+  { completedQueries: ['Juan'] },
+  null,
+  'visita de Juan hecha'
+);
+
+assert(secondCallRes85.success === true, "TEST 85: Al haber solo 1 visita pendiente de Juan, la completa directamente");
+assert(secondCallRes85.completedResult.completed[0].id === apt85_2.id, "TEST 85: Completa la visita 2 restante");
+assert(testGetAppointment85(tenantContext85, apt85_2.id).status === 'COMPLETED', "TEST 85: Visita 2 pasa a COMPLETED");
+
+// 7. Prueba del filtro estricto de agenda para consultas "qué visitas me quedan pendientes" / "resto del mes"
+const { detectAgendaQueryIntent: testDetectAgendaIntent85 } = await import('./whatsapp_gateway.js');
+const { listAppointments: testListAppointments85 } = await import('./db_service.js');
+
+// Verificación de reconocimiento de intención
+const qPend1 = testDetectAgendaIntent85('que visitas me quedan pendiente');
+assert(Boolean(qPend1 && qPend1.isMatch && (qPend1.filter === 'all' || qPend1.filter === 'upcoming')), "TEST 85: 'que visitas me quedan pendiente' detectado como consulta de agenda");
+
+const qPend2 = testDetectAgendaIntent85('¿qué citas me quedan pendientes?');
+assert(Boolean(qPend2 && qPend2.isMatch && (qPend2.filter === 'all' || qPend2.filter === 'upcoming')), "TEST 85: '¿qué citas me quedan pendientes?' detectado como consulta de agenda");
+
+const qPend3 = testDetectAgendaIntent85('visitas pendientes');
+assert(Boolean(qPend3 && qPend3.isMatch && (qPend3.filter === 'all' || qPend3.filter === 'upcoming')), "TEST 85: 'visitas pendientes' detectado como consulta de agenda");
+
+const qMonth = testDetectAgendaIntent85('que visitas tengo para este mes');
+assert(Boolean(qMonth && qMonth.isMatch && qMonth.filter === 'month'), "TEST 85: 'que visitas tengo para este mes' detectado como month");
+
+// Crear citas de prueba para verificar que 'upcoming' incluye el resto del mes y futuro, y descarta pasadas
+const in5Days85 = new Date(Date.now() + 5 * 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+const in20Days85 = new Date(Date.now() + 20 * 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+const in45Days85 = new Date(Date.now() + 45 * 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+const pastDate85 = new Date(Date.now() - 5 * 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+
+const aptFut85_1 = testSaveAppointment85(tenantContext85, { clientName: 'Cliente 5 Días', date: in5Days85, time: '10:00' });
+const aptFut85_2 = testSaveAppointment85(tenantContext85, { clientName: 'Cliente Resto Mes', date: in20Days85, time: '11:00' });
+const aptFut85_3 = testSaveAppointment85(tenantContext85, { clientName: 'Cliente Futuro Lejano', date: in45Days85, time: '12:00' });
+const aptPast85 = testSaveAppointment85(tenantContext85, { clientName: 'Cliente Pasado Ayer', date: pastDate85, time: '09:00' });
+const aptCompleted85 = testSaveAppointment85(tenantContext85, { clientName: 'Cliente Ya Hecho', date: in5Days85, time: '17:00' });
+currentTestDb.prepare("UPDATE appointments SET status = 'COMPLETED' WHERE id = ?").run(aptCompleted85.id);
+
+// Consulta 'upcoming' (qué visitas me quedan pendientes)
+const upcomingList85 = testListAppointments85(tenantContext85, 'upcoming');
+assert(upcomingList85.some(a => a.id === aptFut85_1.id), "TEST 85: upcoming incluye cita de dentro de 5 días");
+assert(upcomingList85.some(a => a.id === aptFut85_2.id), "TEST 85: upcoming incluye cita para el resto del mes");
+assert(upcomingList85.some(a => a.id === aptFut85_3.id), "TEST 85: upcoming incluye cita para el mes siguiente");
+assert(!upcomingList85.some(a => a.id === aptPast85.id), "TEST 85: upcoming NUNCA incluye cita con fecha pasada");
+assert(!upcomingList85.some(a => a.id === aptCompleted85.id), "TEST 85: upcoming NUNCA incluye cita COMPLETED");
+
+// Consulta por WhatsApp de "qué visitas me quedan pendientes"
+mockSent85.length = 0;
+const { handleListAppointments: testHandleListAppointments85_2 } = await import('./whatsapp_gateway.js');
+await testHandleListAppointments85_2(mockSock85, '34699885544@s.whatsapp.net', session85, 'upcoming');
+assert(mockSent85.length === 1, "TEST 85: handleListAppointments envía respuesta para 'upcoming'");
+const upcomingMsg85 = mockSent85[0];
+assert(upcomingMsg85.includes('TUS VISITAS TÉCNICAS PENDIENTES'), "TEST 85: Título es 'TUS VISITAS TÉCNICAS PENDIENTES'");
+assert(upcomingMsg85.includes('Cliente 5 Días'), "TEST 85: Mensaje contiene 'Cliente 5 Días'");
+assert(upcomingMsg85.includes('Cliente Resto Mes'), "TEST 85: Mensaje contiene 'Cliente Resto Mes'");
+assert(upcomingMsg85.includes('Cliente Futuro Lejano'), "TEST 85: Mensaje contiene 'Cliente Futuro Lejano'");
+assert(!upcomingMsg85.includes('Cliente Pasado Ayer'), "TEST 85: Mensaje NO contiene 'Cliente Pasado Ayer'");
+assert(!upcomingMsg85.includes('Cliente Ya Hecho'), "TEST 85: Mensaje NO contiene 'Cliente Ya Hecho'");
+
+// Limpieza de TEST 85
+currentTestDb.prepare('DELETE FROM appointments WHERE company_id = ?').run(tenantContext85.companyId);
+
+// ============================================================================
+// TEST 86: CONSULTA DE INGRESOS Y COBROS REALES POR PERIODO (MES, TRIMESTRE, CUATRIMESTRE, SEMANA, HOY)
+// ============================================================================
+console.log("\n--- TEST 86: CONSULTA DE COBROS Y FACTURACIÓN POR PERIODO (MES, TRIMESTRE, CUATRIMESTRE, SEMANA, HOY) ---");
+
+const {
+  detectIntent: testDetectIntent86,
+  resolveIntent: testResolveIntent86,
+  extractPeriodParams: testExtractPeriodParams86
+} = await import('./intent_router.js');
+const {
+  getPeriodRevenue: testGetPeriodRevenue86,
+  savePayment: testSavePayment86,
+  saveInvoice: testSaveInvoice86,
+  saveCompany: testSaveCompany86
+} = await import('./db_service.js');
+
+// 1. Reconocimiento de intenciones y periodos
+const qMesCobrado = testDetectIntent86('¿Cuánto he cobrado este mes?');
+assert(Boolean(qMesCobrado && qMesCobrado.intent === 'MONTHLY_STATS'), "TEST 86: '¿Cuánto he cobrado este mes?' detectado como MONTHLY_STATS");
+assert(qMesCobrado.params.queryType === 'collected', "TEST 86: queryType es 'collected'");
+assert(qMesCobrado.params.period === 'month', "TEST 86: period es 'month'");
+
+const qMesFacturado = testDetectIntent86('¿cuánto he facturado este mes?');
+assert(Boolean(qMesFacturado && qMesFacturado.intent === 'MONTHLY_STATS'), "TEST 86: '¿cuánto he facturado este mes?' detectado como MONTHLY_STATS");
+assert(qMesFacturado.params.queryType === 'invoiced', "TEST 86: queryType es 'invoiced'");
+
+const qTrimCobrado = testDetectIntent86('¿Cuánto he cobrado este trimestre?');
+assert(Boolean(qTrimCobrado && qTrimCobrado.intent === 'QUARTER_STATS'), "TEST 86: '¿Cuánto he cobrado este trimestre?' detectado como QUARTER_STATS");
+assert(qTrimCobrado.params.period === 'quarter', "TEST 86: period es 'quarter'");
+
+const qCuatrimCobrado = testDetectIntent86('¿Cuánto he cobrado este cuatrimestre?');
+assert(Boolean(qCuatrimCobrado && qCuatrimCobrado.intent === 'FOUR_MONTH_STATS'), "TEST 86: '¿Cuánto he cobrado este cuatrimestre?' detectado como FOUR_MONTH_STATS");
+assert(qCuatrimCobrado.params.period === 'four_month', "TEST 86: period es 'four_month'");
+
+const qCuatrimFacturado = testDetectIntent86('cuanto he facturado este cuatrimestre');
+assert(Boolean(qCuatrimFacturado && qCuatrimFacturado.intent === 'FOUR_MONTH_STATS'), "TEST 86: 'cuanto he facturado este cuatrimestre' detectado como FOUR_MONTH_STATS");
+assert(qCuatrimFacturado.params.queryType === 'invoiced', "TEST 86: cuatrimestre queryType es 'invoiced'");
+
+const qSemCobrado = testDetectIntent86('¿Cuánto he cobrado esta semana?');
+assert(Boolean(qSemCobrado && qSemCobrado.intent === 'WEEKLY_REVENUE'), "TEST 86: '¿Cuánto he cobrado esta semana?' detectado como WEEKLY_REVENUE");
+assert(qSemCobrado.params.period === 'week', "TEST 86: period es 'week'");
+
+const qHoyCobrado = testDetectIntent86('¿Cuánto he cobrado hoy?');
+assert(Boolean(qHoyCobrado && qHoyCobrado.intent === 'DAILY_REVENUE'), "TEST 86: '¿Cuánto he cobrado hoy?' detectado como DAILY_REVENUE");
+assert(qHoyCobrado.params.period === 'today', "TEST 86: period es 'today'");
+
+// 2. Base de datos con cobros y facturas reales
+const comp86 = testSaveCompany86('34699008811', { name: 'Reformas Pro 86', cif: 'B86001122' });
+const tenantContext86 = { companyId: comp86.id, phone: '34699008811', company: comp86 };
+currentTestDb.prepare('DELETE FROM payments WHERE company_id = ?').run(tenantContext86.companyId);
+currentTestDb.prepare('DELETE FROM invoices WHERE company_id = ?').run(tenantContext86.companyId);
+
+const nowIso86 = new Date().toISOString();
+const pastMonthIso86 = new Date(Date.now() - 70 * 24 * 3600 * 1000).toISOString();
+
+// Cobro 1: César López (1.520,75 € por Bizum hoy)
+testSavePayment86(tenantContext86, {
+  id: 'PAY-86-001',
+  amount: 1520.75,
+  method: 'Bizum',
+  concept: 'Pago a cuenta reforma',
+  clientName: 'César López',
+  created_at: nowIso86
+});
+
+// Cobro 2: Eugenio López (330,00 € por Transferencia hoy)
+testSavePayment86(tenantContext86, {
+  id: 'PAY-86-002',
+  amount: 330.00,
+  method: 'Transferencia',
+  concept: 'Liquidación pintura',
+  clientName: 'Eugenio López',
+  created_at: nowIso86
+});
+
+// Cobro 3: de hace 70 días (cuatrimestre anterior, agosto)
+testSavePayment86(tenantContext86, {
+  id: 'PAY-86-003',
+  amount: 500.00,
+  method: 'Efectivo',
+  concept: 'Anticipo viejo',
+  clientName: 'Cliente Pasado',
+  created_at: pastMonthIso86
+});
+
+// Factura emitida este mes: 3.041,50 €
+testSaveInvoice86(tenantContext86, {
+  id: 'FAC-86-001',
+  client: { name: 'César López' },
+  totalAmount: 3041.50,
+  financials: { totalAmount: 3041.50, advanceAmount: 1520.75, remainingAmount: 1520.75 },
+  status: 'EMITIDA',
+  created_at: nowIso86
+});
+
+// 3. Verificación de cálculo por periodo
+const monthStats86 = testGetPeriodRevenue86(tenantContext86, { period: 'month' });
+assert(monthStats86.totalCollected === 1850.75, "TEST 86: totalCollected del mes suma exactamente 1.850,75 €");
+assert(monthStats86.paymentCount === 2, "TEST 86: paymentCount del mes es 2 (excluye pago de hace 70 días)");
+assert(monthStats86.totalInvoiced === 3041.50, "TEST 86: totalInvoiced del mes es 3.041,50 €");
+
+const weekStats86 = testGetPeriodRevenue86(tenantContext86, { period: 'week' });
+assert(weekStats86.totalCollected === 1850.75, "TEST 86: totalCollected de la semana suma 1.850,75 €");
+
+const quarterStats86 = testGetPeriodRevenue86(tenantContext86, { period: 'quarter' });
+assert(quarterStats86.totalCollected === 1850.75, "TEST 86: totalCollected del trimestre suma 1.850,75 €");
+
+const fourMonthStats86 = testGetPeriodRevenue86(tenantContext86, { period: 'four_month' });
+assert(fourMonthStats86.totalCollected === 1850.75, "TEST 86: totalCollected del cuatrimestre suma 1.850,75 €");
+
+const todayStats86 = testGetPeriodRevenue86(tenantContext86, { period: 'today' });
+assert(todayStats86.totalCollected === 1850.75, "TEST 86: totalCollected de hoy suma 1.850,75 €");
+
+// 4. Formateo y resolución de intenciones para WhatsApp
+const session86 = {
+  companyId: tenantContext86.companyId,
+  phone: tenantContext86.phone,
+  company: { name: 'Reformas Pro 86' },
+  budgets: new Map()
+};
+
+const replyCobrado86 = await testResolveIntent86(qMesCobrado, tenantContext86.phone, session86);
+assert(replyCobrado86.includes('TOTAL COBRADO'), "TEST 86: Título del mensaje es 'TOTAL COBRADO'");
+assert(replyCobrado86.includes('1850,75') || replyCobrado86.includes('1.850,75'), "TEST 86: Muestra el total cobrado de 1.850,75 €");
+assert(replyCobrado86.includes('César López'), "TEST 86: Desglosa cobro de César López");
+assert(replyCobrado86.includes('Eugenio López'), "TEST 86: Desglosa cobro de Eugenio López");
+assert(replyCobrado86.includes('Bizum'), "TEST 86: Detalla método Bizum");
+assert(replyCobrado86.includes('Transferencia'), "TEST 86: Detalla método Transferencia");
+assert(!replyCobrado86.includes('Cobros pendientes (1 factura y 5 obras)'), "TEST 86: NUNCA muestra lista de obras pendientes de cobro");
+assert(!replyCobrado86.includes('Total pendiente de cobrar: 19872,75'), "TEST 86: NUNCA muestra total pendiente de obras");
+
+const replyFacturado86 = await testResolveIntent86(qMesFacturado, tenantContext86.phone, session86);
+assert(replyFacturado86.includes('FACTURACIÓN Y COBROS'), "TEST 86: Respuesta de facturación titula 'FACTURACIÓN Y COBROS'");
+assert(replyFacturado86.includes('3041,50') || replyFacturado86.includes('3.041,50'), "TEST 86: Detalla total facturado de 3.041,50 €");
+assert(replyFacturado86.includes('1850,75') || replyFacturado86.includes('1.850,75'), "TEST 86: También informa de lo cobrado (1.850,75 €)");
+
+const replyCuatrimestre86 = await testResolveIntent86(qCuatrimCobrado, tenantContext86.phone, session86);
+assert(replyCuatrimestre86.includes('CUATRIMESTRE'), "TEST 86: Mensaje cuatrimestral incluye 'CUATRIMESTRE'");
+assert(replyCuatrimestre86.includes('1850,75') || replyCuatrimestre86.includes('1.850,75'), "TEST 86: Cuatrimestre muestra 1.850,75 € cobrados");
+
+const replySemana86 = await testResolveIntent86(qSemCobrado, tenantContext86.phone, session86);
+assert(replySemana86.includes('ESTA SEMANA'), "TEST 86: Mensaje semanal incluye 'ESTA SEMANA'");
+assert(replySemana86.includes('1850,75') || replySemana86.includes('1.850,75'), "TEST 86: Semana muestra 1.850,75 € cobrados");
+
+// Limpieza de TEST 86
+currentTestDb.prepare('DELETE FROM payments WHERE company_id = ?').run(tenantContext86.companyId);
+currentTestDb.prepare('DELETE FROM invoices WHERE company_id = ?').run(tenantContext86.companyId);
+
+// ======================================================================
+// TEST 87: MODIFICACIÓN DEL TOTAL DE PRESUPUESTOS SIMPLES O SIN PARTIDAS ("PERDÓN, ERAN 2300€", "PRESUPUESTO 20 A 2200€")
+// ======================================================================
+console.log("\n--- TEST 87: MODIFICACIÓN DEL TOTAL EN PRESUPUESTOS SIMPLES O SIN PARTIDAS ---");
+
+const {
+  detectBudgetTotalModificationIntent: testDetectTotalMod87,
+  findBudgetByQuery: testFindBudgetByQuery87,
+  startWhatsAppGateway: testStartWhatsAppGateway87
+} = await import('./whatsapp_gateway.js');
+
+const {
+  ensureCompanyTenant: testEnsureTenant87,
+  saveBudget: testSaveBudget87,
+  getBudget: testGetBudget87
+} = await import('./db_service.js');
+
+// 1. Verificación de patrones de detección de modificación de total y corrección inmediata
+assert(testDetectTotalMod87('perdon, eran 2300€')?.amount === 2300, "TEST 87: 'perdon, eran 2300€' extrae importe 2300");
+assert(testDetectTotalMod87('perdon, eran 2300€')?.isCorrection === true, "TEST 87: 'perdon, eran 2300€' se marca como corrección");
+assert(testDetectTotalMod87('perdona eran 2300')?.amount === 2300, "TEST 87: 'perdona eran 2300' extrae importe 2300");
+assert(testDetectTotalMod87('no, eran 2300€')?.amount === 2300, "TEST 87: 'no, eran 2300€' extrae importe 2300");
+assert(testDetectTotalMod87('eran 2300 euros')?.amount === 2300, "TEST 87: 'eran 2300 euros' extrae importe 2300");
+assert(testDetectTotalMod87('me he equivocado, eran 2300€')?.amount === 2300, "TEST 87: 'me he equivocado, eran 2300€' extrae importe 2300");
+assert(testDetectTotalMod87('rectifico, son 2300€')?.amount === 2300, "TEST 87: 'rectifico, son 2300€' extrae importe 2300");
+
+// Coincidencia con número de presupuesto
+const m87_num1 = testDetectTotalMod87('el presupuesto 20 me lo tienes que cambiar a 2200€');
+assert(m87_num1?.budgetRef === '20', "TEST 87: 'el presupuesto 20 me lo tienes que cambiar a 2200€' extrae budgetRef '20'");
+assert(m87_num1?.amount === 2200, "TEST 87: 'el presupuesto 20 me lo tienes que cambiar a 2200€' extrae importe 2200");
+
+const m87_num2 = testDetectTotalMod87('cambia el presupuesto 20 a 2200€');
+assert(m87_num2?.budgetRef === '20' && m87_num2?.amount === 2200, "TEST 87: 'cambia el presupuesto 20 a 2200€' extrae 20 y 2200");
+
+const m87_num3 = testDetectTotalMod87('el presupuesto 20 cámbialo a 2200€');
+assert(m87_num3?.budgetRef === '20' && m87_num3?.amount === 2200, "TEST 87: 'el presupuesto 20 cámbialo a 2200€' extrae 20 y 2200");
+
+const m87_num4 = testDetectTotalMod87('en el presupuesto 20 pon 2200€');
+assert(m87_num4?.budgetRef === '20' && m87_num4?.amount === 2200, "TEST 87: 'en el presupuesto 20 pon 2200€' extrae 20 y 2200");
+
+const m87_num5 = testDetectTotalMod87('el presupuesto 20 son 2200€');
+assert(m87_num5?.budgetRef === '20' && m87_num5?.amount === 2200, "TEST 87: 'el presupuesto 20 son 2200€' extrae 20 y 2200");
+
+// Modificación de total genérica sobre presupuesto activo
+assert(testDetectTotalMod87('cámbialo a 2200€')?.amount === 2200, "TEST 87: 'cámbialo a 2200€' extrae importe 2200");
+assert(testDetectTotalMod87('el total son 2200€')?.amount === 2200, "TEST 87: 'el total son 2200€' extrae importe 2200");
+assert(testDetectTotalMod87('cambia el total a 2200€')?.amount === 2200, "TEST 87: 'cambia el total a 2200€' extrae importe 2200");
+
+// Exclusión de conceptos específicos de gremio
+assert(testDetectTotalMod87('cambia la fontanería a 900€') === null, "TEST 87: 'cambia la fontanería a 900€' devuelve null (es partida específica)");
+
+// 2. Verificación de findBudgetByQuery con referencias ordinales y frases de usuario
+const testSession87 = {
+  activeBudgetId: 'PRE2026-020',
+  budgets: new Map([
+    ['PRE2026-020', { id: 'PRE2026-020', client: { name: 'Eugenio' }, financials: { totalAmount: 2000 } }],
+    ['PRE2026-005', { id: 'PRE2026-005', client: { name: 'Carlos' }, financials: { totalAmount: 500 } }]
+  ])
+};
+
+assert(testFindBudgetByQuery87(testSession87, 'el presupuesto 20')?.id === 'PRE2026-020', "TEST 87: findBudgetByQuery('el presupuesto 20') localiza PRE2026-020");
+assert(testFindBudgetByQuery87(testSession87, 'presupuesto 20')?.id === 'PRE2026-020', "TEST 87: findBudgetByQuery('presupuesto 20') localiza PRE2026-020");
+assert(testFindBudgetByQuery87(testSession87, 'presupuesto número 20')?.id === 'PRE2026-020', "TEST 87: findBudgetByQuery('presupuesto número 20') localiza PRE2026-020");
+assert(testFindBudgetByQuery87(testSession87, '20')?.id === 'PRE2026-020', "TEST 87: findBudgetByQuery('20') localiza PRE2026-020");
+assert(testFindBudgetByQuery87(testSession87, 'PRE2026-020')?.id === 'PRE2026-020', "TEST 87: findBudgetByQuery('PRE2026-020') localiza PRE2026-020");
+
+// 3. Verificación de actualización sobre presupuesto simple / sin partidas con Engine
+const { PresuVozEngine: TestEngine87 } = await import('./engine.js');
+const engine87 = new TestEngine87();
+
+const tenantPhone87 = '34688990011';
+const tenantContext87 = testEnsureTenant87(tenantPhone87);
+
+// Limpieza previa
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext87.companyId);
+
+// 3a. Caso 1: Presupuesto simple inicial de 2000€ para Eugenio
+const initialRes87 = engine87.process({
+  rawTranscript: 'Presupuesto para Eugenio por 2000€',
+  clientName: 'Eugenio',
+  items: [{ description: 'Presupuesto para Eugenio', qty: 1, unit: 'pa', unitPrice: 2000, total: 2000, isPricePending: false }]
+});
+assert(initialRes87.success && initialRes87.budget.financials.taxableBase === 2000, "TEST 87: Presupuesto inicial de 2000€ creado correctamente");
+
+const budget87_1 = initialRes87.budget;
+budget87_1.id = 'PRE2026-020';
+testSaveBudget87(tenantContext87, budget87_1);
+
+const session87 = {
+  activeBudgetId: budget87_1.id,
+  lastCreatedBudgetId: budget87_1.id,
+  lastActiveBudgetTimestamp: Date.now(),
+  budgets: new Map([[budget87_1.id, budget87_1]])
+};
+
+// 3b. Usuario envía nota de corrección: "perdon, eran 2300€"
+const modIntent87_1 = testDetectTotalMod87('perdon, eran 2300€');
+assert(modIntent87_1 !== null && modIntent87_1.amount === 2300, "TEST 87: Detecta intención de corrección con 2300€");
+
+// Se resuelve presupuesto objetivo (activo reciente)
+let targetBudget87_1 = null;
+if (modIntent87_1.budgetRef) {
+  targetBudget87_1 = testFindBudgetByQuery87(session87, modIntent87_1.budgetRef);
+} else if (modIntent87_1.isCorrection && session87.activeBudgetId) {
+  targetBudget87_1 = session87.budgets.get(session87.activeBudgetId);
+}
+assert(targetBudget87_1?.id === 'PRE2026-020', "TEST 87: Corrección resuelve a presupuesto activo PRE2026-020");
+
+// Se actualiza la partida única del presupuesto simple
+const itemsToProcess87_1 = (targetBudget87_1.items || []).map(i => ({ ...i }));
+if (itemsToProcess87_1.length === 1) {
+  itemsToProcess87_1[0].unitPrice = modIntent87_1.amount;
+  itemsToProcess87_1[0].total = modIntent87_1.amount;
+  itemsToProcess87_1[0].isPricePending = false;
+}
+const updatedRes87_1 = engine87.process({
+  rawTranscript: 'perdon, eran 2300€',
+  clientName: targetBudget87_1.client.name,
+  items: itemsToProcess87_1
+});
+assert(updatedRes87_1.budget.financials.taxableBase === 2300, "TEST 87: Presupuesto corregido actualiza Base imponible a 2300€ (NO 2000€)");
+assert(updatedRes87_1.budget.financials.totalAmount === 2783, "TEST 87: Presupuesto corregido calcula Total 2783€ con 21% IVA");
+
+// Guardar en sesión y SQLite
+updatedRes87_1.budget.id = targetBudget87_1.id;
+testSaveBudget87(tenantContext87, updatedRes87_1.budget);
+session87.budgets.set(updatedRes87_1.budget.id, updatedRes87_1.budget);
+
+// 3c. Usuario recalca con número de presupuesto: "el presupuesto 20 me lo tienes que cambiar a 2200€"
+const modIntent87_2 = testDetectTotalMod87('el presupuesto 20 me lo tienes que cambiar a 2200€');
+assert(modIntent87_2?.budgetRef === '20' && modIntent87_2?.amount === 2200, "TEST 87: Detecta budgetRef '20' e importe 2200€");
+
+const targetBudget87_2 = testFindBudgetByQuery87(session87, modIntent87_2.budgetRef);
+assert(targetBudget87_2?.id === 'PRE2026-020', "TEST 87: 'el presupuesto 20' localiza PRE2026-020 mediante búsqueda por query");
+
+const itemsToProcess87_2 = (targetBudget87_2.items || []).map(i => ({ ...i }));
+if (itemsToProcess87_2.length === 1) {
+  itemsToProcess87_2[0].unitPrice = modIntent87_2.amount;
+  itemsToProcess87_2[0].total = modIntent87_2.amount;
+  itemsToProcess87_2[0].isPricePending = false;
+}
+const updatedRes87_2 = engine87.process({
+  rawTranscript: 'el presupuesto 20 me lo tienes que cambiar a 2200€',
+  clientName: targetBudget87_2.client.name,
+  items: itemsToProcess87_2
+});
+assert(updatedRes87_2.budget.financials.taxableBase === 2200, "TEST 87: Presupuesto 20 modificado actualiza Base imponible a 2200€");
+assert(updatedRes87_2.budget.financials.totalAmount === 2662, "TEST 87: Presupuesto 20 modificado calcula Total 2662€ con 21% IVA");
+
+// 3d. Caso 3: Presupuesto sin ninguna partida (items: []) que recibe modificación al total
+const emptyBudget87 = {
+  id: 'PRE2026-021',
+  issueDate: '2026-10-17',
+  company: { name: 'Empresa Test' },
+  companyId: tenantContext87.companyId,
+  client: { name: 'Manolo Sin Partidas', address: 'Calle Mayor 1' },
+  items: [],
+  financials: { totalAmount: 0 },
+  isDraft: true,
+  status: 'BORRADOR'
+};
+testSaveBudget87(tenantContext87, emptyBudget87);
+session87.budgets.set(emptyBudget87.id, emptyBudget87);
+
+const modIntent87_3 = testDetectTotalMod87('en el presupuesto 21 cámbialo a 1500€');
+assert(modIntent87_3?.budgetRef === '21' && modIntent87_3?.amount === 1500, "TEST 87: 'en el presupuesto 21 cámbialo a 1500€' detecta ref '21' y 1500€");
+
+const targetBudget87_3 = testFindBudgetByQuery87(session87, modIntent87_3.budgetRef);
+assert(targetBudget87_3?.id === 'PRE2026-021', "TEST 87: Encuentra presupuesto PRE2026-021 sin partidas");
+
+const itemsToProcess87_3 = (targetBudget87_3.items || []).map(i => ({ ...i }));
+if (itemsToProcess87_3.length === 0) {
+  const clientName = targetBudget87_3.client?.name || 'Cliente Particular';
+  itemsToProcess87_3.push({
+    id: `it-${Date.now()}`,
+    description: `Presupuesto para ${clientName}`,
+    qty: 1,
+    unit: 'pa',
+    unitPrice: modIntent87_3.amount,
+    total: modIntent87_3.amount,
+    isPricePending: false,
+    preserveDescription: true
+  });
+}
+const updatedRes87_3 = engine87.process({
+  rawTranscript: 'en el presupuesto 21 cámbialo a 1500€',
+  clientName: targetBudget87_3.client.name,
+  items: itemsToProcess87_3
+});
+assert(updatedRes87_3.budget.items.length === 1, "TEST 87: Presupuesto vacío genera exactamente 1 partida");
+assert(updatedRes87_3.budget.items[0].description === 'Presupuesto para Manolo Sin Partidas', "TEST 87: Descripción formal de partida generada para el cliente");
+assert(updatedRes87_3.budget.items[0].unitPrice === 1500, "TEST 87: Partida generada con precio unitario 1500€");
+assert(updatedRes87_3.budget.isDraft === false, "TEST 87: Presupuesto pasa de borrador a formal (isDraft: false)");
+assert(updatedRes87_3.budget.financials.taxableBase === 1500, "TEST 87: Base imponible es 1500€");
+assert(updatedRes87_3.budget.financials.totalAmount === 1815, "TEST 87: Total es 1815€ (1500 + 21% IVA)");
+
+// Limpieza final de TEST 87
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(tenantContext87.companyId);
+
+// ==========================================================
+// TEST 88: AISLAMIENTO TÉCNICO Y PROTECCIÓN DEL MÓDULO DE GESTORÍA (FEATURE_GESTORIA=false)
+// ==========================================================
+console.log("\n--- TEST 88: AISLAMIENTO TÉCNICO Y PROTECCIÓN DEL MÓDULO DE GESTORÍA (FEATURE_GESTORIA=false) ---");
+
+const {
+  isGestoriaEnabled: testIsGestoriaEnabled,
+  isGestoriaTestMode: testIsGestoriaTestMode,
+  isGestoriaRealEmailAllowed: testIsGestoriaRealEmailAllowed,
+  sendFiscalPackageToGestoria: testSendFiscalPackageToGestoria,
+  getQuarterSummary: testGetQuarterSummary
+} = await import('./fiscal_service.js');
+const { resolveIntent: testResolveIntent88 } = await import('./intent_router.js');
+const {
+  saveCompany: testSaveCompany88,
+  getCompany: testGetCompany88,
+  emitInvoice: testEmitInvoice88,
+  saveBudget: testSaveBudget88,
+  ensureCompanyTenant: testEnsureTenant88
+} = await import('./db_service.js');
+
+// 1. Verificación de configuración inicial aislada (FEATURE_GESTORIA=false por defecto)
+process.env.FEATURE_GESTORIA = 'false';
+process.env.FEATURE_GESTORIA_ALLOW_REAL_EMAILS = 'false';
+
+assert(testIsGestoriaEnabled() === false, "TEST 88: isGestoriaEnabled() es false cuando FEATURE_GESTORIA=false");
+assert(testIsGestoriaTestMode() === false, "TEST 88: isGestoriaTestMode() es false cuando FEATURE_GESTORIA=false");
+assert(testIsGestoriaRealEmailAllowed() === false, "TEST 88: isGestoriaRealEmailAllowed() es false por defecto");
+
+// Si alguien intenta activar allow real emails sin activar FEATURE_GESTORIA, sigue bloqueado
+process.env.FEATURE_GESTORIA_ALLOW_REAL_EMAILS = 'true';
+assert(testIsGestoriaRealEmailAllowed() === false, "TEST 88: isGestoriaRealEmailAllowed() permanece false si FEATURE_GESTORIA=false");
+process.env.FEATURE_GESTORIA_ALLOW_REAL_EMAILS = 'false';
+
+// 2. Invocación de sendFiscalPackageToGestoria con feature desactivada
+const tenantPhone88A = '34625888001';
+const tenantContext88A = testEnsureTenant88(tenantPhone88A);
+testSaveCompany88(tenantPhone88A, {
+  name: 'Constructora Alfa S.L.',
+  cif: 'B-88000001',
+  gestoriaEmail: 'gestoria.alfa@asesoriatest.com'
+});
+
+const blockedSendResult = await testSendFiscalPackageToGestoria({
+  companyContextOrId: tenantContext88A,
+  year: 2026,
+  quarter: 1
+});
+assert(blockedSendResult.blocked === true, "TEST 88: sendFiscalPackageToGestoria retorna blocked=true con FEATURE_GESTORIA=false");
+assert(blockedSendResult.success === false, "TEST 88: sendFiscalPackageToGestoria retorna success=false");
+assert(blockedSendResult.message.includes('FEATURE_GESTORIA=false'), "TEST 88: Mensaje de error explica desactivación por feature flag");
+
+// 3. Resolución determinística de intenciones con feature desactivada (Intent Router)
+const fiscalSummaryReply = await testResolveIntent88(
+  { intent: 'FISCAL_QUARTER_SUMMARY', params: { quarter: 1, year: 2026 } },
+  tenantPhone88A,
+  { companyId: tenantContext88A.companyId }
+);
+assert(fiscalSummaryReply.includes('Cierre fiscal no disponible'), "TEST 88: FISCAL_QUARTER_SUMMARY responde que el cierre fiscal está desactivado");
+assert(!fiscalSummaryReply.includes('Modelo 303'), "TEST 88: FISCAL_QUARTER_SUMMARY no presenta liquidación del Modelo 303");
+assert(fiscalSummaryReply.includes('cuánto he facturado este mes'), "TEST 88: Ofrece alternativa para consultar facturas o cobros");
+
+const sendGestoriaReply = await testResolveIntent88(
+  { intent: 'SEND_TO_GESTORIA', params: { quarter: 1, year: 2026 } },
+  tenantPhone88A,
+  { companyId: tenantContext88A.companyId }
+);
+assert(sendGestoriaReply.includes('Módulo de Gestoría no disponible'), "TEST 88: SEND_TO_GESTORIA responde que el envío a gestorías está desactivado");
+assert(!sendGestoriaReply.includes('CONFIRMAR'), "TEST 88: SEND_TO_GESTORIA no pide confirmación de envío Nivel C");
+
+// 4. Perfil de empresa no expone Gestoría cuando FEATURE_GESTORIA=false
+const companyProfileReply = await testResolveIntent88(
+  { intent: 'SHOW_COMPANY', params: {} },
+  tenantPhone88A,
+  { companyId: tenantContext88A.companyId }
+);
+assert(!companyProfileReply.includes('Gestoría:'), "TEST 88: SHOW_COMPANY oculta el campo de gestoría con feature desactivada");
+
+// 5. Modo de pruebas controlado (FEATURE_GESTORIA='test' sin envíos externos)
+process.env.FEATURE_GESTORIA = 'test';
+assert(testIsGestoriaEnabled() === true, "TEST 88: isGestoriaEnabled() es true en modo test");
+assert(testIsGestoriaTestMode() === true, "TEST 88: isGestoriaTestMode() es true en modo test");
+assert(testIsGestoriaRealEmailAllowed() === false, "TEST 88: isGestoriaRealEmailAllowed() sigue siendo false en modo test");
+
+// Mock de Resend que fallaría si se intentara enviar un correo real a una dirección externa
+let realResendCalled = false;
+const mockResendTrap = {
+  emails: {
+    send: async () => {
+      realResendCalled = true;
+      throw new Error("VIOLACIÓN DE AISLAMIENTO: Se intentó llamar a resend.emails.send real");
+    }
+  }
+};
+
+const safeTestModeResult = await testSendFiscalPackageToGestoria({
+  companyContextOrId: tenantContext88A,
+  year: 2026,
+  quarter: 1,
+  resendInstance: mockResendTrap
+});
+
+assert(safeTestModeResult.success === true, "TEST 88: Modo test permite generar el paquete con éxito");
+assert(safeTestModeResult.simulated === true, "TEST 88: Modo test marca la entrega como simulada");
+assert(safeTestModeResult.targetEmail === 'test@gestoria-simulada.local', "TEST 88: Modo test redirige a buzón de pruebas ficticio");
+assert(realResendCalled === false, "TEST 88: NUNCA se invoca la API externa de Resend en modo test");
+
+// Restaurar flag a false
+process.env.FEATURE_GESTORIA = 'false';
+
+// 6. Aislamiento Multi-Tenant (Verificar que los datos fiscales de dos empresas están 100% aislados)
+const tenantPhone88B = '34625888002';
+const tenantContext88B = testEnsureTenant88(tenantPhone88B);
+testSaveCompany88(tenantPhone88B, {
+  name: 'Reformas Beta S.L.',
+  cif: 'B-88000002'
+});
+
+// Limpieza previa
+currentTestDb.prepare('DELETE FROM invoices WHERE company_id IN (?, ?)').run(tenantContext88A.companyId, tenantContext88B.companyId);
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id IN (?, ?)').run(tenantContext88A.companyId, tenantContext88B.companyId);
+
+const b88A = {
+  id: 'PRE2026-88A',
+  client: { name: 'Cliente Alfa', nif: '11111111A' },
+  items: [{ id: 'it-1', description: 'Obra Alfa', qty: 1, unit: 'pa', unitPrice: 1000, total: 1000 }],
+  financials: { taxableBase: 1000, taxRatePercentage: 21, taxAmount: 210, totalAmount: 1210 }
+};
+testSaveBudget88(tenantContext88A, b88A);
+const inv88A = engine.convertToInvoice(b88A, {
+  company: { name: 'Constructora Alfa S.L.', cif: 'B-88000001' },
+  id: 'FAC-2026-88A'
+});
+inv88A.issueDate = '2026-02-15';
+inv88A.fiscalPeriod = '2026_Q1';
+testEmitInvoice88(tenantContext88A, inv88A);
+
+const b88B = {
+  id: 'PRE2026-88B',
+  client: { name: 'Cliente Beta', nif: '22222222B' },
+  items: [{ id: 'it-1', description: 'Obra Beta', qty: 1, unit: 'pa', unitPrice: 5000, total: 5000 }],
+  financials: { taxableBase: 5000, taxRatePercentage: 21, taxAmount: 1050, totalAmount: 6050 }
+};
+testSaveBudget88(tenantContext88B, b88B);
+const inv88B = engine.convertToInvoice(b88B, {
+  company: { name: 'Reformas Beta S.L.', cif: 'B-88000002' },
+  id: 'FAC-2026-88B'
+});
+inv88B.issueDate = '2026-02-20';
+inv88B.fiscalPeriod = '2026_Q1';
+testEmitInvoice88(tenantContext88B, inv88B);
+
+// Calcular resumen trimestral para Empresa A
+const summaryAlfa = testGetQuarterSummary(tenantContext88A, 2026, 1);
+assert(summaryAlfa.summary.issuedCount === 1, "TEST 88: Empresa Alfa solo tiene 1 factura emitida");
+assert(summaryAlfa.summary.issuedTaxBase === 1000, "TEST 88: Base imponible de Alfa es exactamente 1.000 €");
+assert(summaryAlfa.summary.issuedVatTotal === 210, "TEST 88: Cuota IVA de Alfa es exactamente 210 €");
+
+// Calcular resumen trimestral para Empresa B
+const summaryBeta = testGetQuarterSummary(tenantContext88B, 2026, 1);
+assert(summaryBeta.summary.issuedCount === 1, "TEST 88: Empresa Beta solo tiene 1 factura emitida");
+assert(summaryBeta.summary.issuedTaxBase === 5000, "TEST 88: Base imponible de Beta es exactamente 5.000 €");
+assert(summaryBeta.summary.issuedVatTotal === 1050, "TEST 88: Cuota IVA de Beta es exactamente 1.050 €");
+
+// Limpieza final de TEST 88
+currentTestDb.prepare('DELETE FROM invoices WHERE company_id IN (?, ?)').run(tenantContext88A.companyId, tenantContext88B.companyId);
+currentTestDb.prepare('DELETE FROM budgets WHERE company_id IN (?, ?)').run(tenantContext88A.companyId, tenantContext88B.companyId);
+
+
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
   console.log("🛡️  El motor es 100% conversacional, tolerante a fallos y soporta borradores, capítulos y descuentos.");

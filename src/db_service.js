@@ -93,17 +93,8 @@ export const DEFAULT_COMPANY = {
 
 // ─── Métodos de Empresa ───────────────────────────────────────────────────────
 
-export function getCompany(phone) {
-  if (!phone) return { ...DEFAULT_COMPANY, isConfigured: false };
-  if (typeof phone === 'string' && isUuid(phone)) {
-    return getCompanyById(phone) || { ...DEFAULT_COMPANY, id: phone, companyId: phone, isConfigured: false };
-  }
-  const cleanPhone = String(phone).replace(/\D/g, '');
-  const stmt = db.prepare('SELECT * FROM companies WHERE phone = ?');
-  const row = stmt.get(cleanPhone);
-  if (!row) {
-    return { ...DEFAULT_COMPANY, phone: cleanPhone, isConfigured: false };
-  }
+function mapCompanyRow(row, fallbackPhone = '') {
+  if (!row) return null;
   return {
     id: row.id || null,
     companyId: row.id || null,
@@ -121,7 +112,7 @@ export function getCompany(phone) {
     entityType: row.entity_type || 'autonomo',
     irpfRate: row.irpf_rate !== null && row.irpf_rate !== undefined ? row.irpf_rate : 0,
     invoiceSeries: row.invoice_series || '2026-',
-    phone: row.phone_contact || cleanPhone,
+    phone: row.phone_contact || row.phone || fallbackPhone,
     email: row.email || null,
     iban: row.iban ? row.iban : null,
     bizum: row.bizum ? row.bizum : null,
@@ -137,17 +128,74 @@ export function getCompany(phone) {
 
 export function getCompanyById(companyId) {
   if (!companyId) return null;
-  const stmt = db.prepare('SELECT phone FROM companies WHERE id = ?');
+  const stmt = db.prepare('SELECT * FROM companies WHERE id = ?');
   const row = stmt.get(companyId);
   if (!row) return null;
-  return getCompany(row.phone);
+  return mapCompanyRow(row);
 }
 
-export function saveCompany(phone, data = {}) {
-  const cleanPhone = String(phone).replace(/\D/g, '');
-  const existing = getCompany(cleanPhone);
+export function getCompany(phoneOrContext) {
+  if (!phoneOrContext) return { ...DEFAULT_COMPANY, isConfigured: false };
+
+  // Soporte para objetos de contexto (tenantContext, authContext, session, etc.)
+  if (typeof phoneOrContext === 'object') {
+    const targetId = phoneOrContext.companyId || phoneOrContext.id || phoneOrContext.company?.id;
+    if (targetId && isUuid(targetId)) {
+      const comp = getCompanyById(targetId);
+      if (comp) return comp;
+    }
+    const targetPhone = phoneOrContext.phone || phoneOrContext.channelIdentifier || phoneOrContext.company?.phone;
+    if (targetPhone) {
+      return getCompany(targetPhone);
+    }
+    return { ...DEFAULT_COMPANY, isConfigured: false };
+  }
+
+  // Soporte para UUID directo
+  if (typeof phoneOrContext === 'string' && isUuid(phoneOrContext)) {
+    return getCompanyById(phoneOrContext) || { ...DEFAULT_COMPANY, id: phoneOrContext, companyId: phoneOrContext, isConfigured: false };
+  }
+
+  const cleanPhone = String(phoneOrContext).replace(/\D/g, '');
+  if (!cleanPhone) {
+    return { ...DEFAULT_COMPANY, isConfigured: false };
+  }
+
+  // Buscar por phone principal o phone_contact
+  const stmt = db.prepare('SELECT * FROM companies WHERE phone = ? OR phone_contact = ?');
+  const row = stmt.get(cleanPhone, cleanPhone);
+  if (row) {
+    return mapCompanyRow(row, cleanPhone);
+  }
+
+  // Si no se encuentra, buscar si existe en channel_identities
+  try {
+    const ch = db.prepare('SELECT company_id FROM channel_identities WHERE channel_identifier = ? AND is_active = 1').get(cleanPhone);
+    if (ch?.company_id) {
+      return getCompanyById(ch.company_id) || { ...DEFAULT_COMPANY, phone: cleanPhone, isConfigured: false };
+    }
+  } catch (e) {}
+
+  return { ...DEFAULT_COMPANY, phone: cleanPhone, isConfigured: false };
+}
+
+export function saveCompany(phoneOrContext, data = {}) {
+  let targetId = null;
+  let targetPhone = null;
+
+  if (phoneOrContext && typeof phoneOrContext === 'object') {
+    targetId = phoneOrContext.companyId || phoneOrContext.id || phoneOrContext.company?.id || data.id || data.companyId;
+    targetPhone = phoneOrContext.phone || phoneOrContext.channelIdentifier || phoneOrContext.company?.phone;
+  } else if (typeof phoneOrContext === 'string' && isUuid(phoneOrContext)) {
+    targetId = phoneOrContext;
+  } else {
+    targetPhone = phoneOrContext;
+  }
+
+  const existing = (targetId ? getCompanyById(targetId) : null) || (targetPhone ? getCompany(targetPhone) : null) || { ...DEFAULT_COMPANY };
+  const cleanPhone = targetPhone ? String(targetPhone).replace(/\D/g, '') : (existing.phone ? String(existing.phone).replace(/\D/g, '') : '');
   const now = new Date().toISOString();
-  const companyId = data.id || data.companyId || existing.id || crypto.randomUUID();
+  const companyId = data.id || data.companyId || targetId || existing.id || crypto.randomUUID();
 
   const name = data.name !== undefined ? data.name : existing.name;
   const fiscalName = data.fiscalName !== undefined ? data.fiscalName : existing.fiscalName;
@@ -249,7 +297,7 @@ export function saveCompany(phone, data = {}) {
     }
   }
 
-  return getCompany(cleanPhone);
+  return getCompanyById(companyId) || getCompany(cleanPhone);
 }
 
 /**
@@ -577,6 +625,7 @@ export function saveBudget(companyContextOrIdOrPhone, budget) {
     terms: budget.terms,
     payments: budget.payments || [],
     paymentSummary: budget.paymentSummary || { totalPaid: 0, remainingBalance: total, status: 'PENDIENTE' },
+    advanceInvoices: budget.advanceInvoices || [],
     isDraft: budget.isDraft,
     status: budget.status || 'PENDIENTE_ACEPTACION',
     workMemory: budget.workMemory || {}
@@ -808,11 +857,15 @@ export function getBudget(companyContextOrIdOrPhone, id, options = {}) {
     const companyId = tenant?.companyId;
     if (!companyId) return null;
 
-    const stmt = targetDb.prepare('SELECT data_json, company_id FROM budgets WHERE id = ? AND company_id = ?');
+    const stmt = targetDb.prepare('SELECT status, data_json, company_id FROM budgets WHERE id = ? AND company_id = ?');
     const row = stmt.get(id, companyId);
 
     if (!row) return null;
-    try { return JSON.parse(row.data_json); } catch(e) { return null; }
+    try {
+      const parsed = JSON.parse(row.data_json);
+      if (row.status) parsed.status = row.status;
+      return parsed;
+    } catch(e) { return null; }
   }
 
   // REGLA DE SEGURIDAD ESTRICTA:
@@ -943,11 +996,32 @@ export function emitInvoice(companyContextOrIdOrPhone, invoicePayload, options =
         for (const row of existing) {
           let parsed = {};
           try { parsed = JSON.parse(row.data_json || '{}'); } catch {}
-          const isAdvance = Boolean(parsed.is_advance || parsed.isAdvance || parsed.type === 'ANTICIPO');
-          const isRect = Boolean(row.rectifies_invoice_id || parsed.invoice_type === 'RECTIFICATIVA');
-          if (!isAdvance && !isRect) {
+          if ((parsed.type || '').toUpperCase() === 'FINAL') {
             targetDb.exec('COMMIT;');
             return { invoice: parsed, isDuplicate: true };
+          }
+        }
+      } else if (invoiceType === 'FASE') {
+        // Idempotencia para factura de fase: evitar duplicar la misma fase o conjunto de partidas
+        const phaseName = (invoicePayload.phaseName || '').trim().toLowerCase();
+        const incomingItems = (invoicePayload.items || []).map(it => (it.description || '').toLowerCase().trim());
+        const existingFase = targetDb.prepare(`
+          SELECT * FROM invoices 
+          WHERE company_id = ? AND budget_id = ? AND status != 'ANULADA'
+        `).all(companyId, budgetId);
+
+        for (const row of existingFase) {
+          let parsed = {};
+          try { parsed = JSON.parse(row.data_json || '{}'); } catch {}
+          if (parsed.type === 'FASE') {
+            const rowPhaseName = (parsed.phaseName || '').trim().toLowerCase();
+            const rowItems = (parsed.items || []).map(it => (it.description || '').toLowerCase().trim());
+            const samePhase = Boolean(phaseName && rowPhaseName && phaseName === rowPhaseName);
+            const sameItems = incomingItems.length > 0 && incomingItems.every(desc => rowItems.includes(desc));
+            if (samePhase || sameItems) {
+              targetDb.exec('COMMIT;');
+              return { invoice: parsed, isDuplicate: true };
+            }
           }
         }
       } else if (invoiceType === 'ANTICIPO') {
@@ -985,7 +1059,20 @@ export function emitInvoice(companyContextOrIdOrPhone, invoicePayload, options =
     const cleanSeries = String(rawSeries).trim().replace(/-$/, '');
 
     // 3. Asignar número correlativo persistente atómicamente
-    const alloc = allocateInvoiceNumber(companyContextOrIdOrPhone, cleanSeries, year, { db: targetDb });
+    let alloc;
+    if (isMigration016Applied(targetDb)) {
+      alloc = allocateInvoiceNumber(companyContextOrIdOrPhone, cleanSeries, year, { db: targetDb });
+    } else {
+      const countRow = targetDb.prepare("SELECT COUNT(*) as count FROM invoices WHERE company_id = ?").get(companyId);
+      const nextNum = (countRow?.count || 0) + 1;
+      alloc = {
+        companyId,
+        series: cleanSeries,
+        year,
+        invoiceNumber: nextNum,
+        visibleNumber: formatInvoiceNumber(cleanSeries, year, nextNum)
+      };
+    }
     const assignedVisible = alloc.visibleNumber;
 
     // 4. Preparar payload de factura con ID interno estable (UUID) y número fiscal visible independiente
@@ -1013,7 +1100,20 @@ export function emitInvoice(companyContextOrIdOrPhone, invoicePayload, options =
     // 6. Si es factura final y hay presupuesto asociado, marcar presupuesto como FACTURADO
     if (budgetId && invoiceType === 'FINAL') {
       try {
-        targetDb.prepare("UPDATE budgets SET status = 'FACTURADO', updated_at = datetime('now') WHERE id = ? AND company_id = ?").run(budgetId, companyId);
+        const budRow = targetDb.prepare('SELECT data_json FROM budgets WHERE id = ? AND company_id = ?').get(budgetId, companyId);
+        let updatedDataJson = null;
+        if (budRow?.data_json) {
+          try {
+            const bObj = JSON.parse(budRow.data_json);
+            bObj.status = 'FACTURADO';
+            updatedDataJson = JSON.stringify(bObj);
+          } catch {}
+        }
+        if (updatedDataJson) {
+          targetDb.prepare("UPDATE budgets SET status = 'FACTURADO', data_json = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?").run(updatedDataJson, budgetId, companyId);
+        } else {
+          targetDb.prepare("UPDATE budgets SET status = 'FACTURADO', updated_at = datetime('now') WHERE id = ? AND company_id = ?").run(budgetId, companyId);
+        }
       } catch (budErr) {
         console.warn('⚠️ No se pudo actualizar estado del presupuesto a FACTURADO:', budErr.message);
       }
@@ -1246,11 +1346,14 @@ export function getInvoice(companyContextOrIdOrPhone, id) {
     const companyId = tenant?.companyId;
     if (!companyId) return null;
 
-    const stmt = db.prepare('SELECT data_json, company_id FROM invoices WHERE id = ? AND company_id = ?');
+    const stmt = db.prepare('SELECT data_json, status, company_id FROM invoices WHERE id = ? AND company_id = ?');
     const row = stmt.get(id, companyId);
 
     if (!row) return null;
-    try { return JSON.parse(row.data_json); } catch(e) { return null; }
+    try {
+      const parsed = JSON.parse(row.data_json);
+      return { ...parsed, status: row.status || parsed.status };
+    } catch(e) { return null; }
   }
 
   // REGLA DE SEGURIDAD ESTRICTA:
@@ -1355,7 +1458,7 @@ export function savePayment(companyContextOrIdOrPhone, paymentOrBudgetId, maybeP
   let targetId = maybePayment ? paymentOrBudgetId : (payment?.targetId || payment?.budgetId || payment?.invoiceId || '');
   if (!payment) return null;
   const pId = payment.id || `PAY-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-  const now = new Date().toISOString();
+  const now = payment.created_at || new Date().toISOString();
 
   // Defensa activa contra inyección de companyId / company_phone
   if (payment.companyId && companyId && payment.companyId !== companyId) {
@@ -2210,19 +2313,26 @@ export function findAppointments(companyContextOrIdOrPhone, query, options = {})
   const companyId = tenant?.companyId;
   if (!companyId) return [];
 
-  const q = `%${(query || '').trim().toLowerCase()}%`;
+  const norm = str => String(str || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  const cleanQ = norm(query);
   const statusFilter = options.includeCancelled ? '' : "AND status != 'CANCELLED'";
 
   const stmt = db.prepare(`
     SELECT * FROM appointments
     WHERE company_id = ?
       ${statusFilter}
-      AND (LOWER(id) LIKE ? OR LOWER(client_name) LIKE ? OR LOWER(notes) LIKE ? OR LOWER(client_address) LIKE ?)
     ORDER BY date ASC, time ASC
   `);
-  const rows = stmt.all(companyId, q, q, q, q);
+  const rows = stmt.all(companyId);
 
-  return rows.map(r => ({
+  const filtered = cleanQ ? rows.filter(r => {
+    return norm(r.id).includes(cleanQ) ||
+           norm(r.client_name).includes(cleanQ) ||
+           norm(r.notes).includes(cleanQ) ||
+           norm(r.client_address).includes(cleanQ);
+  }) : rows;
+
+  return filtered.map(r => ({
     id: r.id,
     companyId: r.company_id,
     companyPhone: r.company_phone,
@@ -2280,11 +2390,27 @@ export function rescheduleAppointment(companyContextOrIdOrPhone, queryOrId, newD
   const companyId = tenant?.companyId;
   const cleanPhone = tenant?.phone;
 
+  const norm = str => String(str || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  const cleanQ = norm(queryOrId);
   const matches = findAppointments(companyContextOrIdOrPhone, queryOrId);
   if (matches.length === 0) return { success: false, error: 'NOT_FOUND' };
-  if (matches.length > 1) return { success: false, error: 'AMBIGUOUS', matches };
 
-  const target = matches[0];
+  let target = null;
+  if (matches.length === 1) {
+    target = matches[0];
+  } else {
+    const exactIdMatch = matches.find(m => norm(m.id) === cleanQ);
+    if (exactIdMatch) {
+      target = exactIdMatch;
+    } else {
+      const uncompleted = matches.filter(m => m.status !== 'COMPLETED' && m.status !== 'CANCELLED');
+      if (uncompleted.length === 1) {
+        target = uncompleted[0];
+      } else {
+        return { success: false, error: 'AMBIGUOUS', matches: uncompleted.length > 1 ? uncompleted : matches };
+      }
+    }
+  }
   const oldRow = getAppointment(companyContextOrIdOrPhone, target.id);
   if (!oldRow) return { success: false, error: 'NOT_FOUND' };
   const now = new Date().toISOString();
@@ -2336,20 +2462,45 @@ export function rescheduleAppointment(companyContextOrIdOrPhone, queryOrId, newD
  * Marca una o varias visitas como COMPLETED con su resultado (tenant-scoped).
  */
 export function completeAppointments(companyContextOrIdOrPhone, queriesOrIds = [], outcome = 'SUCCESSFUL', reason = 'Confirmación de visita realizada') {
-  if (!companyContextOrIdOrPhone) return { completed: [], notFound: queriesOrIds };
+  if (!companyContextOrIdOrPhone) return { completed: [], notFound: queriesOrIds, ambiguous: [] };
   const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
   const companyId = tenant?.companyId;
   const cleanPhone = tenant?.phone;
-  if (!companyId) return { completed: [], notFound: queriesOrIds };
+  if (!companyId) return { completed: [], notFound: queriesOrIds, ambiguous: [] };
 
   const completed = [];
   const notFound = [];
+  const ambiguous = [];
   const now = new Date().toISOString();
 
+  const norm = str => String(str || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+
   for (const q of queriesOrIds) {
+    const cleanQ = norm(q);
     const matches = findAppointments(companyContextOrIdOrPhone, q);
+    let target = null;
     if (matches.length === 1) {
-      const apt = matches[0];
+      target = matches[0];
+    } else if (matches.length > 1) {
+      const exactIdMatch = matches.find(m => norm(m.id) === cleanQ);
+      if (exactIdMatch) {
+        target = exactIdMatch;
+      } else {
+        const uncompleted = matches.filter(m => m.status !== 'COMPLETED' && m.status !== 'CANCELLED');
+        if (uncompleted.length === 1) {
+          target = uncompleted[0];
+        } else if (uncompleted.length > 1) {
+          ambiguous.push({ query: q, matches: uncompleted });
+          continue;
+        } else {
+          notFound.push(q);
+          continue;
+        }
+      }
+    }
+
+    if (target) {
+      const apt = target;
       db.prepare(`
         UPDATE appointments
         SET status = 'COMPLETED',
@@ -2378,7 +2529,7 @@ export function completeAppointments(companyContextOrIdOrPhone, queriesOrIds = [
     }
   }
 
-  return { completed, notFound };
+  return { completed, notFound, ambiguous };
 }
 
 /**
@@ -2392,9 +2543,26 @@ export function updateAppointment(companyContextOrIdOrPhone, query, changes = {}
 
   const matches = findAppointments(companyContextOrIdOrPhone, query);
   if (matches.length === 0) return null;
-  if (matches.length > 1) return { ambiguous: true, matches };
+  let targetId = null;
+  if (matches.length > 1) {
+    const norm = str => String(str || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+    const cleanQ = norm(query);
+    const exactIdMatch = matches.find(m => norm(m.id) === cleanQ);
+    if (exactIdMatch) {
+      targetId = exactIdMatch.id;
+    } else {
+      const uncompleted = matches.filter(m => m.status !== 'COMPLETED' && m.status !== 'CANCELLED');
+      if (uncompleted.length === 1) {
+        targetId = uncompleted[0].id;
+      } else {
+        return { ambiguous: true, matches: uncompleted.length > 1 ? uncompleted : matches };
+      }
+    }
+  } else {
+    targetId = matches[0].id;
+  }
 
-  const row = getAppointment(companyContextOrIdOrPhone, matches[0].id);
+  const row = getAppointment(companyContextOrIdOrPhone, targetId);
   if (!row) return null;
   const now = new Date().toISOString();
 
@@ -2445,9 +2613,24 @@ export function cancelAppointment(companyContextOrIdOrPhone, query, reason = 'Ca
 
   const matches = findAppointments(companyContextOrIdOrPhone, query);
   if (matches.length === 0) return null;
-  if (matches.length > 1) return { ambiguous: true, matches };
-
-  const row = matches[0];
+  let row = null;
+  if (matches.length > 1) {
+    const norm = str => String(str || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+    const cleanQ = norm(query);
+    const exactIdMatch = matches.find(m => norm(m.id) === cleanQ);
+    if (exactIdMatch) {
+      row = exactIdMatch;
+    } else {
+      const activeMatches = matches.filter(m => m.status !== 'CANCELLED' && m.status !== 'COMPLETED');
+      if (activeMatches.length === 1) {
+        row = activeMatches[0];
+      } else {
+        return { ambiguous: true, matches: activeMatches.length > 1 ? activeMatches : matches };
+      }
+    }
+  } else {
+    row = matches[0];
+  }
   const now = new Date().toISOString();
 
   db.prepare(`
@@ -2481,22 +2664,37 @@ export function listAppointments(companyContextOrIdOrPhone, filter = 'all') {
   if (!companyId) return [];
 
   const now = new Date();
-  const todayStr = now.toISOString().split('T')[0];
+  const todayStr = now.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
 
-  const tomorrow = new Date(now);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowStr = tomorrow.toISOString().split('T')[0];
+  const tomorrow = new Date(Date.now() + 24 * 3600 * 1000);
+  const tomorrowStr = tomorrow.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
 
   const tenantFilter = "company_id = ?";
   const tenantParams = [companyId];
 
   let rows = [];
   if (filter === 'today') {
-    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND date = ? AND status != 'CANCELLED' ORDER BY time ASC`);
+    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND date = ? AND status NOT IN ('CANCELLED', 'COMPLETED') ORDER BY time ASC`);
     rows = stmt.all(...tenantParams, todayStr);
   } else if (filter === 'tomorrow') {
-    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND date = ? AND status != 'CANCELLED' ORDER BY time ASC`);
+    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND date = ? AND status NOT IN ('CANCELLED', 'COMPLETED') ORDER BY time ASC`);
     rows = stmt.all(...tenantParams, tomorrowStr);
+  } else if (filter === 'week' || filter === 'this_week') {
+    const weekEnd = new Date(Date.now() + 7 * 24 * 3600 * 1000);
+    const weekEndStr = weekEnd.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND date >= ? AND date <= ? AND status NOT IN ('CANCELLED', 'COMPLETED') ORDER BY date ASC, time ASC`);
+    rows = stmt.all(...tenantParams, todayStr, weekEndStr);
+  } else if (filter === 'month' || filter === 'this_month') {
+    const madridParts = todayStr.split('-');
+    const year = parseInt(madridParts[0], 10);
+    const month = parseInt(madridParts[1], 10);
+    const lastDay = new Date(year, month, 0).getDate();
+    const monthEndStr = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND date >= ? AND date <= ? AND status NOT IN ('CANCELLED', 'COMPLETED') ORDER BY date ASC, time ASC`);
+    rows = stmt.all(...tenantParams, todayStr, monthEndStr);
+  } else if (filter === 'upcoming' || filter === 'pending') {
+    const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND date >= ? AND status NOT IN ('CANCELLED', 'COMPLETED') ORDER BY date ASC, time ASC`);
+    rows = stmt.all(...tenantParams, todayStr);
   } else if (filter === 'completed') {
     const stmt = db.prepare(`SELECT * FROM appointments WHERE ${tenantFilter} AND status = 'COMPLETED' ORDER BY date DESC, time DESC`);
     rows = stmt.all(...tenantParams);
@@ -2596,11 +2794,152 @@ export function getAppointmentHistory(companyContextOrIdOrPhone, appointmentId) 
 
 // ─── Métodos del Secretario Digital (Briefing y Seguimiento) ──────────────────
 
+/**
+ * Recupera todas las facturas asociadas a un presupuesto (excluyendo anuladas), ordenadas cronológicamente.
+ * @param {string|object} phoneOrCompany - Contexto de la empresa / tenant
+ * @param {string} budgetId - ID del presupuesto
+ * @returns {Array<object>} Facturas parseadas
+ */
+export function getInvoicesByBudgetId(phoneOrCompany, budgetId) {
+  if (!budgetId) return [];
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  if (!companyId) return [];
+
+  const rows = db.prepare(`
+    SELECT id, budget_id, client_name, total_amount, status, created_at, data_json 
+    FROM invoices 
+    WHERE company_id = ? AND budget_id = ? AND status != 'ANULADA'
+    ORDER BY created_at ASC
+  `).all(companyId, String(budgetId).trim());
+
+  return rows.map(r => {
+    let parsed = {};
+    try { parsed = JSON.parse(r.data_json || '{}'); } catch {}
+    return {
+      ...parsed,
+      id: r.id,
+      budgetId: r.budget_id,
+      clientName: r.client_name || parsed.client?.name || 'Cliente Particular',
+      totalAmount: Number(r.total_amount || parsed.financials?.totalAmount || 0),
+      status: r.status,
+      createdAt: r.created_at
+    };
+  });
+}
+
+/**
+ * Calcula un desglose financiero integral de un proyecto/obra distinguiendo:
+ * - Presupuesto acordado
+ * - Importe facturado
+ * - Importe pendiente de facturar
+ * - Importe cobrado
+ * - Importe pendiente de cobrar
+ * - Partidas ya facturadas vs pendientes
+ * @param {string|object} phoneOrCompany
+ * @param {string|object} budgetOrId
+ */
+export function getProjectBillingSummary(phoneOrCompany, budgetOrId) {
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  if (!companyId) return null;
+
+  let budget = null;
+  if (typeof budgetOrId === 'object' && budgetOrId !== null) {
+    budget = budgetOrId;
+  } else if (typeof budgetOrId === 'string') {
+    budget = getBudget(phoneOrCompany, budgetOrId);
+  }
+  if (!budget) return null;
+
+  const budgetId = budget.id;
+  const budgetTotal = Number(budget.financials?.totalAmount || 0);
+
+  // Facturas emitidas
+  const invoices = getInvoicesByBudgetId(phoneOrCompany, budgetId);
+
+  // Cobros registrados
+  const paymentRows = db.prepare('SELECT id, amount, created_at FROM payments WHERE company_id = ? AND budget_id = ?').all(companyId, budgetId);
+  const totalPaid = Math.round(paymentRows.reduce((sum, p) => sum + (Number(p.amount) || 0), 0) * 100) / 100;
+
+  // Clasificar facturas
+  let advanceInvoiced = 0;
+  let phaseInvoiced = 0;
+  let finalInvoiced = 0;
+  let regularInvoiced = 0;
+
+  const invoicedItemIds = new Set();
+  const invoicedItemDescriptions = new Set();
+
+  for (const inv of invoices) {
+    const invTotal = Number(inv.financials?.totalAmount || inv.totalAmount || 0);
+    const type = (inv.type || '').toUpperCase();
+    if (type === 'ANTICIPO') {
+      advanceInvoiced += invTotal;
+    } else if (type === 'FASE') {
+      phaseInvoiced += invTotal;
+      if (Array.isArray(inv.items)) {
+        for (const it of inv.items) {
+          if (it.id) invoicedItemIds.add(it.id);
+          if (it.description) invoicedItemDescriptions.add(it.description.toLowerCase().trim());
+        }
+      }
+    } else if (type === 'FINAL') {
+      finalInvoiced += invTotal;
+      if (Array.isArray(inv.items)) {
+        for (const it of inv.items) {
+          if (it.id) invoicedItemIds.add(it.id);
+          if (it.description) invoicedItemDescriptions.add(it.description.toLowerCase().trim());
+        }
+      }
+    } else {
+      regularInvoiced += invTotal;
+      if (Array.isArray(inv.items)) {
+        for (const it of inv.items) {
+          if (it.id) invoicedItemIds.add(it.id);
+          if (it.description) invoicedItemDescriptions.add(it.description.toLowerCase().trim());
+        }
+      }
+    }
+  }
+
+  // Partidas del presupuesto pendientes de facturar
+  const budgetItems = Array.isArray(budget.items) ? budget.items : [];
+  const uninvoicedItems = budgetItems.filter(it => {
+    if (it.id && invoicedItemIds.has(it.id)) return false;
+    const desc = (it.description || '').toLowerCase().trim();
+    if (desc && invoicedItemDescriptions.has(desc)) return false;
+    return true;
+  });
+
+  // Importe base de trabajo facturado (sin contar anticipos)
+  const workInvoiced = Math.round((phaseInvoiced + finalInvoiced + regularInvoiced) * 100) / 100;
+  const pendingToInvoice = Math.max(0, Math.round((budgetTotal - workInvoiced) * 100) / 100);
+  const pendingToCollect = Math.max(0, Math.round((budgetTotal - totalPaid) * 100) / 100);
+
+  return {
+    budgetId,
+    clientName: budget.client?.name || 'Cliente Particular',
+    budgetTotal,
+    workInvoiced,
+    advanceInvoiced: Math.round(advanceInvoiced * 100) / 100,
+    totalInvoiced: Math.round((workInvoiced + advanceInvoiced) * 100) / 100,
+    pendingToInvoice,
+    totalPaid,
+    pendingToCollect,
+    invoices,
+    invoicedItemIds,
+    uninvoicedItems,
+    isFullyInvoiced: pendingToInvoice <= 0.01,
+    isFullyCollected: pendingToCollect <= 0.01
+  };
+}
+
 export function getUnpaidInvoices(phoneOrCompany) {
   const tenant = resolveCompanyTenant(phoneOrCompany);
   const companyId = tenant?.companyId;
   if (!companyId) return [];
-  const rows = db.prepare("SELECT id, budget_id, client_name, total_amount, status, created_at, data_json FROM invoices WHERE company_id = ? AND status != 'PAGADA' ORDER BY created_at ASC").all(companyId);
+  const rows = db.prepare("SELECT id, budget_id, client_name, total_amount, status, created_at, data_json FROM invoices WHERE company_id = ? AND status NOT IN ('PAGADA', 'ANULADA', 'RECTIFICADA') ORDER BY created_at ASC").all(companyId);
   const now = Date.now();
   return rows.map(r => {
     let parsed = null;
@@ -2619,6 +2958,51 @@ export function getUnpaidInvoices(phoneOrCompany) {
       invoice: parsed
     };
   });
+}
+
+export function getPendingWorksDebt(phoneOrCompany) {
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  if (!companyId) return [];
+
+  // Presupuestos aceptados/firmados/finalizados con saldo pendiente
+  const rows = db.prepare("SELECT id, client_name, client_phone, client_address, total_amount, status, created_at, updated_at, data_json FROM budgets WHERE company_id = ? AND status IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO') ORDER BY created_at ASC").all(companyId);
+  const results = [];
+  for (const r of rows) {
+    let parsed = null;
+    try { parsed = JSON.parse(r.data_json); } catch(e) {}
+    const totalAmount = r.total_amount || parsed?.financials?.totalAmount || 0;
+
+    const paymentRows = db.prepare('SELECT amount FROM payments WHERE company_id = ? AND budget_id = ?').all(companyId, r.id);
+    const tablePaid = paymentRows.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const jsonPayments = Array.isArray(parsed?.payments) ? parsed.payments : [];
+    const jsonPaid = jsonPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    const summaryPaid = Number(parsed?.paymentSummary?.totalPaid) || 0;
+    const totalPaid = Math.max(tablePaid, jsonPaid, summaryPaid);
+
+    let remainingBalance = Math.max(0, totalAmount - totalPaid);
+    if (parsed?.paymentSummary?.remainingBalance !== undefined) {
+      remainingBalance = Math.min(remainingBalance, Number(parsed.paymentSummary.remainingBalance));
+    }
+    if (totalPaid >= totalAmount) {
+      remainingBalance = 0;
+    }
+
+    if (remainingBalance > 0.01) {
+      results.push({
+        budgetId: r.id,
+        clientName: r.client_name || parsed?.client?.name || 'Cliente Particular',
+        clientPhone: r.client_phone || parsed?.client?.phone || null,
+        clientAddress: r.client_address || parsed?.client?.address || '',
+        totalAmount,
+        totalPaid,
+        remainingBalance,
+        status: r.status,
+        createdAt: r.created_at
+      });
+    }
+  }
+  return results;
 }
 
 export function getBudgetsPendingFollowUp(phoneOrCompany) {
@@ -2653,52 +3037,259 @@ export function getBudgetsPendingFollowUp(phoneOrCompany) {
  * Calcula los ingresos facturados, cobrados y pendientes en un mes concreto.
  * Usado por el Intent Router para responder "¿cuánto llevo este mes?" sin IA.
  * @param {string|object} phoneOrCompany
- * @param {number} year  - ej. 2026
- * @param {number} month - 1 a 12
- * @returns {{ invoiceCount, budgetCount, totalInvoiced, totalCollected, totalPending }}
+/**
+ * Obtiene las estadísticas de facturación y cobros reales para un periodo temporal específico
+ * (mes, trimestre, cuatrimestre, semana, hoy, año).
+ * 
+ * @param {string|object} phoneOrCompany - Contexto del tenant
+ * @param {object} periodOptions - { period, queryType, year, month, quarter, fourMonth }
+ * @returns {object} Resumen completo con totales, listas de cobros y facturas
  */
-export function getMonthlyRevenue(phoneOrCompany, year, month) {
+export function getPeriodRevenue(phoneOrCompany, periodOptions = {}) {
   const tenant = resolveCompanyTenant(phoneOrCompany);
   const companyId = tenant?.companyId;
-  if (!companyId) return { invoiceCount: 0, budgetCount: 0, totalInvoiced: 0, totalCollected: 0, totalPending: 0 };
-  const startISO = new Date(year, month - 1, 1, 0, 0, 0).toISOString();
-  const endISO   = new Date(year, month, 0, 23, 59, 59, 999).toISOString();
+  const period = periodOptions.period || 'month';
+  const queryType = periodOptions.queryType || 'collected';
 
-  // Facturas del mes
-  const invoiceRows = db.prepare(`
-    SELECT total_amount, status, data_json
-    FROM invoices
+  if (!companyId) {
+    return {
+      period,
+      periodLabel: 'Periodo no disponible',
+      queryType,
+      totalCollected: 0,
+      totalInvoiced: 0,
+      totalPending: 0,
+      invoiceCount: 0,
+      budgetCount: 0,
+      paymentCount: 0,
+      paymentsList: [],
+      invoicesList: []
+    };
+  }
+
+  const now = new Date();
+  const curYear = now.getFullYear();
+  const curMonth = now.getMonth() + 1; // 1..12
+  const curDay = now.getDate();
+
+  let startISO, endISO, periodLabel;
+
+  if (period === 'today') {
+    startISO = new Date(curYear, curMonth - 1, curDay, 0, 0, 0, 0).toISOString();
+    endISO   = new Date(curYear, curMonth - 1, curDay, 23, 59, 59, 999).toISOString();
+    periodLabel = `Hoy (${String(curDay).padStart(2, '0')}/${String(curMonth).padStart(2, '0')}/${curYear})`;
+  } else if (period === 'week') {
+    const d = new Date(curYear, curMonth - 1, curDay);
+    const day = (d.getDay() + 6) % 7; // 0=Lunes, 6=Domingo
+    const mon = new Date(curYear, curMonth - 1, curDay - day, 0, 0, 0, 0);
+    const sun = new Date(curYear, curMonth - 1, curDay - day + 6, 23, 59, 59, 999);
+    startISO = mon.toISOString();
+    endISO   = sun.toISOString();
+    const mStr = `${String(mon.getDate()).padStart(2, '0')}/${String(mon.getMonth() + 1).padStart(2, '0')}`;
+    const sStr = `${String(sun.getDate()).padStart(2, '0')}/${String(sun.getMonth() + 1).padStart(2, '0')}`;
+    periodLabel = `Esta semana (${mStr} al ${sStr})`;
+  } else if (period === 'quarter') {
+    const y = Number(periodOptions.year) || curYear;
+    let q = Number(periodOptions.quarter);
+    if (!q || q < 1 || q > 4) q = Math.floor((curMonth - 1) / 3) + 1;
+    const startM = (q - 1) * 3;
+    const endM = startM + 3;
+    startISO = new Date(y, startM, 1, 0, 0, 0, 0).toISOString();
+    endISO   = new Date(y, endM, 0, 23, 59, 59, 999).toISOString();
+    periodLabel = `${q}º Trimestre ${y}`;
+  } else if (period === 'four_month') {
+    const y = Number(periodOptions.year) || curYear;
+    let c = Number(periodOptions.fourMonth);
+    if (!c || c < 1 || c > 3) c = Math.floor((curMonth - 1) / 4) + 1;
+    const startM = (c - 1) * 4;
+    const endM = startM + 4;
+    startISO = new Date(y, startM, 1, 0, 0, 0, 0).toISOString();
+    endISO   = new Date(y, endM, 0, 23, 59, 59, 999).toISOString();
+    periodLabel = `${c}er Cuatrimestre ${y}`;
+  } else if (period === 'year') {
+    const y = Number(periodOptions.year) || curYear;
+    startISO = new Date(y, 0, 1, 0, 0, 0, 0).toISOString();
+    endISO   = new Date(y, 12, 0, 23, 59, 59, 999).toISOString();
+    periodLabel = `Año ${y}`;
+  } else {
+    // period === 'month' (por defecto)
+    const y = Number(periodOptions.year) || curYear;
+    let m = Number(periodOptions.month) || curMonth;
+    if (m < 1 || m > 12) m = curMonth;
+    startISO = new Date(y, m - 1, 1, 0, 0, 0, 0).toISOString();
+    endISO   = new Date(y, m, 0, 23, 59, 59, 999).toISOString();
+    const monthNames = [
+      'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+      'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+    ];
+    periodLabel = `${monthNames[m - 1]} ${y}`;
+  }
+
+  // 1. Cobros en la tabla 'payments'
+  const paymentRows = db.prepare(`
+    SELECT id, budget_id, amount, method, concept, data_json, created_at
+    FROM payments
     WHERE company_id = ? AND created_at >= ? AND created_at <= ?
+    ORDER BY created_at ASC
   `).all(companyId, startISO, endISO);
 
-  let totalInvoiced  = 0;
-  let totalCollected = 0;
-  let totalPending   = 0;
+  const paymentsList = [];
+  const seenPaymentIds = new Set();
+  let totalPaymentsTable = 0;
+
+  for (const r of paymentRows) {
+    seenPaymentIds.add(r.id);
+    let parsed = null;
+    try { parsed = JSON.parse(r.data_json); } catch (e) {}
+
+    let clientName = parsed?.clientName || parsed?.client?.name || '';
+    if (!clientName && r.budget_id) {
+      const bRow = db.prepare('SELECT client_name, data_json FROM budgets WHERE id = ? AND company_id = ?').get(r.budget_id, companyId);
+      if (bRow) {
+        clientName = bRow.client_name;
+        if (!clientName) {
+          try { clientName = JSON.parse(bRow.data_json)?.client?.name || ''; } catch (e) {}
+        }
+      }
+    }
+    const amt = Number(r.amount) || 0;
+    totalPaymentsTable += amt;
+    paymentsList.push({
+      id: r.id,
+      amount: amt,
+      method: r.method || 'Bizum',
+      concept: r.concept || parsed?.concept || 'Pago recibido',
+      clientName: clientName || 'Cliente Particular',
+      budgetId: r.budget_id || null,
+      date: (r.created_at || '').split('T')[0]
+    });
+  }
+
+  // 2. Cobros registrados en presupuestos (data_json.paymentSummary o data_json.payments)
+  const budgetRows = db.prepare(`
+    SELECT id, client_name, data_json, created_at, updated_at
+    FROM budgets
+    WHERE company_id = ?
+  `).all(companyId);
+
+  for (const b of budgetRows) {
+    let parsed = null;
+    try { parsed = JSON.parse(b.data_json); } catch (e) {}
+    if (!parsed) continue;
+
+    const bClientName = b.client_name || parsed.client?.name || 'Cliente Particular';
+    const bPayments = [
+      ...(Array.isArray(parsed.paymentSummary?.payments) ? parsed.paymentSummary.payments : []),
+      ...(Array.isArray(parsed.payments) ? parsed.payments : [])
+    ];
+
+    for (const p of bPayments) {
+      const pId = p.id || `BPAY-${b.id}-${p.amount}-${p.date || ''}`;
+      if (seenPaymentIds.has(pId)) continue;
+
+      const pDateStr = p.date || p.timestamp || p.created_at;
+      if (!pDateStr) continue;
+      const pTime = new Date(pDateStr).getTime();
+      const sTime = new Date(startISO).getTime();
+      const eTime = new Date(endISO).getTime();
+      if (!isNaN(pTime) && pTime >= sTime && pTime <= eTime) {
+        seenPaymentIds.add(pId);
+        const amt = Number(p.amount) || 0;
+        totalPaymentsTable += amt;
+        paymentsList.push({
+          id: pId,
+          amount: amt,
+          method: p.method || 'Bizum',
+          concept: p.concept || 'Entrega a cuenta',
+          clientName: bClientName,
+          budgetId: b.id,
+          date: (typeof pDateStr === 'string' ? pDateStr.split('T')[0] : '')
+        });
+      }
+    }
+  }
+
+  // 3. Facturas del periodo
+  const invoiceRows = db.prepare(`
+    SELECT id, budget_id, total_amount, status, data_json, created_at
+    FROM invoices
+    WHERE company_id = ? AND created_at >= ? AND created_at <= ? AND status != 'ANULADA'
+    ORDER BY created_at ASC
+  `).all(companyId, startISO, endISO);
+
+  let totalInvoiced = 0;
+  let totalPendingFromInvoices = 0;
+  let invoiceCollectedFallback = 0;
+  const invoicesList = [];
 
   for (const r of invoiceRows) {
     let parsed = null;
     try { parsed = JSON.parse(r.data_json); } catch (e) {}
-    const total    = r.total_amount || parsed?.financials?.totalAmount || 0;
-    const advance  = parsed?.financials?.advanceAmount || 0;
+    const total = r.total_amount || parsed?.financials?.totalAmount || 0;
+    const advance = parsed?.financials?.advanceAmount || 0;
     const remaining = parsed?.financials?.remainingAmount ?? Math.max(0, total - advance);
-    const collected = r.status === 'PAGADA' ? total : advance;
-    totalInvoiced  += total;
-    totalCollected += collected;
-    totalPending   += remaining;
+    const clientName = r.client_name || parsed?.client?.name || 'Cliente Particular';
+
+    totalInvoiced += total;
+    totalPendingFromInvoices += remaining;
+
+    invoicesList.push({
+      id: r.id,
+      totalAmount: total,
+      status: r.status,
+      clientName,
+      date: (r.created_at || '').split('T')[0]
+    });
+
+    // Si la factura tiene estado 'PAGADA' o anticipo y no se registraron filas individuales en payments,
+    // se mantiene la compatibilidad como cobro
+    if (paymentsList.length === 0) {
+      const collected = r.status === 'PAGADA' ? total : advance;
+      invoiceCollectedFallback += collected;
+    }
   }
 
-  // Presupuestos del mes
   const budgetCount = db.prepare(`
     SELECT COUNT(*) as c FROM budgets
     WHERE company_id = ? AND created_at >= ? AND created_at <= ?
   `).get(companyId, startISO, endISO)?.c || 0;
 
+  const totalCollected = Number((totalPaymentsTable > 0 ? totalPaymentsTable : invoiceCollectedFallback).toFixed(2));
+  const totalInvoicedFixed = Number(totalInvoiced.toFixed(2));
+  const totalPendingFixed = Number(totalPendingFromInvoices.toFixed(2));
+
   return {
-    invoiceCount:  invoiceRows.length,
-    budgetCount:   Number(budgetCount),
-    totalInvoiced:  Number(totalInvoiced.toFixed(2)),
-    totalCollected: Number(totalCollected.toFixed(2)),
-    totalPending:   Number(totalPending.toFixed(2))
+    period,
+    periodLabel,
+    queryType,
+    startDate: startISO,
+    endDate: endISO,
+    totalCollected,
+    totalInvoiced: totalInvoicedFixed,
+    totalPending: totalPendingFixed,
+    invoiceCount: invoiceRows.length,
+    budgetCount: Number(budgetCount),
+    paymentCount: paymentsList.length,
+    paymentsList,
+    invoicesList
+  };
+}
+
+/**
+ * Devuelve el resumen financiero mensual (retrocompatibilidad).
+ * @param {string|object} phoneOrCompany
+ * @param {number} year  - ej. 2026
+ * @param {number} month - 1 a 12
+ * @returns {{ invoiceCount, budgetCount, totalInvoiced, totalCollected, totalPending }}
+ */
+export function getMonthlyRevenue(phoneOrCompany, year, month) {
+  const stats = getPeriodRevenue(phoneOrCompany, { period: 'month', year, month });
+  return {
+    invoiceCount:  stats.invoiceCount,
+    budgetCount:   stats.budgetCount,
+    totalInvoiced: stats.totalInvoiced,
+    totalCollected: stats.totalCollected,
+    totalPending:  stats.totalPending
   };
 }
 
@@ -2725,6 +3316,7 @@ export function listAppointmentsWeek(companyContextOrIdOrPhone) {
     WHERE company_id = ?
       AND date >= ?
       AND date <= ?
+      AND status NOT IN ('CANCELLED', 'COMPLETED')
     ORDER BY date ASC, time ASC
   `).all(companyId, todayStr, weekEndStr);
 
@@ -2938,20 +3530,46 @@ export function markShoppingItemBought(companyContextOrIdOrPhone, queryOrId, cli
   const cleanQuery = String(queryOrId).trim().toLowerCase();
   const now = new Date().toISOString();
 
-  let sql = `
+  // Helper de normalización y extracción de palabras clave para casación flexible
+  const normalize = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+  const qNorm = normalize(queryOrId);
+  const stopWords = new Set(['de', 'la', 'el', 'los', 'las', 'un', 'una', 'unos', 'unas', 'color', 'para', 'm2', 'ud', 'kg', 'botes', 'bote', 'sacos', 'saco', 'obra']);
+  const qWords = qNorm.split(' ').filter(w => w.length > 2 && !stopWords.has(w));
+
+  const allPending = db.prepare(`
     SELECT * FROM shopping_items
     WHERE company_id = ? AND status = 'PENDING'
-      AND (id = ? OR LOWER(description) LIKE ?)
-  `;
-  const params = [companyId, queryOrId, `%${cleanQuery}%`];
+  `).all(companyId);
 
-  if (clientQuery && typeof clientQuery === 'string' && clientQuery.trim() !== '') {
-    sql += " AND LOWER(client_name) LIKE ?";
-    params.push(`%${clientQuery.trim().toLowerCase()}%`);
+  if (allPending.length === 0) return [];
+
+  function itemMatches(it) {
+    if (it.id === queryOrId) return true;
+    const dNorm = normalize(it.description);
+    if (dNorm.includes(qNorm) || qNorm.includes(dNorm)) return true;
+    if (qWords.length === 0) return false;
+    const dWords = dNorm.split(' ').filter(w => w.length > 2 && !stopWords.has(w));
+    return qWords.every(qw => dWords.some(dw => dw.includes(qw) || qw.includes(dw)));
   }
 
-  const rows = db.prepare(sql).all(...params);
-  if (rows.length === 0) return [];
+  let candidates = [];
+  // 1. Si se especificó cliente, intentar primero dentro de ese cliente
+  if (clientQuery && typeof clientQuery === 'string' && clientQuery.trim() !== '') {
+    const cNorm = normalize(clientQuery);
+    const clientItems = allPending.filter(it => normalize(it.client_name).includes(cNorm) || cNorm.includes(normalize(it.client_name)));
+    const matchedInClient = clientItems.filter(itemMatches);
+    if (matchedInClient.length > 0) {
+      candidates = matchedInClient;
+    }
+  }
+
+  // 2. Si no se especificó cliente, o no se encontró en el cliente especificado (ej. error de contexto o material en otra obra),
+  // buscar en toda la lista de compras pendientes de la empresa
+  if (candidates.length === 0) {
+    candidates = allPending.filter(itemMatches);
+  }
+
+  if (candidates.length === 0) return [];
 
   const updateStmt = db.prepare(`
     UPDATE shopping_items
@@ -2960,7 +3578,7 @@ export function markShoppingItemBought(companyContextOrIdOrPhone, queryOrId, cli
   `);
 
   const updated = [];
-  for (const r of rows) {
+  for (const r of candidates) {
     updateStmt.run(now, r.id, companyId);
     updated.push({
       id: r.id,
@@ -3053,8 +3671,18 @@ export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
 
   // 2. Pagos acumulados scoped por tenant
   const paymentRows = db.prepare('SELECT amount FROM payments WHERE company_id = ? AND budget_id = ?').all(companyId, budgetId);
-  const totalPaid = paymentRows.reduce((sum, p) => sum + (p.amount || 0), 0);
-  const remainingBalance = Math.max(0, totalAmount - totalPaid);
+  const tablePaid = paymentRows.reduce((sum, p) => sum + (p.amount || 0), 0);
+  const jsonPayments = Array.isArray(parsed?.payments) ? parsed.payments : [];
+  const jsonPaid = jsonPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+  const summaryPaid = Number(parsed?.paymentSummary?.totalPaid) || 0;
+  const totalPaid = Math.max(tablePaid, jsonPaid, summaryPaid);
+  let remainingBalance = Math.max(0, totalAmount - totalPaid);
+  if (parsed?.paymentSummary?.remainingBalance !== undefined) {
+    remainingBalance = Math.min(remainingBalance, Number(parsed.paymentSummary.remainingBalance));
+  }
+  if (totalPaid >= totalAmount) {
+    remainingBalance = 0;
+  }
 
   // 3. Fechas de obra
   const workMemory = parsed?.workMemory || {};
@@ -3277,34 +3905,86 @@ export function findClientsByName(phoneOrCompany, clientNameQuery) {
   const companyId = tenant?.companyId;
   if (!companyId) return [];
 
-  const q = String(clientNameQuery).trim().toLowerCase();
+  const norm = str => String(str || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  const qNorm = norm(clientNameQuery);
+  if (!qNorm) return [];
 
   const rows = db.prepare(`
     SELECT id, client_name, client_address, client_phone, total_amount, status, created_at, updated_at, data_json
     FROM budgets
-    WHERE company_id = ? AND (
-      LOWER(client_name) = ? OR
-      LOWER(client_name) LIKE ? OR
-      LOWER(client_address) LIKE ? OR
-      LOWER(id) = ?
-    )
+    WHERE company_id = ?
     ORDER BY updated_at DESC
-  `).all(companyId, q, `%${q}%`, `%${q}%`, q);
+  `).all(companyId);
 
-  return rows.map(r => {
-    let parsed = null;
-    try { parsed = JSON.parse(r.data_json); } catch(e) {}
-    return {
-      id: r.id,
-      clientName: r.client_name,
-      clientAddress: r.client_address || parsed?.client?.address || 'Sin dirección registrada',
-      clientPhone: r.client_phone || parsed?.client?.phone || null,
-      totalAmount: r.total_amount || parsed?.financials?.totalAmount || 0,
-      status: r.status,
-      createdAt: r.created_at,
-      updatedAt: r.updated_at
-    };
-  });
+  const matched = [];
+  for (const r of rows) {
+    const cName = norm(r.client_name);
+    const cAddr = norm(r.client_address);
+    const bId = norm(r.id);
+
+    if (
+      cName === qNorm ||
+      cName.includes(qNorm) ||
+      cAddr.includes(qNorm) ||
+      bId === qNorm
+    ) {
+      let parsed = null;
+      try { parsed = JSON.parse(r.data_json); } catch(e) {}
+      matched.push({
+        id: r.id,
+        clientName: r.client_name,
+        clientAddress: r.client_address || parsed?.client?.address || 'Sin dirección registrada',
+        clientPhone: r.client_phone || parsed?.client?.phone || null,
+        totalAmount: r.total_amount || parsed?.financials?.totalAmount || 0,
+        status: r.status,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at
+      });
+    }
+  }
+
+  // Si no hubo coincidencia directa por nombre completo, buscar por tokens combinados (Nombre + Dirección)
+  // ej: "Manolito Fernández el de la calle Rapuncel" -> busca que tokens de nombre y calle estén en cName + cAddr
+  if (matched.length === 0) {
+    const stopwords = new Set(['el', 'la', 'los', 'las', 'de', 'del', 'en', 'para', 'con', 'y', 'a', 'obra', 'segun', 'visita', 'calle', 'avenida', 'avda', 'plaza', 'cl', 'numero', 'n']);
+    const tokens = qNorm.split(/\s+/).filter(t => t.length >= 2 && !stopwords.has(t));
+    if (tokens.length >= 2) {
+      for (const r of rows) {
+        let parsed = null;
+        try { parsed = JSON.parse(r.data_json); } catch(e) {}
+        const addr = r.client_address || parsed?.client?.address || '';
+        const combined = (norm(r.client_name) + ' ' + norm(addr)).trim();
+        const allMatch = tokens.every(t => combined.includes(t));
+        if (allMatch) {
+          matched.push({
+            id: r.id,
+            clientName: r.client_name,
+            clientAddress: addr || 'Sin dirección registrada',
+            clientPhone: r.client_phone || parsed?.client?.phone || null,
+            totalAmount: r.total_amount || parsed?.financials?.totalAmount || 0,
+            status: r.status,
+            createdAt: r.created_at,
+            updatedAt: r.updated_at
+          });
+        }
+      }
+    }
+  }
+
+  // Si tras la búsqueda tenemos múltiples candidatos pero el término incluye una pista clara de dirección
+  if (matched.length > 1) {
+    const addrFiltered = matched.filter(c => {
+      const addr = norm(c.clientAddress);
+      if (qNorm.includes('obra segun visita') && (addr.includes('obra segun visita') || addr.includes('sin direccion'))) return true;
+      const addrTokens = addr.split(/[\s,.-]+/).filter(t => t.length >= 3 && !['calle', 'avenida', 'plaza', 'camino', 'numero'].includes(t));
+      return addrTokens.length > 0 && addrTokens.some(t => qNorm.includes(t));
+    });
+    if (addrFiltered.length > 0) {
+      return addrFiltered;
+    }
+  }
+
+  return matched;
 }
 
 /**

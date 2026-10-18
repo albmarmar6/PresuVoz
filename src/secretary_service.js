@@ -115,14 +115,14 @@ export function evaluateConfirmationResponse(pendingAction, userText = '') {
     return { status: 'IGNORED' };
   }
 
-  // Rechazo universal para cualquier nivel
-  if (/^(?:no\s*,?\s*(?:espera|cancelar?|gracias|d[eé]jalo)?|cancelar?|descarta|espera|d[eé]jalo|parar|ahora\s+no|olv[ií]dalo)$/i.test(raw)) {
+  // Rechazo universal para cualquier nivel (cualquier forma de negación común en español)
+  if (/^(?:no(?:\s*,?\s*(?:hace\s+falta(?:\s+nada)?|gracias|espera|cancelar?|d[eé]jalo(?:\s+as[ií])?|la\s+(?:a[ñn]adas|pongas)|lo\s+(?:a[ñn]adas|pongas|hagas)|hagas\s+nada|quiero|a[ñn]adas\s+nada))?|cancelar?|descarta|desc[aá]rtalo|espera|d[eé]jalo(?:\s+as[ií])?|parar?|ahora\s+no|olv[ií]da(?:lo|te)|para\s+nada|en\s+absoluto|pasa(?:\s+de\s+(?:eso|ello))?|nada|ningun[oa])$/i.test(raw)) {
     return { status: 'REJECTED' };
   }
 
   if (pendingAction.level === 'B') {
     // Aprobación simple Nivel B
-    if (/^(?:s[ií]|adelante|confirmo|confirmar|m[aá]ndalo|m[aá]ndaselo|hazlo|ok|vale|procede|dale|claro|por\s+favor|env[ií]alo|s[ií]\s+por\s+favor)$/i.test(raw)) {
+    if (/^(?:s[ií]|adelante|confirmo|confirmar|m[aá]ndalo|m[aá]ndaselo|hazlo|ok|vale|procede|dale|claro|por\s+favor|env[ií]alo|s[ií]\s+por\s+favor|a[ñn][aá]dela|s[ií],?\s*a[ñn][aá]dela|ponla|s[ií],?\s*ponla|a[ñn]ade|venga|perfecto|de\s+acuerdo)$/i.test(raw)) {
       return { status: 'APPROVED' };
     }
     return { status: 'IGNORED' };
@@ -247,7 +247,7 @@ export function generateEveningReminder(phone) {
   ];
 
   tomorrowApps.forEach((app, idx) => {
-    lines.push(`\n${idx + 1}️⃣ *${app.time} h* · ${app.clientName}`);
+    lines.push(`\n${formatListIndex(idx + 1)} *${app.time} h* · ${app.clientName}`);
     if (app.clientAddress) lines.push(`   📍 ${app.clientAddress}`);
     if (app.notes) lines.push(`   📝 ${app.notes}`);
   });
@@ -337,6 +337,15 @@ export function buildInvoiceFollowUpProposal(unpaidInvoiceItem, company = {}) {
 /**
  * Genera el mensaje interactivo para desambiguar cuando hay varios clientes con el mismo nombre.
  */
+export function formatListIndex(index) {
+  const num = Number(index);
+  const keycaps = ['', '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+  if (num >= 1 && num <= 10) {
+    return keycaps[num];
+  }
+  return `*${num}.*`;
+}
+
 export function formatDisambiguationPrompt(clientQuery, candidates, actionType = null) {
   const count = candidates?.length || 0;
   const countText = count === 2 ? '2 clientes/obras' : `${count} clientes/obras`;
@@ -345,16 +354,34 @@ export function formatDisambiguationPrompt(clientQuery, candidates, actionType =
     '━━━━━━━━━━━━━━━━━━━━━━━━━'
   ];
 
+  let totalAccumDebt = 0;
+  let hasDebtBreakdown = false;
+
   candidates.forEach((c, idx) => {
-    const numEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'][idx] || `${idx + 1}️⃣`;
+    const numEmoji = formatListIndex(idx + 1);
     const totalVal = Number(c.totalAmount) || 0;
     const totalStr = totalVal.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
     lines.push(`${numEmoji} *${c.clientName || 'Cliente'}*`);
     lines.push(`   📍 ${c.clientAddress || c.address || 'Sin dirección registrada'}`);
-    lines.push(`   📁 Presupuesto: *${c.id}* · Importe: *${totalStr}*`);
+    if (c.remainingBalance !== undefined) {
+      hasDebtBreakdown = true;
+      const paidVal = Number(c.totalPaid) || 0;
+      const remVal = Number(c.remainingBalance) || 0;
+      totalAccumDebt += remVal;
+      const paidStr = paidVal.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+      const remStr = remVal.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+      lines.push(`   📁 Presupuesto: *${c.id}* · Total: ${totalStr} · Cobrado: ${paidStr} · *Pendiente: ${remStr}*`);
+    } else {
+      lines.push(`   📁 Presupuesto: *${c.id}* · Importe: *${totalStr}*`);
+    }
   });
 
   lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+  if (hasDebtBreakdown) {
+    const accumStr = totalAccumDebt.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+    lines.push(`💰 *Total pendiente acumulado: ${accumStr}*`);
+    lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+  }
 
   let questionText = '👉 *¿A cuál de ellos te refieres?*';
   if (count === 2) {
@@ -362,6 +389,8 @@ export function formatDisambiguationPrompt(clientQuery, candidates, actionType =
       questionText = '👉 *¿A cuál de los dos corresponde este cobro?*';
     } else if (actionType === 'query_balance') {
       questionText = '👉 *¿De cuál de los dos deseas consultar el saldo?*';
+    } else if (actionType === 'modify_budget') {
+      questionText = '👉 *¿A cuál de los dos presupuestos deseas aplicar la modificación?*';
     } else if (actionType === 'invoice') {
       questionText = '👉 *¿A cuál de los dos deseas emitirle la factura?*';
     } else if (actionType === 'advance_invoice') {
@@ -378,6 +407,8 @@ export function formatDisambiguationPrompt(clientQuery, candidates, actionType =
       questionText = '👉 *¿A cuál de ellos corresponde este cobro?*';
     } else if (actionType === 'query_balance') {
       questionText = '👉 *¿De cuál deseas consultar el saldo?*';
+    } else if (actionType === 'modify_budget') {
+      questionText = '👉 *¿A cuál de los presupuestos deseas aplicar la modificación?*';
     } else if (actionType === 'invoice') {
       questionText = '👉 *¿A cuál deseas emitirle la factura?*';
     } else if (actionType === 'advance_invoice') {

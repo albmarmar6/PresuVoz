@@ -184,6 +184,37 @@ try {
     now
   );
   console.log('  🧾 Factura anticipo: FAC-DEMO-001 — Carlos Ruiz (660€)');
+
+  // ── 5. PAGO / RECIBO DE ANTICIPO ───────────────────────────────────────────
+  try {
+    const compRow = db.prepare('SELECT id FROM companies WHERE phone = ? LIMIT 1').get(PHONE);
+    const cId = compRow?.id || null;
+    db.prepare(`
+      INSERT OR IGNORE INTO payments (id, company_id, budget_id, amount, method, concept, data_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'REC-2026-001', cId, 'PRE-DEMO-002', 660.00, 'Bizum', 'Anticipo 30%',
+      JSON.stringify({
+        id: 'REC-2026-001',
+        budgetId: 'PRE-DEMO-002',
+        date: fmt(today),
+        amount: 660.00,
+        method: 'Bizum',
+        concept: 'Anticipo 30%',
+        previouslyPaid: 0,
+        totalPaid: 660.00,
+        totalAmount: 2200.00,
+        remainingBalance: 1540.00,
+        status: 'PARCIAL',
+        client: { name: 'Carlos Ruiz', address: 'Avenida de la Paz 12, Sevilla', nif: 'Consignado en contrato', phone: '698765432' },
+        company: { name: 'Carpintería y Reformas Manolo S.L.', cif: 'B-12345678', phone: '600 11 22 33', email: 'presupuestos@carpinteriamanolo.es', address: 'Polígono Industrial Nave 14, Sevilla' }
+      }),
+      now
+    );
+    console.log('  💰 Recibo anticipo: REC-2026-001 — Carlos Ruiz (660€)');
+  } catch (payErr) {
+    console.warn(`  ⚠️ Pago anticipo omitido: ${payErr.message}`);
+  }
 } catch(e) {
   console.warn(`  ⚠️  Factura omitida: ${e.message}`);
 }

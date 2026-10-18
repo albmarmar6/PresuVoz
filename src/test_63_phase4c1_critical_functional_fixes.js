@@ -199,8 +199,7 @@ export async function runTest63() {
       'Pintura y decoración',         // TRADE
       'Granada y alrededores',        // CITY
       'De 8 a 18',                    // WORKING_HOURS
-      '3',                            // PAYMENT_TERMS (50/50)
-      '30%',                          // ADVANCE
+      '3',                            // PAYMENT_TERMS (50/50 y anticipo 50%)
       '15 días',                      // QUOTE_VALIDITY
       'autónomo',                     // ENTITY_TYPE
       'Francisco Martínez López',     // FISCAL_NAME

@@ -12,6 +12,7 @@
  */
 
 import { db, getCompany, recordAuditLog } from './db_service.js';
+import { formatListIndex } from './secretary_service.js';
 
 function getNowInTimezone(tz = 'Europe/Madrid') {
   const now = new Date();
@@ -99,7 +100,7 @@ export async function runEveningBeforeReminderJob(sock, userSessions = new Map()
       ];
 
       appointments.forEach((app, idx) => {
-        lines.push(`${idx + 1}️⃣ *${app.time} h* — ${app.client_name}`);
+        lines.push(`${formatListIndex(idx + 1)} *${app.time} h* — ${app.client_name}`);
         if (app.client_address) lines.push(`   📍 ${app.client_address}`);
         if (app.notes) lines.push(`   📝 ${app.notes}`);
         lines.push('');
@@ -174,7 +175,7 @@ export async function runMorningReminderJob(sock, userSessions = new Map(), botS
       ];
 
       appointments.forEach((app, idx) => {
-        lines.push(`${idx + 1}️⃣ *${app.time} h* — ${app.client_name}`);
+        lines.push(`${formatListIndex(idx + 1)} *${app.time} h* — ${app.client_name}`);
         if (app.client_address) lines.push(`   📍 ${app.client_address}`);
         if (app.notes) lines.push(`   📝 ${app.notes}`);
         lines.push('');
@@ -222,10 +223,10 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
 
   const stmt = db.prepare(`
     SELECT * FROM appointments
-    WHERE date = ?
+    WHERE date <= ?
       AND status = 'CONFIRMED'
       AND end_of_day_review_sent_at IS NULL
-    ORDER BY company_id ASC, time ASC
+    ORDER BY company_id ASC, date ASC, time ASC
   `);
 
   const rows = stmt.all(dateStr);
@@ -242,28 +243,30 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
   for (const [companyId, { appointments }] of byCompany.entries()) {
     try {
       const targetJid = resolveSchedulerTargetJid(companyId, userSessions);
+      const hasPastDays = appointments.some(a => a.date < dateStr);
       
       const lines = [
-        '👋 *Antes de terminar la jornada:*',
+        hasPastDays ? '👋 *Recordatorio de visitas pasadas:*' : '👋 *Antes de terminar la jornada:*',
         '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        `Hoy tenías programadas estas *${appointments.length} visitas*:\n`
+        hasPastDays
+          ? `Tienes estas *${appointments.length} visitas* que ya han pasado sin confirmar el resultado:\n`
+          : `Hoy tenías programadas estas *${appointments.length} visitas*:\n`
       ];
 
       appointments.forEach((app, idx) => {
-        lines.push(`${idx + 1}️⃣ *${app.time} h* — ${app.client_name}${app.client_address ? ` (${app.client_address})` : ''}`);
+        const dateParts = (app.date || '').split('-');
+        const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}` : app.date;
+        const datePrefix = app.date !== dateStr ? `(${formattedDate}) ` : '';
+        lines.push(`${formatListIndex(idx + 1)} *${datePrefix}${app.time} h* — ${app.client_name}${app.client_address ? ` (${app.client_address})` : ''}`);
       });
 
       lines.push('');
-      lines.push('¿Han quedado todas realizadas?');
+      lines.push('¿Llegaste a realizarlas o necesitas cambiarlas?');
       lines.push('');
       lines.push('Puedes decirme:');
-      lines.push('• *"Todas hechas"*');
-      if (appointments.length > 1) {
-        lines.push(`• *"${appointments[0].client_name} sí, las demás no"*`);
-        lines.push(`• *"Pásame la de ${appointments[0].client_name} al jueves a las 18"*`);
-      } else {
-        lines.push('• *"Sí, hecha"* o *"No pude, pásala al jueves a las 17"*');
-      }
+      lines.push('• *"Todas hechas"* o *"Visita de ' + (appointments[0]?.client_name || 'cliente') + ' hecha"*');
+      lines.push('• *"Pásala a mañana a las 11"* (para reagendar)');
+      lines.push('• *"Cancela la visita de ' + (appointments[0]?.client_name || 'cliente') + '"* (para anularla)');
 
       const sent = await sock.sendMessage(targetJid, { text: lines.join('\n').trim() });
       if (sent?.status === 'BLOCKED') {
@@ -288,7 +291,13 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
         const session = userSessions.get(targetJid);
         session.pendingDayReview = {
           date: dateStr,
-          appointments: appointments.map(a => ({ id: a.id, clientName: a.client_name, time: a.time }))
+          appointments: appointments.map(a => ({
+            id: a.id,
+            clientName: a.client_name,
+            clientAddress: a.client_address,
+            date: a.date,
+            time: a.time
+          }))
         };
       }
 

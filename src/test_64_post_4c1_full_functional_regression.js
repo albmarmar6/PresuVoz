@@ -180,8 +180,7 @@ export async function runTest64() {
       'Albañilería y reformas',     // TRADE
       'Madrid capital',             // CITY
       'De 8:00 a 19:00',            // WORKING_HOURS
-      '2',                          // PAYMENT_TERMS (30/40/30)
-      '30%',                        // ADVANCE
+      '30% de anticipo',            // PAYMENT_TERMS (30% anticipo)
       '30 días',                    // QUOTE_VALIDITY
       'autonomo',                   // ENTITY_TYPE
       'Carlos Gómez Serrano',       // FISCAL_NAME

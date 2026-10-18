@@ -21,7 +21,7 @@
  */
 
 import crypto from 'node:crypto';
-import { db } from './db_service.js';
+import { db, getCompanyById } from './db_service.js';
 
 export const ROLES = {
   OWNER: 'OWNER',
@@ -117,17 +117,32 @@ export function resolveAuthenticatedContext(channel, channelIdentifier) {
     channelIdentityId: identity.id,
     role,
     permissions,
-    company: {
+    company: getCompanyById(identity.company_id) || {
       id: companyRow.id,
       companyId: companyRow.id,
       phone: companyRow.phone,
       name: companyRow.name,
       fiscalName: companyRow.fiscal_name || companyRow.name,
+      ownerName: companyRow.owner_name || null,
       cif: companyRow.cif,
       trade: companyRow.trade,
       address: companyRow.address,
       city: companyRow.city,
-      email: companyRow.email,
+      workingHours: companyRow.working_hours || null,
+      paymentTerms: companyRow.payment_terms || null,
+      quoteValidityDays: companyRow.quote_validity_days !== null && companyRow.quote_validity_days !== undefined ? companyRow.quote_validity_days : 15,
+      entityType: companyRow.entity_type || 'autonomo',
+      irpfRate: companyRow.irpf_rate !== null && companyRow.irpf_rate !== undefined ? companyRow.irpf_rate : 0,
+      invoiceSeries: companyRow.invoice_series || '2026-',
+      email: companyRow.email || null,
+      iban: companyRow.iban || null,
+      bizum: companyRow.bizum || null,
+      logoPath: companyRow.logo_path || null,
+      gestoriaEmail: companyRow.gestoria_email || null,
+      defaultTaxRate: companyRow.default_tax_rate !== null && companyRow.default_tax_rate !== undefined ? companyRow.default_tax_rate : 10,
+      defaultAdvance: companyRow.default_advance !== null && companyRow.default_advance !== undefined ? companyRow.default_advance : 30,
+      onboardingStep: companyRow.onboarding_step || null,
+      onboardingDataJson: companyRow.onboarding_data_json || null,
       isConfigured: Boolean(companyRow.name && companyRow.cif && !companyRow.onboarding_step)
     },
 

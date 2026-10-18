@@ -56,11 +56,11 @@ export class PresuVozParser {
 
     // Climatización
     {
-      regex: /(split|aire\s*acondicionado|clima)\s*([0-9]+\s*frigor[ií]as)?/i,
+      regex: /\b(split|aire\s*acondicionado|climatizaci[oó]n|clima)\b\s*([0-9]+\s*frigor[ií]as)?/i,
       formal: "Suministro e instalación de equipo de aire acondicionado tipo Split (unidad interior y exterior) con bomba de calor y alta eficiencia energética"
     },
     {
-      regex: /(l[ií]nea\s*frigor[ií]fica|tubos?\s*frigor[ií]ficos|soporte\s*(?:exterior|silentblock|clima|para\s+split))/i,
+      regex: /(l[ií]nea\s*frigor[ií]fica|tubos?\s*frigor[ií]ficos|soporte\s*(?:exterior|silentblock|\bclima\b|para\s+split))/i,
       formal: "Tendido de línea frigorífica aislada, soportes exteriores con amortiguadores antivibratorios silentblock y línea de desagüe"
     },
 
@@ -397,6 +397,22 @@ export class PresuVozParser {
       }
     }
 
+    return null;
+  }
+
+  /**
+   * Extrae retención de IRPF dictada por el usuario (% del 1 al 100)
+   */
+  static extractIRPFRate(text) {
+    if (!text || typeof text !== "string") return null;
+    const match = text.match(/\b(?:retenci[oó]n\s+(?:del?\s+)?(?:irpf\s+)?|irpf\s+)(?:(?:de|del|al?)\s+)?(\d{1,2}|siete|quince|diecinueve)\s*%/i);
+    if (match) {
+      const numWords = { "siete": 7, "quince": 15, "diecinueve": 19 };
+      const val = numWords[match[1].toLowerCase()] || parseInt(match[1], 10);
+      if (!isNaN(val) && val >= 0 && val <= 100) {
+        return val;
+      }
+    }
     return null;
   }
 

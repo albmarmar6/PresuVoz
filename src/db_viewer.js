@@ -220,10 +220,10 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     function renderBadge(status) {
       if (!status) return '<span class="px-2 py-0.5 rounded text-xs bg-slate-800 text-slate-400 font-mono">-</span>';
       const s = String(status).toUpperCase();
-      if (s === 'FINALIZADO' || s === 'COMPLETED' || s === 'REALIZADA') {
+      if (s === 'FINALIZADO' || s === 'COMPLETED' || s === 'REALIZADA' || s === 'FACTURADO' || s === 'LIQUIDADO') {
         return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">🏁 REALIZADA</span>';
       }
-      if (s === 'ACEPTADO' || s === 'PAGADA' || s === 'LIQUIDADO' || s === 'CONFIRMED' || s === 'CONFIRMADA' || s === 'FIRMADO') {
+      if (s === 'ACEPTADO' || s === 'CONFIRMED' || s === 'CONFIRMADA' || s === 'FIRMADO') {
         return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-cyan-500/15 text-cyan-400 border border-cyan-500/30">🟢 CONFIRMADA</span>';
       }
       if (s.includes('PENDIENTE')) {
@@ -231,6 +231,9 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
       }
       if (s === 'CANCELADA' || s === 'CANCELLED') {
         return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-red-500/15 text-red-400 border border-red-500/30">❌ CANCELADA</span>';
+      }
+      if (s === 'RECTIFICADA') {
+        return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-500/15 text-purple-400 border border-purple-500/30">🔄 RECTIFICADA</span>';
       }
       return '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-500/15 text-blue-400 border border-blue-500/30">🔵 ' + status + '</span>';
     }
@@ -284,15 +287,26 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
         let html = '<div class="overflow-x-auto rounded-xl border border-slate-800"><table class="w-full text-left text-xs">';
         html += '<thead class="bg-slate-950 text-slate-400 font-mono uppercase text-[11px] border-b border-slate-800"><tr>';
-        html += '<th class="p-3.5">Nº Factura</th><th class="p-3.5">Presupuesto Origen</th><th class="p-3.5">Cliente</th><th class="p-3.5">Importe Total</th><th class="p-3.5">Estado</th><th class="p-3.5">Fecha Emisión</th>';
+        html += '<th class="p-3.5">Nº Factura</th><th class="p-3.5">Presupuesto Origen</th><th class="p-3.5">Cliente</th><th class="p-3.5">Empresa / Tenant</th><th class="p-3.5">Importe Total</th><th class="p-3.5">Estado</th><th class="p-3.5">Fecha Emisión</th>';
         html += '</tr></thead><tbody class="divide-y divide-slate-800 bg-slate-900/60">';
 
         items.forEach(inv => {
+          const comp = (dbData.companies || []).find(c => c.id === inv.company_id);
+          const compLabel = comp?.name || (inv.company_id ? inv.company_id.slice(0, 8) + '...' : '-');
+          const isRect = (inv.type || inv.parsedData?.type || '').toUpperCase() === 'RECTIFICATIVA' || String(inv.series || '').toUpperCase() === 'R' || Boolean(inv.rectifies_invoice_id);
+          const displayNum = inv.parsedData?.naming || inv.parsedData?.displayNumber || inv.parsedData?.invoiceNumber || inv.parsedData?.visibleNumber || inv.id;
+          const rectBadge = isRect ? '<span class="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/30">SERIE R</span>' : '';
+          const subtitle = (displayNum !== inv.id && inv.id) ? '<div class="text-[10px] text-slate-500 font-mono mt-0.5">' + inv.id + '</div>' : '';
+          const rectNotice = (isRect && (inv.rectifies_invoice_id || inv.parsedData?.rectifiedInvoiceNumber))
+            ? '<div class="text-[10px] text-amber-400/90 font-mono mt-0.5">↳ Rectifica: ' + (inv.parsedData?.rectifiedInvoiceNumber || inv.rectifies_invoice_id) + '</div>'
+            : '';
+
           html += '<tr class="hover:bg-slate-800/50 transition-colors">';
-          html += '<td class="p-3.5 font-bold font-mono text-blue-400 text-sm">' + inv.id + '</td>';
+          html += '<td class="p-3.5 font-mono"><div class="font-bold ' + (isRect ? 'text-red-400' : 'text-blue-400') + ' text-sm flex items-center">' + displayNum + rectBadge + '</div>' + subtitle + rectNotice + '</td>';
           html += '<td class="p-3.5 font-mono text-slate-400">' + (inv.budget_id || '-') + '</td>';
           html += '<td class="p-3.5 font-semibold text-white">' + (inv.client_name || 'Cliente') + '</td>';
-          html += '<td class="p-3.5 font-bold text-white text-sm">' + formatEur(inv.total_amount) + '</td>';
+          html += '<td class="p-3.5 font-mono text-slate-300"><span class="px-2 py-0.5 rounded bg-slate-800 text-[11px] text-slate-300 border border-slate-700/50">' + compLabel + '</span></td>';
+          html += '<td class="p-3.5 font-bold ' + (inv.total_amount < 0 ? 'text-red-400' : 'text-white') + ' text-sm">' + formatEur(inv.total_amount) + '</td>';
           html += '<td class="p-3.5">' + renderBadge(inv.status) + '</td>';
           html += '<td class="p-3.5 font-mono text-slate-400 text-[11px]">' + (inv.created_at ? new Date(inv.created_at).toLocaleString('es-ES') : '-') + '</td>';
           html += '</tr>';

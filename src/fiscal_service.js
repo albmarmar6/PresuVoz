@@ -39,8 +39,48 @@ import {
 } from './db_service.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 0. FEATURE FLAGS & ISOLATION GUARDS (GESTORÍA Y FISCALIDAD)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Comprueba si el módulo de gestoría y cierre fiscal está habilitado.
+ * Por defecto en producción: FALSE (aislado).
+ * Solo se activa si FEATURE_GESTORIA='true' o en modo controlado ('test'/'mock').
+ *
+ * @returns {boolean}
+ */
+export function isGestoriaEnabled() {
+  const flag = String(process.env.FEATURE_GESTORIA || '').trim().toLowerCase();
+  return flag === 'true' || flag === 'test' || flag === 'mock';
+}
+
+/**
+ * Comprueba si estamos en modo de pruebas controlado sin efectos reales.
+ *
+ * @returns {boolean}
+ */
+export function isGestoriaTestMode() {
+  const flag = String(process.env.FEATURE_GESTORIA || '').trim().toLowerCase();
+  return flag === 'test' || flag === 'mock';
+}
+
+/**
+ * Comprueba si se permiten envíos de correo reales hacia gestorías externas.
+ * Requiere FEATURE_GESTORIA='true' Y FEATURE_GESTORIA_ALLOW_REAL_EMAILS='true'.
+ * Por defecto siempre FALSE para blindar producción.
+ *
+ * @returns {boolean}
+ */
+export function isGestoriaRealEmailAllowed() {
+  const flag = String(process.env.FEATURE_GESTORIA || '').trim().toLowerCase();
+  const allow = String(process.env.FEATURE_GESTORIA_ALLOW_REAL_EMAILS || '').trim().toLowerCase();
+  return flag === 'true' && allow === 'true';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 1. DETERMINACIÓN DE PERÍODOS FISCALES
 // ─────────────────────────────────────────────────────────────────────────────
+
 
 /**
  * Devuelve el rango de fechas [inicio, fin] de un trimestre y año dados.
@@ -183,7 +223,7 @@ export function getQuarterSummary(companyContextOrIdOrBusinessId, year = null, q
     const remaining = Math.max(0, round2(totalAmount - totalPaid));
     const isPaid = remaining <= 0.01;
 
-    const taxBase = Number(data.financials?.taxBase ?? data.tax_base ?? data.taxBase ?? 0);
+    const taxBase = Number(data.financials?.taxableBase ?? data.financials?.taxBase ?? data.tax_base ?? data.taxBase ?? 0);
     const taxRate = Number(data.financials?.taxRatePercentage ?? data.tax_rate ?? data.taxRate ?? 21);
     const taxAmount = Number(data.financials?.taxAmount ?? data.tax_amount ?? data.taxAmount ?? 0);
     const irpfRate = Number(data.financials?.irpfRatePercentage ?? data.irpf_rate ?? data.irpfRate ?? 0);
@@ -1384,6 +1424,15 @@ export async function sendFiscalPackageToGestoria({
   resendInstance = null,
   customEmail = null
 }) {
+  if (!isGestoriaEnabled()) {
+    console.warn('[FiscalService] Intento de envío bloqueado: FEATURE_GESTORIA=false.');
+    return {
+      success: false,
+      blocked: true,
+      message: 'Módulo de Gestoría y Cierre Fiscal desactivado por FEATURE_GESTORIA=false.'
+    };
+  }
+
   const context = companyContextOrId || businessId;
   if (!context) throw new Error("❌ [Tenant Boundary] sendFiscalPackageToGestoria requiere tenant context obligatorio.");
   const tenant = resolveCompanyTenant(context);
@@ -1398,11 +1447,12 @@ export async function sendFiscalPackageToGestoria({
   const { zipBuffer, pdfBuffer, fileName, quarterData, quality } = await buildGestoriaPackageZip(context, year, quarter);
   const { period, summary } = quarterData;
 
-  if (!resendInstance) {
-    // Si no hay API key de Resend en el entorno de pruebas, registramos el evento y devolvemos éxito simulado
-    console.log(`[FiscalService] Simulación de envío a ${targetEmail} (Sin Resend API Key)`);
+  // Blindaje de seguridad: si no se permiten envíos reales a gestorías o no hay resendInstance
+  if (!isGestoriaRealEmailAllowed() || !resendInstance) {
+    const simulatedRecipient = isGestoriaTestMode() ? 'test@gestoria-simulada.local' : targetEmail;
+    console.log(`[FiscalService] Modo de seguridad/pruebas activo: Envío a ${simulatedRecipient} simulado (Sin llamadas a API externa de correo)`);
     updateFiscalPeriodStatus(context, period.year, period.quarter, 'SENT', {
-      sentToEmail: targetEmail
+      sentToEmail: simulatedRecipient
     });
     recordAuditLog({
       businessId: context,
@@ -1410,12 +1460,13 @@ export async function sendFiscalPackageToGestoria({
       entityId: `${period.year}_Q${period.quarter}`,
       action: 'SEND_PACKAGE_GESTORIA',
       changedBy: 'USER_CONFIRMED',
-      reason: `Envío simulado a ${targetEmail}`
+      reason: `Envío simulado en modo seguro a ${simulatedRecipient}`
     });
     return {
       success: true,
       simulated: true,
-      message: `Paquete fiscal preparado y registrado para envío a ${targetEmail}`
+      targetEmail: simulatedRecipient,
+      message: `Paquete fiscal preparado y registrado en modo seguro para ${simulatedRecipient} (sin envíos externos)`
     };
   }
 

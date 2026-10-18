@@ -16,21 +16,25 @@
 
 import {
   getUnpaidInvoices,
+  getPendingWorksDebt,
   listBudgets,
   listAppointments,
   findClientsByName,
   getWorkMemory,
   getMonthlyRevenue,
+  getPeriodRevenue,
   listAppointmentsWeek,
   getDashboard,
   getCompany,
   getCompanyById,
-  saveCompany
+  saveCompany,
+  getProjectBillingSummary
 } from './db_service.js';
 
 import {
   getQuarterSummary,
-  formatQuarterWhatsAppSummary
+  formatQuarterWhatsAppSummary,
+  isGestoriaEnabled
 } from './fiscal_service.js';
 
 import {
@@ -100,6 +104,33 @@ export function extractDebtClient(text, knownNames = []) {
   if (!text || typeof text !== 'string') return null;
   const n = norm(text);
 
+  // Descartar si el mensaje es una acción o registro de cobro/pago (no es consulta de deuda)
+  if (/\b(?:ha\s+(?:hecho|pagado|ingresado|transferido)|pago\s+de|pago\s+del|primer\s+pago|cobro\s+de|transferencia\s+de)\b/i.test(n)) {
+    return null;
+  }
+
+  // Descartar si el mensaje solicita ver, pasar o descargar documentos (facturas, recibos, pdf)
+  if (/\b(?:facturas?|recibos?|pdf|documento)\b/i.test(n) && /\b(?:mandame|pasame|muestrame|ensename|ver|descargar|dame|enviar|enseña|muestra|pasa|manda)\b/i.test(n)) {
+    return null;
+  }
+  if (/^(?:las\s+|la\s+|los\s+|el\s+)?(?:facturas?|recibos?)\s+(?:de\s+|del\s+)/i.test(n)) {
+    return null;
+  }
+
+  // Descartar si el mensaje es una modificación, creación o edición de presupuestos o partidas
+  if (/\b(?:cambiar|cambia|modificar|modifica|anadir|añadir|anade|añade|quitar|quita|borrar|borra|eliminar|elimina|poner|pon|partida|partidas|precio|presupuesto|nueva\s+obra|nuevo\s+presupuesto)\b/i.test(n)) {
+    return null;
+  }
+
+  // Exigir intención explícita de consulta de deuda o saldo
+  const hasDebtIntent = /\b(?:debe|deben|adeuda|deuda|saldo|deber|queda\s+por\s+(?:pagar|cobrar)|falta\s+por\s+(?:pagar|cobrar)|quien\s+falta|cuanto\s+(?:dinero\s+)?(?:me\s+)?queda)\b/i.test(n)
+    || /cuanto\s+(?:todavia\s+|aun\s+|ahora\s+)?me\s+debe/i.test(n)
+    || /lo\s+de\s+/i.test(n);
+
+  if (!hasDebtIntent) {
+    return null;
+  }
+
   // 1. Coincidencia prioritaria con nombres conocidos del tenant (de mayor a menor longitud)
   if (knownNames && knownNames.length > 0) {
     const sortedKnown = [...knownNames].sort((a, b) => b.length - a.length);
@@ -113,16 +144,17 @@ export function extractDebtClient(text, knownNames = []) {
     }
   }
 
-  // 2. Descartar consultas de deuda global (estas van a ALL_DEBTS)
-  if (/(?:quien\s+me\s+debe|que\s+me\s+deben|cuanto\s+(?:dinero\s+)?(?:me\s+)?deben|total\s+(?:de\s+)?deudas|cuanto\s+(?:me\s+)?queda\s+por\s+cobrar|deudas?\s+pendientes|cobros?\s+pendientes|pasta)/i.test(n)) {
+  // 2. Descartar consultas de deuda puramente globales (estas van a ALL_DEBTS) siempre que no especifiquen cliente
+  if (/(?:quien\s+me\s+debe|que\s+me\s+deben|total\s+(?:de\s+)?deudas|deudas?\s+pendientes|cobros?\s+pendientes|pasta)$/i.test(n)
+    || /^(?:quien\s+(?:me\s+)?(?:queda|falta)\s+por\s+(?:pagar|cobrar)|a\s+quien\s+(?:le\s+)?(?:queda|falta)\s+por\s+(?:pagar|cobrar)|quien\s+falta\s+por\s+(?:pagar|cobrar)|quien\s+queda\s+por\s+(?:pagar|cobrar)|quienes\s+(?:me\s+)?(?:deben|quedan|faltan)|cuanto\s+(?:dinero\s+)?(?:me\s+)?deben\s+en\s+total|cuanto\s+(?:dinero\s+)?(?:me\s+)?queda\s+por\s+cobrar\s*)$/i.test(n)) {
     return null;
   }
 
   // 3. Patrones sintácticos para consultas de deuda hacia clientes
   const leadPatterns = [
     /(?:cuanto\s+(?:todavia\s+|aun\s+|ahora\s+)?me\s+debe|que\s+(?:todavia\s+|aun\s+|ahora\s+)?me\s+debe|dime\s+(?:lo\s+que\s+)?(?:todavia\s+|aun\s+|ahora\s+)?(?:me\s+)?debe|deuda\s+de|saldo\s+de)\s+(.+)/i,
-    /(?:cuanto\s+(?:le\s+)?queda\s+por\s+(?:pagar|cobrar)(?:\s+a)?)\s+(.+)/i,
-    /(?:cuanto\s+falta\s+por\s+(?:cobrarle|pagar)(?:\s+a)?)\s+(.+)/i,
+    /(?:cuanto\s+(?:dinero\s+)?(?:le|me|nos)?\s*queda\s+por\s+(?:pagar|cobrar)(?:\s+(?:de\s+la\s+reforma\s+de|de\s+la\s+obra\s+de|de|a|en))?)\s+(.+)/i,
+    /(?:cuanto\s+falta\s+por\s+(?:cobrarle|pagar)(?:\s+(?:de|a|en))?)\s+(.+)/i,
     /^(?!dime\b|sabes\b|mira\b|oye\b|cuanto\b|que\b|quien\b)(.+?)\s+(?:todavia|aun|ahora)?\s*me\s+debe(?:n)?/i,
     /lo\s+de\s+(.+)/i
   ];
@@ -141,7 +173,7 @@ export function extractDebtClient(text, knownNames = []) {
   // 4. Limpieza de adverbios iniciales, artículos, tratamientos y preposiciones
   let cleaned = rawSubject
     .replace(/^(?:todavia|aun|ahora|actualmente|por\s+ahora)\s+/i, '')
-    .replace(/^(?:a\s+|el\s+|la\s+|don\s+|dona\s+|cliente\s+|el\s+cliente\s+)/i, '')
+    .replace(/^(?:a\s+|el\s+|la\s+|don\s+|dona\s+|cliente\s+|el\s+cliente\s+|la\s+reforma\s+de\s+|la\s+obra\s+de\s+|el\s+trabajo\s+de\s+|el\s+piso\s+de\s+|de\s+la\s+reforma\s+de\s+|de\s+la\s+obra\s+de\s+|de\s+)/i, '')
     .replace(/^(?:todavia|aun|ahora)\s+/i, '')
     .trim();
 
@@ -222,6 +254,68 @@ function extractQuarterYear(text) {
   return { quarter, year };
 }
 
+/** Extrae el periodo y tipo de consulta financiera (cobros o facturación) */
+export function extractPeriodParams(text) {
+  const n = norm(text);
+  const now = new Date();
+  let year = now.getFullYear();
+  const yearMatch = text.match(/\b(202\d)\b/);
+  if (yearMatch) {
+    year = parseInt(yearMatch[1], 10);
+  }
+
+  let queryType = 'collected'; // Por defecto cuánto ha cobrado
+  if (/\b(?:facturado|facturacion|facture|facturas\s+emitidas)\b/i.test(n) && !/\b(?:cobrado|ingresado|ganado|cobros?)\b/i.test(n)) {
+    queryType = 'invoiced';
+  } else if (/\b(?:facturado|facturacion)\b/i.test(n) && /\b(?:cobrado|cobros?)\b/i.test(n)) {
+    queryType = 'all';
+  }
+
+  // 1. Hoy
+  if (/\b(?:hoy|en\s+el\s+dia|de\s+hoy)\b/i.test(n) && !/\b(?:mes|trimestre|cuatrimestre|semana|ano|año)\b/i.test(n)) {
+    return { period: 'today', queryType, year, month: now.getMonth() + 1 };
+  }
+
+  // 2. Semana
+  if (/\b(?:esta\s+semana|de\s+la\s+semana|en\s+la\s+semana|semana\s+actual)\b/i.test(n)) {
+    return { period: 'week', queryType, year, month: now.getMonth() + 1 };
+  }
+
+  // 3. Cuatrimestre
+  if (/\b(?:cuatrimestre|4\s*meses|cuatrimestral)\b/i.test(n)) {
+    let fourMonth = null;
+    if (/primer\s+cuatrimestre|1c\b|1\s*º?\s*cuatrimestre|primer\s+cuatrimestral/i.test(n)) fourMonth = 1;
+    else if (/segundo\s+cuatrimestre|2c\b|2\s*º?\s*cuatrimestre|segundo\s+cuatrimestral/i.test(n)) fourMonth = 2;
+    else if (/tercer\s+cuatrimestre|3c\b|3\s*º?\s*cuatrimestre|tercer\s+cuatrimestral/i.test(n)) fourMonth = 3;
+    else {
+      fourMonth = Math.floor(now.getMonth() / 4) + 1;
+    }
+    return { period: 'four_month', fourMonth, queryType, year };
+  }
+
+  // 4. Trimestre
+  if (/\b(?:trimestre|q[1-4]|trimestral)\b/i.test(n)) {
+    let quarter = null;
+    if (/primer\s+trimestre|1t\b|1\s*º?\s*trimestre|q1\b/i.test(n)) quarter = 1;
+    else if (/segundo\s+trimestre|2t\b|2\s*º?\s*trimestre|q2\b/i.test(n)) quarter = 2;
+    else if (/tercer\s+trimestre|3t\b|3\s*º?\s*trimestre|q3\b/i.test(n)) quarter = 3;
+    else if (/cuarto\s+trimestre|4t\b|4\s*º?\s*trimestre|q4\b/i.test(n)) quarter = 4;
+    else {
+      quarter = Math.floor(now.getMonth() / 3) + 1;
+    }
+    return { period: 'quarter', quarter, queryType, year };
+  }
+
+  // 5. Año
+  if (/\b(?:este\s+a[ñn]o|a[ñn]o\s+actual|del\s+a[ñn]o|en\s+el\s+a[ñn]o)\b/i.test(n) && !/\b(?:mes|trimestre|cuatrimestre|semana)\b/i.test(n)) {
+    return { period: 'year', queryType, year };
+  }
+
+  // 6. Mes (default)
+  const my = extractMonthYear(text);
+  return { period: 'month', month: my.month, year: my.year, queryType };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DETECTOR DE INTENCIONES
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,9 +372,44 @@ export function detectIntent(text, context = {}) {
     return { intent: 'DASHBOARD', params: {} };
   }
 
-  // ── DEUDAS TOTALES ─────────────────────────────────────────────────────────
-  // "quién me debe", "qué me deben", "deudas pendientes", "cobros pendientes"
+  // ── FACTURACIÓN PENDIENTE (PENDIENTE DE FACTURAR) ──────────────────────────
+  // "cuánto queda por facturar", "cuánto me queda por facturar de la reforma de Laura"
   if (matches(n, [
+    /cuanto\s+(?:dinero\s+)?(?:me\s+)?(?:queda|falta)\s+por\s+facturar/,
+    /pendiente\s+de\s+facturar/,
+    /que\s+(?:me\s+)?(?:queda|falta)\s+por\s+facturar/,
+    /falta\s+por\s+facturar/
+  ])) {
+    const invClient = extractDebtClient(text.replace(/facturar/gi, 'cobrar'), context?.knownNames || []);
+    return { intent: 'PENDING_TO_INVOICE', params: { clientName: invClient } };
+  }
+
+  // ── DEUDA DE UN CLIENTE CONCRETO (HIGH-02) ───────────────────────────────
+  // Extrae limpiamente el cliente sin adverbios ni coletillas de obra
+  const debtClient = extractDebtClient(text, context?.knownNames || []);
+  if (debtClient) {
+    let addressHint = null;
+    const normText = norm(text);
+    const normClient = norm(debtClient);
+    const idx = normText.indexOf(normClient);
+    if (idx !== -1) {
+      const remainder = normText.substring(idx + normClient.length).replace(/[?¿!¡.]/g, '').trim();
+      // Si tras el nombre hay una especificación de dirección/obra (ej: "el de la calle rapuncel", "obra segun visita", "de la calle mayor")
+      if (remainder.length > 2 && !/^(?:todavia|aun|ahora|por\s+favor)\b/i.test(remainder)) {
+        addressHint = remainder;
+      }
+    }
+    return { intent: 'DEBT_BY_CLIENT', params: { clientName: debtClient, addressHint } };
+  }
+
+  // ── DEUDAS TOTALES ─────────────────────────────────────────────────────────
+  // "quién me debe", "qué me deben", "deudas pendientes", "cobros pendientes", "quién me queda por pagar"
+  if (matches(n, [
+    /quien\s+(?:me\s+)?(?:queda|falta)\s+por\s+(?:pagar|cobrar)/,
+    /a\s+quien\s+(?:le\s+)?(?:queda|falta)\s+por\s+(?:pagar|cobrar)/,
+    /quien\s+falta\s+por\s+(?:pagar|cobrar)/,
+    /quien\s+queda\s+por\s+(?:pagar|cobrar)/,
+    /quienes\s+(?:me\s+)?(?:deben|quedan|faltan)/,
     /quien\s+me\s+debe/,
     /que\s+me\s+deben/,
     /deudas?\s+pendientes?/,
@@ -296,27 +425,41 @@ export function detectIntent(text, context = {}) {
     return { intent: 'ALL_DEBTS', params: {} };
   }
 
-  // ── DEUDA DE UN CLIENTE CONCRETO (HIGH-02) ───────────────────────────────
-  // Extrae limpiamente el cliente sin adverbios ni coletillas de obra
-  const debtClient = extractDebtClient(text, context?.knownNames || []);
-  if (debtClient) {
-    return { intent: 'DEBT_BY_CLIENT', params: { clientName: debtClient } };
-  }
-
-  // ── ESTADÍSTICAS MENSUALES ────────────────────────────────────────────────
-  // "cuánto llevo este mes", "facturado en septiembre", "ingresos de julio"
+  // ── ESTADÍSTICAS Y COBROS POR PERIODO (MES, TRIMESTRE, CUATRIMESTRE, SEMANA, HOY, AÑO) ──
+  // "cuánto he cobrado este mes", "cuánto he facturado este trimestre", "cobros de esta semana", etc.
   if (matches(n, [
-    /cuanto\s+llevo\s+(?:este\s+mes|en\s+|facturado)/,
-    /facturado\s+(?:en|este|el)/,
-    /ingresos?\s+(?:de|del|este|en)/,
-    /cuanto\s+he\s+(?:facturado|cobrado|ganado)/,
-    /resumen\s+(?:de\s+)?(?:este|el)?\s*mes/,
-    /estadisticas?\s+(?:de\s+)?(?:este|el)?\s*mes/,
+    /cuanto\s+he\s+(?:facturado|cobrado|ganado|ingresado)/,
+    /cuanto\s+llevo\s+(?:este\s+mes|esta\s+semana|este\s+trimestre|este\s+cuatrimestre|facturado|cobrado|ingresado)/,
+    /cuanto\s+(?:he\s+)?hecho\s+(?:este\s+mes|esta\s+semana|este\s+trimestre|este\s+cuatrimestre|en)/,
+    /facturado\s+(?:en|este|el|esta)/,
+    /cobrado\s+(?:en|este|el|esta|hoy)/,
+    /total\s+(?:cobrado|facturado)/,
+    /ingresos?\s+(?:de|del|este|esta|en)/,
+    /cobros?\s+(?:de|del|este|esta|en|hoy)/,
+    /resumen\s+(?:de\s+)?(?:este|el|esta)?\s*(?:mes|trimestre|cuatrimestre|semana)/,
+    /estadisticas?\s+(?:de\s+)?(?:este|el|esta)?\s*(?:mes|trimestre|cuatrimestre|semana)/,
     /cuanto\s+money\s+(?:tengo|llevo)/,
-    /cuanto\s+he\s+hecho\s+(?:este\s+mes|en)/,
   ])) {
-    const { month, year } = extractMonthYear(text);
-    return { intent: 'MONTHLY_STATS', params: { month, year } };
+    const params = extractPeriodParams(text);
+    if (params.period === 'month') {
+      return { intent: 'MONTHLY_STATS', params: { ...params, month: params.month, year: params.year } };
+    }
+    if (params.period === 'quarter') {
+      return { intent: 'QUARTER_STATS', params };
+    }
+    if (params.period === 'four_month') {
+      return { intent: 'FOUR_MONTH_STATS', params };
+    }
+    if (params.period === 'week') {
+      return { intent: 'WEEKLY_REVENUE', params };
+    }
+    if (params.period === 'today') {
+      return { intent: 'DAILY_REVENUE', params };
+    }
+    if (params.period === 'year') {
+      return { intent: 'YEARLY_STATS', params };
+    }
+    return { intent: 'REVENUE_STATS', params };
   }
 
   // ── AGENDA SEMANAL ────────────────────────────────────────────────────────
@@ -429,32 +572,42 @@ function formatDayName(isoDateStr) {
 }
 
 /** Formatea la lista de deudas pendientes para WhatsApp */
-function formatAllDebts(unpaidInvoices) {
-  if (!unpaidInvoices || unpaidInvoices.length === 0) {
-    return '✅ *¡Todo al día!* No tienes facturas pendientes de cobro ahora mismo. 💪';
+export function formatAllDebts(unpaidInvoices = [], pendingWorks = []) {
+  const hasInvoices = unpaidInvoices && unpaidInvoices.length > 0;
+  const hasWorks = pendingWorks && pendingWorks.length > 0;
+
+  if (!hasInvoices && !hasWorks) {
+    return '✅ *¡Todo al día!* No tienes facturas ni obras con saldo pendiente de cobro ahora mismo. 💪';
   }
 
-  const totalDebt = unpaidInvoices.reduce((sum, inv) => {
-    const invoiceData = inv.invoice;
-    const total = inv.totalAmount || 0;
-    const advance = invoiceData?.financials?.advanceAmount || 0;
-    const remaining = invoiceData?.financials?.remainingAmount ?? Math.max(0, total - advance);
-    return sum + remaining;
-  }, 0);
+  let totalDebt = 0;
+  const countLabel = hasInvoices && hasWorks
+    ? `${unpaidInvoices.length} factura${unpaidInvoices.length !== 1 ? 's' : ''} y ${pendingWorks.length} obra${pendingWorks.length !== 1 ? 's' : ''}`
+    : (hasInvoices ? `${unpaidInvoices.length} factura${unpaidInvoices.length !== 1 ? 's' : ''}` : `${pendingWorks.length} obra${pendingWorks.length !== 1 ? 's' : ''}`);
 
   const lines = [
-    `💸 *Cobros pendientes (${unpaidInvoices.length} factura${unpaidInvoices.length !== 1 ? 's' : ''})*`,
+    `💸 *Cobros pendientes (${countLabel})*`,
     '━━━━━━━━━━━━━━━━━━━━━━━━━'
   ];
 
-  for (const inv of unpaidInvoices) {
-    const invoiceData = inv.invoice;
-    const total = inv.totalAmount || 0;
-    const advance = invoiceData?.financials?.advanceAmount || 0;
-    const remaining = invoiceData?.financials?.remainingAmount ?? Math.max(0, total - advance);
-    const daysLabel = inv.daysPending > 0 ? ` · _${inv.daysPending} días_` : '';
-    lines.push(`👤 *${inv.clientName}* — pendiente: *${fmt(remaining)} €*${daysLabel}`);
-    lines.push(`   📄 ${inv.id}`);
+  if (hasInvoices) {
+    for (const inv of unpaidInvoices) {
+      const invoiceData = inv.invoice;
+      const total = inv.totalAmount || 0;
+      const advance = invoiceData?.financials?.advanceAmount || 0;
+      const remaining = invoiceData?.financials?.remainingAmount ?? Math.max(0, total - advance);
+      totalDebt += remaining;
+      const daysLabel = inv.daysPending > 0 ? ` · _${inv.daysPending} días_` : '';
+      lines.push(`📄 *${inv.clientName}* — Factura *${inv.id}*: *${fmt(remaining)} €* pendientes${daysLabel}`);
+    }
+  }
+
+  if (hasWorks) {
+    for (const w of pendingWorks) {
+      if (hasInvoices && unpaidInvoices.some(inv => inv.budgetId === w.budgetId)) continue;
+      totalDebt += w.remainingBalance;
+      lines.push(`🏗️ *${w.clientName}* — Presupuesto *${w.budgetId}*: *${fmt(w.remainingBalance)} €* pendientes (Total: ${fmt(w.totalAmount)} € · Cobrado: ${fmt(w.totalPaid)} €)`);
+    }
   }
 
   lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -466,7 +619,7 @@ function formatAllDebts(unpaidInvoices) {
 }
 
 /** Formatea la deuda de un cliente concreto */
-function formatDebtByClient(clientName, unpaidInvoices = [], resolvedCandidate = null, work = null) {
+export function formatDebtByClient(clientName, unpaidInvoices = [], resolvedCandidate = null, work = null) {
   const hasInvoices = unpaidInvoices && unpaidInvoices.length > 0;
   const hasWorkDebt = work && work.remainingBalance > 0;
 
@@ -478,6 +631,10 @@ function formatDebtByClient(clientName, unpaidInvoices = [], resolvedCandidate =
     `💸 *Deuda de ${clientName}*`,
     '━━━━━━━━━━━━━━━━━━━━━━━━━'
   ];
+
+  if (resolvedCandidate?.clientAddress && resolvedCandidate.clientAddress !== 'Sin dirección registrada') {
+    lines.push(`📍 *Ubicación:* ${resolvedCandidate.clientAddress}`);
+  }
 
   let totalDebt = 0;
 
@@ -506,37 +663,82 @@ function formatDebtByClient(clientName, unpaidInvoices = [], resolvedCandidate =
   return lines.join('\n');
 }
 
-/** Formatea estadísticas mensuales */
-function formatMonthlyStats(stats, month, year) {
+/** Formatea estadísticas de cobros y facturación para cualquier periodo */
+export function formatPeriodRevenue(stats, options = {}) {
+  const queryType = options.queryType || stats?.queryType || 'collected';
+  const label = stats?.periodLabel || 'el periodo';
+
+  const lines = [];
+
+  if (queryType === 'invoiced') {
+    lines.push(`📊 *FACTURACIÓN Y COBROS — ${label.toUpperCase()}*`);
+    lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+    lines.push(`📄 Total facturado: *${fmt(stats?.totalInvoiced || 0)} €* (${stats?.invoiceCount || 0} factura${(stats?.invoiceCount || 0) !== 1 ? 's' : ''})`);
+    lines.push(`💵 Total cobrado: *${fmt(stats?.totalCollected || 0)} €* (${stats?.paymentCount || 0} cobro${(stats?.paymentCount || 0) !== 1 ? 's' : ''})`);
+    if ((stats?.totalPending || 0) > 0) {
+      lines.push(`⏳ Pendiente de cobrar: *${fmt(stats.totalPending)} €*`);
+    }
+  } else {
+    // queryType === 'collected' o default
+    lines.push(`💰 *TOTAL COBRADO — ${label.toUpperCase()}*`);
+    lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+    lines.push(`💵 Total cobrado: *${fmt(stats?.totalCollected || 0)} €* (${stats?.paymentCount || 0} cobro${(stats?.paymentCount || 0) !== 1 ? 's recibido' : ' recibido'}${(stats?.paymentCount || 0) !== 1 ? 's' : ''})`);
+    lines.push(`📄 Total facturado: *${fmt(stats?.totalInvoiced || 0)} €* (${stats?.invoiceCount || 0} factura${(stats?.invoiceCount || 0) !== 1 ? 's' : ''})`);
+    if ((stats?.totalPending || 0) > 0) {
+      lines.push(`⏳ Pendiente de cobrar: *${fmt(stats.totalPending)} €*`);
+    }
+  }
+
+  // Desglose de cobros si hay cobros registrados
+  if (stats?.paymentsList && stats.paymentsList.length > 0) {
+    lines.push('');
+    lines.push(`🧾 *Detalle de cobros recibidos (${stats.paymentsList.length}):*`);
+    const maxShow = 10;
+    const toShow = stats.paymentsList.slice(0, maxShow);
+    for (const p of toShow) {
+      const parts = [`• *${fmt(p.amount)} €* · ${p.clientName}`];
+      const details = [];
+      if (p.method) details.push(p.method);
+      if (p.concept && p.concept !== 'Pago recibido' && p.concept !== 'Liquidación final del saldo pendiente') {
+        details.push(p.concept);
+      }
+      if (p.budgetId) details.push(p.budgetId);
+      if (details.length > 0) {
+        parts.push(` (${details.join(' · ')})`);
+      }
+      lines.push(parts.join(''));
+    }
+    if (stats.paymentsList.length > maxShow) {
+      lines.push(`_... y ${stats.paymentsList.length - maxShow} cobros más._`);
+    }
+  } else if (!stats?.totalCollected || stats.totalCollected === 0) {
+    lines.push('');
+    lines.push('ℹ️ _No tienes ningún cobro registrado en este periodo._');
+  }
+
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+  if ((stats?.totalInvoiced || 0) > 0 && (stats?.totalCollected || 0) > 0) {
+    const pct = Math.round((stats.totalCollected / stats.totalInvoiced) * 100);
+    lines.push(`📈 Cobrado: *${pct}%* del total facturado`);
+  }
+
+  return lines.join('\n');
+}
+
+/** Formatea estadísticas mensuales (retrocompatibilidad) */
+function formatMonthlyStats(stats, month, year, options = {}) {
+  if (stats && stats.periodLabel) {
+    return formatPeriodRevenue(stats, options);
+  }
   const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
     'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
   const monthName = monthNames[month - 1] || `Mes ${month}`;
 
-  if (!stats || stats.invoiceCount === 0) {
-    return `📊 *${monthName} ${year}* — No tienes facturas emitidas este mes todavía.`;
-  }
-
-  const lines = [
-    `📊 *Resumen de ${monthName} ${year}*`,
-    '━━━━━━━━━━━━━━━━━━━━━━━━━',
-    `📄 Facturas emitidas: *${stats.invoiceCount}*`,
-    `💵 Total facturado: *${fmt(stats.totalInvoiced)} €*`,
-    `✅ Total cobrado: *${fmt(stats.totalCollected)} €*`,
-    `⏳ Pendiente de cobrar: *${fmt(stats.totalPending)} €*`,
-  ];
-
-  if (stats.budgetCount > 0) {
-    lines.push(`📋 Presupuestos creados: *${stats.budgetCount}*`);
-  }
-
-  lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
-
-  const pct = stats.totalInvoiced > 0
-    ? Math.round((stats.totalCollected / stats.totalInvoiced) * 100)
-    : 0;
-  lines.push(`📈 Cobrado: *${pct}%* del total facturado`);
-
-  return lines.join('\n');
+  return formatPeriodRevenue({
+    ...stats,
+    periodLabel: `${monthName} ${year}`,
+    paymentsList: stats?.paymentsList || []
+  }, options);
 }
 
 /** Formatea agenda semanal */
@@ -768,11 +970,17 @@ export async function resolveIntent(intentResult, phone, session) {
     switch (intent) {
 
       case 'FISCAL_QUARTER_SUMMARY': {
+        if (!isGestoriaEnabled()) {
+          return 'ℹ️ *Cierre fiscal no disponible*\n\nEl módulo de cierre fiscal oficial está desactivado en esta versión.\n\n💡 _Para consultar tus cobros o facturas, puedes pedir por ejemplo: *«cuánto he facturado este mes»* o *«ver facturas»*._';
+        }
         const { quarter, year } = params;
         return formatQuarterWhatsAppSummary(tenantContext, year, quarter);
       }
 
       case 'SEND_TO_GESTORIA': {
+        if (!isGestoriaEnabled()) {
+          return 'ℹ️ *Módulo de Gestoría no disponible*\n\nEl servicio de envío a gestorías está desactivado en esta versión.';
+        }
         const { quarter, year } = params;
         const quarterData = getQuarterSummary(tenantContext, year, quarter);
         const company = session?.companyId ? getCompanyById(session.companyId) : getCompany(cleanPhone);
@@ -783,21 +991,94 @@ export async function resolveIntent(intentResult, phone, session) {
       }
 
       case 'DASHBOARD': {
-        const data = getDashboard(cleanPhone);
+        const data = getDashboard(tenantContext);
         return formatDashboard(data);
       }
 
+      case 'PENDING_TO_INVOICE': {
+        const { clientName } = params;
+        const candidates = clientName ? findClientsByName(tenantContext, clientName) : [];
+        if (candidates.length === 1) {
+          const summary = getProjectBillingSummary(tenantContext, candidates[0].id);
+          if (!summary) {
+            return `🔍 No se encontraron datos de facturación para *"${clientName}"*.`;
+          }
+          const formatEur = (n) => `${Number(n || 0).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+          return [
+            `📑 *ESTADO DE FACTURACIÓN — ${summary.clientName.toUpperCase()}*`,
+            '━━━━━━━━━━━━━━━━━━━━━━━━━',
+            `💰 *Presupuesto acordado:* *${formatEur(summary.budgetTotal)}*`,
+            `🧾 *Total facturado hasta la fecha:* *${formatEur(summary.workInvoiced)}* (${summary.invoices.length} ${summary.invoices.length === 1 ? 'factura emitida' : 'facturas emitidas'})` + (summary.advanceInvoiced > 0 ? ` [Anticipos: ${formatEur(summary.advanceInvoiced)}]` : ''),
+            `⏳ *Importe pendiente de facturar:* *${formatEur(summary.pendingToInvoice)}*`,
+            '━━━━━━━━━━━━━━━━━━━━━━━━━',
+            `💵 *Cobros recibidos:* ${formatEur(summary.totalPaid)}`,
+            `📌 *Saldo pendiente de cobro:* *${formatEur(summary.pendingToCollect)}*`,
+            '',
+            summary.pendingToInvoice > 0
+              ? '💡 _Puedes emitir la factura de una fase diciendo: "Factura la fase de [concepto]" o la factura final diciendo: "Prepárame la factura final"._'
+              : '✅ _Toda la obra ha sido completamente facturada._'
+          ].join('\n');
+        } else if (candidates.length > 1) {
+          return formatDisambiguationPrompt(clientName, candidates, 'query_balance');
+        } else if (clientName) {
+          return `🔍 No encontré ningún presupuesto registrado para *"${clientName}"*.`;
+        } else {
+          // Listado general de obras con facturación pendiente
+          const allBudgets = listBudgets(tenantContext, 50).filter(b => b.status === 'ACEPTADO' || b.status === 'FIRMADO');
+          const pendingList = allBudgets.map(b => getProjectBillingSummary(tenantContext, b.id)).filter(s => s && s.pendingToInvoice > 0.01);
+          if (pendingList.length === 0) {
+            return '✅ *No tienes importes pendientes de facturar en tus obras aceptadas.*';
+          }
+          const formatEur = (n) => `${Number(n || 0).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+          const lines = [
+            '📑 *OBRAS CON FACTURACIÓN PENDIENTE:*',
+            '━━━━━━━━━━━━━━━━━━━━━━━━━'
+          ];
+          for (const p of pendingList) {
+            lines.push(`• *${p.clientName}*: Pendiente de facturar: *${formatEur(p.pendingToInvoice)}* (Presupuesto: ${formatEur(p.budgetTotal)})`);
+          }
+          return lines.join('\n');
+        }
+      }
+
       case 'ALL_DEBTS': {
-        const unpaid = getUnpaidInvoices(cleanPhone);
-        return formatAllDebts(unpaid);
+        const unpaid = getUnpaidInvoices(tenantContext);
+        const pendingWorks = getPendingWorksDebt(tenantContext);
+        return formatAllDebts(unpaid, pendingWorks);
       }
 
       case 'DEBT_BY_CLIENT': {
-        const { clientName } = params;
-        const candidates = findClientsByName(tenantContext, clientName);
+        const { clientName, addressHint } = params;
+        let candidates = findClientsByName(tenantContext, clientName);
 
-        // Si hay homónimos (más de 1 candidato), activar desambiguación interactiva (HIGH-01)
+        // Si hay homónimos y se especificó una pista de dirección o ubicación (ej: "el de la calle Rapuncel", "el de obra según visita")
+        if (candidates && candidates.length > 1 && addressHint) {
+          const normHint = norm(addressHint);
+          const filtered = candidates.filter(c => {
+            const cAddr = norm(c.clientAddress || c.address || '');
+            if (cAddr && (cAddr.includes(normHint) || normHint.includes(cAddr))) return true;
+            if ((normHint.includes('obra segun visita') || normHint.includes('sin direccion') || normHint.includes('visita')) &&
+                (!cAddr || cAddr.includes('sin direccion') || cAddr.includes('obra segun visita'))) {
+              return true;
+            }
+            const hintTokens = normHint.split(/[\s,.-]+/).filter(w => w.length > 2 && !['el', 'la', 'los', 'las', 'de', 'del', 'en', 'calle', 'avenida', 'avda', 'obra', 'segun'].includes(w));
+            if (hintTokens.length > 0 && hintTokens.some(tok => cAddr.includes(tok))) {
+              return true;
+            }
+            return false;
+          });
+          if (filtered.length > 0) {
+            candidates = filtered;
+          }
+        }
+
+        // Si hay homónimos (más de 1 candidato), activar desambiguación interactiva con desglose de deudas (HIGH-01)
         if (candidates && candidates.length > 1) {
+          for (const c of candidates) {
+            const work = getWorkMemory(tenantContext, c.id);
+            c.totalPaid = work?.totalPaid || 0;
+            c.remainingBalance = work?.remainingBalance ?? Math.max(0, (c.totalAmount || 0) - c.totalPaid);
+          }
           if (session) {
             session.pendingDisambiguation = {
               actionType: 'query_balance',
@@ -809,7 +1090,7 @@ export async function resolveIntent(intentResult, phone, session) {
           return formatDisambiguationPrompt(clientName, candidates, 'query_balance');
         }
 
-        const allUnpaid = getUnpaidInvoices(cleanPhone);
+        const allUnpaid = getUnpaidInvoices(tenantContext);
         const qNorm = norm(clientName);
         const clientMatches = allUnpaid.filter(inv =>
           norm(inv.clientName).includes(qNorm) || qNorm.includes(norm(inv.clientName))
@@ -827,19 +1108,24 @@ export async function resolveIntent(intentResult, phone, session) {
         return formatDebtByClient(effectiveName, clientMatches, resolvedCandidate, work);
       }
 
-      case 'MONTHLY_STATS': {
-        const { month, year } = params;
-        const stats = getMonthlyRevenue(cleanPhone, year, month);
-        return formatMonthlyStats(stats, month, year);
+      case 'MONTHLY_STATS':
+      case 'QUARTER_STATS':
+      case 'FOUR_MONTH_STATS':
+      case 'WEEKLY_REVENUE':
+      case 'DAILY_REVENUE':
+      case 'YEARLY_STATS':
+      case 'REVENUE_STATS': {
+        const stats = getPeriodRevenue(tenantContext, params);
+        return formatPeriodRevenue(stats, params);
       }
 
       case 'WEEKLY_AGENDA': {
-        const apts = listAppointmentsWeek(cleanPhone);
+        const apts = listAppointmentsWeek(tenantContext);
         return formatWeeklyAgenda(apts);
       }
 
       case 'BUDGET_STATS': {
-        const budgets = listBudgets(cleanPhone, 50);
+        const budgets = listBudgets(tenantContext, 50);
         return formatBudgetStats(budgets);
       }
 
@@ -891,7 +1177,7 @@ export async function resolveIntent(intentResult, phone, session) {
           `📱 *Bizum:* ${comp.bizum || 'No configurado'}`,
           `📞 *Teléfono:* ${comp.phone || 'No indicado'}`,
           `✉️ *Email:* ${comp.email || 'No indicado'}`,
-          comp.gestoriaEmail ? `📊 *Gestoría:* ${comp.gestoriaEmail}` : '',
+          comp.gestoriaEmail && isGestoriaEnabled() ? `📊 *Gestoría:* ${comp.gestoriaEmail}` : '',
           '━━━━━━━━━━━━━━━━━━━━━━━━━',
           '💡 _Puedes cambiar cualquier dato diciendo por ejemplo: "mi Bizum es 611223344" o "cambia mi IBAN a ES21..."_'
         ].filter(Boolean).join('\n');

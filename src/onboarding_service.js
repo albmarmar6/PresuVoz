@@ -8,7 +8,6 @@ export const ONBOARDING_STEPS = [
   'CITY',
   'WORKING_HOURS',
   'PAYMENT_TERMS',
-  'ADVANCE',
   'QUOTE_VALIDITY',
   'ENTITY_TYPE',
   'FISCAL_NAME',
@@ -53,7 +52,7 @@ export function getStepQuestion(step, data = {}) {
         '2️⃣ Por adelantado',
         '3️⃣ 50% al empezar y 50% al acabar',
         '4️⃣ Por hitos o fases de obra',
-        '5️⃣ Otro (escríbeme cómo lo haces tú o pon «luego»)'
+        '5️⃣ O dime tu porcentaje habitual (ej: «20% de anticipo», «30% al inicio y resto al acabar»... o pon «luego»)'
       ].join('\n');
     case 'ADVANCE':
       return [
@@ -441,38 +440,65 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       };
     }
 
-    // 5. Forma de cobro
+    // 5. Forma de cobro y anticipo integrado
     case 'PAYMENT_TERMS': {
       let terms = null;
+      let advance = 0;
       if (!isSkip) {
-        if (/^1\b|terminar|finalizar|acabar/i.test(input) && !/50/i.test(input)) {
+        const pctMatch = input.match(/(\d{1,2})\s*%/);
+        const pureNum = input.match(/\b(\d{1,2})\b/);
+        const advanceWordMatch = input.match(/\b(veinte|veinticinco|treinta|cuarenta|cincuenta)\b/i);
+        const wordMap = { "veinte": 20, "veinticinco": 25, "treinta": 30, "cuarenta": 40, "cincuenta": 50 };
+
+        if (/^1\b|terminar|finalizar|acabar/i.test(input) && !/50|\d+%/i.test(input)) {
           terms = '100% al terminar el trabajo';
-        } else if (/^2\b|adelantad|anticipad/i.test(input)) {
+          advance = 0;
+        } else if (/^2\b|adelantad|anticipad/i.test(input) && !/\d+%/i.test(input)) {
           terms = '100% por adelantado';
-        } else if (/^3\b|50|mitad/i.test(input)) {
+          advance = 100;
+        } else if (/^3\b|mitad/i.test(input) || (input.includes('50') && /empezar|acabar|inicio|final/i.test(input))) {
           terms = '50% al empezar y 50% al acabar';
-        } else if (/^4\b|hito|fase|certifica/i.test(input)) {
+          advance = 50;
+        } else if (/^4\b|hito|certifica/i.test(input) && !/\d+%/i.test(input)) {
           terms = 'Por hitos y certificaciones según avance de obra';
+          advance = 0;
+        } else if (pctMatch) {
+          advance = parseInt(pctMatch[1], 10);
+          terms = input.length > 4 ? input : `${advance}% al empezar y ${100 - advance}% al finalizar`;
+        } else if (advanceWordMatch && wordMap[advanceWordMatch[1].toLowerCase()]) {
+          advance = wordMap[advanceWordMatch[1].toLowerCase()];
+          terms = `${advance}% al empezar y ${100 - advance}% al finalizar`;
+        } else if (pureNum && Number(pureNum[1]) > 0 && Number(pureNum[1]) <= 100 && /anticipo|adelanto|empezar|inicio/i.test(input)) {
+          advance = parseInt(pureNum[1], 10);
+          terms = `${advance}% al empezar y ${100 - advance}% al finalizar`;
         } else if (input.length > 2) {
           terms = input;
+          advance = 0;
         }
       }
       data.paymentTerms = terms;
+      data.defaultAdvance = advance;
 
       saveCompany(phone, {
         paymentTerms: terms,
-        onboardingStep: 'ADVANCE',
+        defaultAdvance: advance,
+        onboardingStep: 'QUOTE_VALIDITY',
         onboardingDataJson: JSON.stringify(data)
       });
+
+      const advanceMsg = advance > 0 ? ` (anticipo fijado al *${advance}%*)` : '';
 
       return {
         handled: true,
         message: [
-          terms ? `¡Fenomenal! Dejar las cosas claras desde el principio evita disgustos 💶` : `¡De acuerdo! Dejamos las condiciones de cobro para más adelante 💶`,
+          terms ? `¡Fenomenal! Condiciones de cobro guardadas: *${terms}*${advanceMsg} 💶🤝` : `¡De acuerdo! Dejamos las condiciones de cobro para más adelante 💶`,
           '',
-          '👉 *¿Sueles pedir algún anticipo al confirmar la obra o para compra de materiales? ¿De qué porcentaje suele ser?*',
-          '',
-          '_(Por ejemplo: 30%, 40%, 50%, o escribe «ninguno» o «luego»)_'
+          'Con cómo cambian los precios de los materiales hoy en día:',
+          '👉 *¿Cuánto tiempo suelen ser válidos tus presupuestos antes de que caduquen?*',
+          '1️⃣ 7 días',
+          '2️⃣ 15 días',
+          '3️⃣ 30 días',
+          '4️⃣ Otro (indícame los días que quieras)'
         ].join('\n')
       };
     }
