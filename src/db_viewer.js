@@ -6,6 +6,22 @@ import { syncPendingSignaturesFromCloud } from './db_service.js';
 
 const DB_PATH = process.env.PRESUVOZ_DB_PATH || path.resolve('data', 'presuvoz.db');
 const PORT = process.env.DB_VIEWER_PORT || 3333;
+const HOST = '127.0.0.1';
+
+/**
+ * Validador de seguridad para el visor de base de datos.
+ * Prohíbe terminantemente su ejecución en entornos de producción.
+ */
+export function canStartDbViewer(env = process.env.NODE_ENV) {
+  if (env === 'production') {
+    return {
+      allowed: false,
+      reason: 'PRODUCTION_FORBIDDEN',
+      message: 'db_viewer.js está bloqueado en NODE_ENV=production para proteger la confidencialidad de los datos.'
+    };
+  }
+  return { allowed: true };
+}
 
 function getDbData() {
   if (!fs.existsSync(DB_PATH)) {
@@ -562,7 +578,7 @@ const server = http.createServer(async (req, res) => {
     try {
       await syncPendingSignaturesFromCloud();
       const data = getDbData();
-      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(data));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -575,10 +591,27 @@ const server = http.createServer(async (req, res) => {
   res.end(HTML_TEMPLATE);
 });
 
-server.listen(PORT, () => {
-  console.log('\n======================================================');
-  console.log('🗄️  Visor de Base de Datos SQLite PresuVoz Activo');
-  console.log(`🌐  Abre en tu navegador: http://localhost:${PORT}`);
-  console.log('⚡  Auto-actualización en vivo activa (verás entrar datos en tiempo real)');
-  console.log('======================================================\n');
-});
+import { fileURLToPath } from 'node:url';
+
+const isDirectRun = process.argv[1] && (
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url) ||
+  process.argv[1].endsWith('db_viewer.js')
+);
+
+if (isDirectRun) {
+  const check = canStartDbViewer();
+  if (!check.allowed) {
+    console.error(`\n🛑 [SEGURIDAD] ${check.message}`);
+    process.exit(1);
+  }
+
+  server.listen(PORT, HOST, () => {
+    console.log('\n======================================================');
+    console.log('🗄️  Visor de Base de Datos SQLite PresuVoz Activo (Local Seguro)');
+    console.log(`🌐  Abre en tu navegador: http://${HOST}:${PORT}`);
+    console.log('⚡  Auto-actualización en vivo activa (verás entrar datos en tiempo real)');
+    console.log('======================================================\n');
+  });
+}
+
+export { server, getDbData, PORT, HOST };

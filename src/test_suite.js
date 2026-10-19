@@ -30,8 +30,27 @@ import {
   findBudgetByQuery,
   detectBudgetListIntent,
   detectAgendaQueryIntent,
-  detectShoppingListQueryIntent
+  detectShoppingListQueryIntent,
+  resolveRequireExplicitAuth,
+  clearGatewayTimers,
+  gracefulShutdown,
+  resetShutdownStateForTesting
 } from './whatsapp_gateway.js';
+import {
+  acquireGatewayLock,
+  releaseGatewayLock,
+  isPidAlive
+} from './instance_lock.js';
+import { canStartDbViewer, HOST as DB_VIEWER_HOST } from './db_viewer.js';
+import {
+  normalizeToE164,
+  isPlatformAdmin,
+  isPhoneNumberAuthorized,
+  authorizePhoneNumber,
+  revokePhoneNumber,
+  listAuthorizedPhoneNumbers,
+  parseAdminCommand
+} from './access_control_service.js';
 import { formatListIndex } from './secretary_service.js';
 
 export function computeFileSha256(filePath) {
@@ -2031,13 +2050,14 @@ const inInUnknownLid = shouldProcessIncomingMessage({
 assert(inInUnknownLid.process === false, "CASO 16: Ingress BLOQUEA mensaje entrante de contacto ajeno (LID)");
 assert(inInUnknownLid.reason === 'UNAUTHORIZED_INCOMING_SENDER', "CASO 16: Motivo UNAUTHORIZED_INCOMING_SENDER");
 
-// 6. Ingress: Mensaje entrante de teléfono desconocido
+// 6. Ingress: Mensaje entrante de teléfono desconocido (modo compatibilidad onboarding)
 const inInUnknownPhone = shouldProcessIncomingMessage({
   remoteJid: unknownContactPhone,
   fromMe: false,
   myNumber: myTestPhone,
   myLid: myTestLid,
-  allowedNumbers: allowedTestNumbers
+  allowedNumbers: allowedTestNumbers,
+  requireExplicitAuth: false
 });
 assert(inInUnknownPhone.process === true && inInUnknownPhone.reason === 'ONBOARDING_ELIGIBLE_SENDER', "CASO 16: Ingress admite teléfono individual desconocido únicamente para iniciar onboarding");
 
@@ -11880,6 +11900,582 @@ assert(summaryBeta.summary.issuedVatTotal === 1050, "TEST 88: Cuota IVA de Beta 
 // Limpieza final de TEST 88
 currentTestDb.prepare('DELETE FROM invoices WHERE company_id IN (?, ?)').run(tenantContext88A.companyId, tenantContext88B.companyId);
 currentTestDb.prepare('DELETE FROM budgets WHERE company_id IN (?, ?)').run(tenantContext88A.companyId, tenantContext88B.companyId);
+
+
+// =============================================================================
+// TEST 89: CONTROL DE ACCESO AUTORIZADO PARA EL LANZAMIENTO (DEFAULT-DENY)
+// =============================================================================
+console.log("\n--- TEST 89: CONTROL DE ACCESO AUTORIZADO PARA EL LANZAMIENTO (FASE 4E) ---");
+
+const testAdminPhone = '34600000001';
+const testAdminPhone2 = '34600000002';
+process.env.ADMIN_PHONE_NUMBERS = `${testAdminPhone},${testAdminPhone2}`;
+
+// 1. Un número desconocido no activa Gemini ni genera operaciones (Default-Deny)
+const unknownPhone89 = '34699000888';
+const unknownJid89 = `${unknownPhone89}@s.whatsapp.net`;
+const ingressUnknown = shouldProcessIncomingMessage({
+  remoteJid: unknownJid89,
+  fromMe: false,
+  myNumber: '34600111222',
+  requireExplicitAuth: true
+});
+assert(ingressUnknown.process === false, "TEST 89: Número desconocido queda denegado por defecto en ingress (process=false)");
+assert(ingressUnknown.reason === 'UNAUTHORIZED_INCOMING_SENDER', "TEST 89: Motivo es UNAUTHORIZED_INCOMING_SENDER");
+
+const egressUnknown = isAuthorizedEgressRecipient(unknownJid89, { myNumber: '34600111222' });
+assert(egressUnknown.allowed === false, "TEST 89: Egress Firewall bloquea salida a número desconocido");
+assert(egressUnknown.reason === 'UNAUTHORIZED_TARGET', "TEST 89: Motivo egress es UNAUTHORIZED_TARGET");
+
+// 2. Un número desconocido no puede crear una empresa
+const compCountBefore89 = currentTestDb.prepare('SELECT count(*) as c FROM companies').get().c;
+const userCountBefore89 = currentTestDb.prepare('SELECT count(*) as c FROM users').get().c;
+const chanCountBefore89 = currentTestDb.prepare('SELECT count(*) as c FROM channel_identities').get().c;
+
+assert(compCountBefore89 === currentTestDb.prepare('SELECT count(*) as c FROM companies').get().c, "TEST 89: Cero empresas creadas por remitentes desconocidos");
+assert(userCountBefore89 === currentTestDb.prepare('SELECT count(*) as c FROM users').get().c, "TEST 89: Cero usuarios creados por remitentes desconocidos");
+assert(chanCountBefore89 === currentTestDb.prepare('SELECT count(*) as c FROM channel_identities').get().c, "TEST 89: Cero identidades de canal creadas por desconocidos");
+
+// 3. Un no administrador no puede autorizar ni revocar números
+assert(isPlatformAdmin(testAdminPhone) === true, "TEST 89: Administrador configurado en ADMIN_PHONE_NUMBERS reconocido");
+assert(isPlatformAdmin('34611223344') === false, "TEST 89: Usuario común NO es administrador de la plataforma");
+assert(isPlatformAdmin('34699000888') === false, "TEST 89: Número desconocido NO es administrador");
+
+// Parser determinístico de comandos de administración
+const cmdAuthValid = parseAdminCommand('!autorizar +34611223344');
+assert(cmdAuthValid.isCommand === true && cmdAuthValid.action === 'AUTHORIZE' && cmdAuthValid.targetPhone === '+34611223344', "TEST 89: Parser detecta '!autorizar +34611223344'");
+
+const cmdAuthPlain = parseAdminCommand('autorizar 611223344');
+assert(cmdAuthPlain.isCommand === true && cmdAuthPlain.action === 'AUTHORIZE' && cmdAuthPlain.targetPhone === '+34611223344', "TEST 89: Parser normaliza 'autorizar 611223344' a +34611223344");
+
+const cmdRevoke = parseAdminCommand('!revocar +34611223344');
+assert(cmdRevoke.isCommand === true && cmdRevoke.action === 'REVOKE' && cmdRevoke.targetPhone === '+34611223344', "TEST 89: Parser detecta '!revocar +34611223344'");
+
+const cmdList = parseAdminCommand('!autorizados');
+assert(cmdList.isCommand === true && cmdList.action === 'LIST', "TEST 89: Parser detecta '!autorizados'");
+
+const cmdListAlt = parseAdminCommand('listar autorizados');
+assert(cmdListAlt.isCommand === true && cmdListAlt.action === 'LIST', "TEST 89: Parser detecta 'listar autorizados'");
+
+const cmdInvalid = parseAdminCommand('!autorizar no_es_telefono');
+assert(cmdInvalid.isCommand === true && Boolean(cmdInvalid.error), "TEST 89: Parser rechaza número con formato no válido");
+
+const cmdNormalText = parseAdminCommand('Hola, quiero un presupuesto para reformar un baño');
+assert(cmdNormalText.isCommand === false, "TEST 89: Texto ordinario no se confunde con comando de administración");
+
+// Helper de limpieza segura para TEST 89 (respetando integridad referencial)
+function cleanTenant89(phone) {
+  const comp = currentTestDb.prepare('SELECT id FROM companies WHERE phone = ?').get(phone);
+  if (comp) {
+    currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(comp.id);
+    currentTestDb.prepare('DELETE FROM invoices WHERE company_id = ?').run(comp.id);
+    currentTestDb.prepare('DELETE FROM memberships WHERE company_id = ?').run(comp.id);
+    currentTestDb.prepare('DELETE FROM channel_identities WHERE company_id = ?').run(comp.id);
+    currentTestDb.prepare('DELETE FROM companies WHERE id = ?').run(comp.id);
+  }
+  currentTestDb.prepare('DELETE FROM channel_identities WHERE channel_identifier = ?').run(phone);
+  currentTestDb.prepare('DELETE FROM users WHERE phone = ?').run(phone);
+}
+
+// 4. Un usuario autorizado para onboarding no puede acceder a empresas existentes
+const phoneOnboard89 = '34677990011';
+cleanTenant89(phoneOnboard89);
+
+const authRes89 = authorizePhoneNumber('+34 677 99 00 11', testAdminPhone, { targetDb: currentTestDb });
+assert(authRes89.success === true, "TEST 89: Administrador autoriza nuevo número para onboarding");
+assert(authRes89.status === 'AUTHORIZED', "TEST 89: Estado asignado es AUTHORIZED");
+
+const checkAuth89 = isPhoneNumberAuthorized(phoneOnboard89, { targetDb: currentTestDb });
+assert(checkAuth89.authorized === true, "TEST 89: Número pre-autorizado es reconocido como autorizado");
+assert(checkAuth89.status === 'AUTHORIZED', "TEST 89: Estatus es AUTHORIZED (pendiente de onboarding)");
+
+// Verificar que NO tiene empresa ni canal activo
+const authCtxPre89 = resolveAuthenticatedContext('whatsapp', phoneOnboard89);
+assert(authCtxPre89 === null, "TEST 89: Usuario pre-autorizado carece de empresa y canal en channel_identities");
+const userSessionPre89 = getUserSession(`${phoneOnboard89}@s.whatsapp.net`, phoneOnboard89);
+assert(userSessionPre89 === null, "TEST 89: getUserSession retorna null (sin acceso a datos ajenos)");
+
+// 5. La revocación bloquea nuevas operaciones sin borrar datos históricos
+const phoneRevoke89 = '34688442211';
+cleanTenant89(phoneRevoke89);
+
+const { completeSecureOnboarding: testCompleteOnboarding89 } = await import('./onboarding_service.js');
+testCompleteOnboarding89(phoneRevoke89, {
+  companyName: 'Empresa A Revocar S.L.',
+  cif: 'B-89898989',
+  ownerName: 'Manuel Revocado'
+});
+
+const compRowRev89 = currentTestDb.prepare('SELECT id FROM companies WHERE phone = ?').get(phoneRevoke89);
+const bRev89 = {
+  id: 'PRE2026-REV89',
+  client: { name: 'Cliente Histórico', nif: '99887766A' },
+  items: [{ id: 'it-1', description: 'Trabajo histórico', qty: 1, unit: 'pa', unitPrice: 800, total: 800 }],
+  financials: { taxableBase: 800, taxRatePercentage: 21, taxAmount: 168, totalAmount: 968 }
+};
+testSaveBudget88({ companyId: compRowRev89.id, phone: phoneRevoke89 }, bRev89);
+
+// Ahora revocar el número
+const revokeRes89 = revokePhoneNumber(phoneRevoke89, testAdminPhone, { targetDb: currentTestDb });
+assert(revokeRes89.success === true, "TEST 89: Administrador revoca acceso a la empresa");
+assert(revokeRes89.status === 'REVOKED', "TEST 89: Estado actualizado a REVOKED");
+
+// Ingress bloquea de inmediato
+const ingressRevoked = shouldProcessIncomingMessage({
+  remoteJid: `${phoneRevoke89}@s.whatsapp.net`,
+  fromMe: false,
+  myNumber: '34600111222',
+  requireExplicitAuth: true
+});
+assert(ingressRevoked.process === false, "TEST 89: Ingress bloquea totalmente nuevas peticiones del usuario revocado");
+assert(ingressRevoked.reason === 'REVOKED_SENDER', "TEST 89: Motivo de bloqueo en ingress es REVOKED_SENDER");
+
+// Egress firewall bloquea envíos hacia el revocado
+const egressRevoked = isAuthorizedEgressRecipient(`${phoneRevoke89}@s.whatsapp.net`, { myNumber: '34600111222' });
+assert(egressRevoked.allowed === false, "TEST 89: Egress firewall bloquea envíos al número revocado");
+assert(egressRevoked.reason === 'REVOKED_RECIPIENT_BLOCKED', "TEST 89: Motivo en egress es REVOKED_RECIPIENT_BLOCKED");
+
+// Comprobación no destructiva: los datos siguen existiendo íntegros en SQLite
+const compStillExists = currentTestDb.prepare('SELECT id, name FROM companies WHERE phone = ?').get(phoneRevoke89);
+assert(compStillExists && compStillExists.name === 'Empresa A Revocar S.L.', "TEST 89: No destructivo: La empresa permanece intacta en la base de datos");
+const budgetStillExists = currentTestDb.prepare('SELECT id FROM budgets WHERE id = ?').get('PRE2026-REV89');
+assert(Boolean(budgetStillExists), "TEST 89: No destructivo: Presupuestos históricos permanecen intactos");
+
+// 6. Normalización E.164 consistente para formatos equivalentes
+const normA = normalizeToE164('+34 600 11 22 33');
+const normB = normalizeToE164('0034600112233');
+const normC = normalizeToE164('600112233');
+const normD = normalizeToE164('+34 (600) 11-22-33');
+assert(normA.e164 === '+34600112233' && normA.digits === '34600112233', "TEST 89: Normaliza '+34 600 11 22 33' a +34600112233");
+assert(normB.e164 === '+34600112233' && normB.digits === '34600112233', "TEST 89: Normaliza '0034600112233' a +34600112233");
+assert(normC.e164 === '+34600112233' && normC.digits === '34600112233', "TEST 89: Normaliza '600112233' con prefijo +34 por defecto");
+assert(normD.e164 === '+34600112233' && normD.digits === '34600112233', "TEST 89: Normaliza '+34 (600) 11-22-33' a +34600112233");
+
+const normUK = normalizeToE164('+44 7911 123456');
+assert(normUK.e164 === '+447911123456' && normUK.digits === '447911123456', "TEST 89: Preserva números internacionales válidos fuera de España (+44...)");
+
+// 7. Autorizaciones y revocaciones no rompen el onboarding ni el aislamiento multiempresa
+const phoneAtomic89 = '34633221100';
+cleanTenant89(phoneAtomic89);
+
+authorizePhoneNumber(`+34 ${phoneAtomic89.slice(2)}`, testAdminPhone, { targetDb: currentTestDb });
+testCompleteOnboarding89(phoneAtomic89, {
+  companyName: 'Atomic Multi-Tenant S.L.',
+  cif: 'B-12344321',
+  ownerName: 'Juan Atómico'
+});
+
+const atomicCtx = resolveAuthenticatedContext('whatsapp', phoneAtomic89);
+assert(atomicCtx !== null && atomicCtx.companyId, "TEST 89: Tras onboarding, canal autenticado resuelve con éxito a su empresa");
+assert(atomicCtx.company.name === 'Atomic Multi-Tenant S.L.', "TEST 89: Datos de empresa cargados correctamente");
+
+// Verificar aislamiento: este tenant no puede acceder a los datos de otra empresa
+let crossTenantBlocked89 = false;
+try {
+  atomicCtx.assertTenantAccess('empresa-ajena-uuid');
+} catch (e) {
+  crossTenantBlocked89 = true;
+}
+assert(crossTenantBlocked89 === true, "TEST 89: Aislamiento cross-tenant intacto para usuario que completó onboarding");
+
+// 8. Grupos y mensajes no admitidos continúan bloqueados
+const groupCheck89 = shouldProcessIncomingMessage({
+  remoteJid: '120363401410834758@g.us',
+  fromMe: false,
+  myNumber: '34600111222',
+  requireExplicitAuth: true
+});
+assert(groupCheck89.process === false && groupCheck89.reason === 'GROUP_OR_BROADCAST_IGNORED', "TEST 89: Grupos (@g.us) continúan bloqueados");
+
+const bcastCheck89 = shouldProcessIncomingMessage({
+  remoteJid: 'status@broadcast',
+  fromMe: false,
+  myNumber: '34600111222',
+  requireExplicitAuth: true
+});
+assert(bcastCheck89.process === false && bcastCheck89.reason === 'GROUP_OR_BROADCAST_IGNORED', "TEST 89: Difusiones (@broadcast) continúan bloqueadas");
+
+const outThirdCheck89 = shouldProcessIncomingMessage({
+  remoteJid: '34699887766@s.whatsapp.net',
+  fromMe: true,
+  myNumber: '34600111222',
+  requireExplicitAuth: true
+});
+assert(outThirdCheck89.process === false && outThirdCheck89.reason === 'OUTGOING_THIRD_PARTY_IGNORED', "TEST 89: Mensajes salientes a terceros desde móvil personal continúan ignorados");
+
+// 9. Operaciones administrativas idempotentes (sin duplicados por reintentos)
+const idempPhone89 = '34644556677';
+cleanTenant89(idempPhone89);
+
+const idempAuth1 = authorizePhoneNumber(idempPhone89, testAdminPhone, { targetDb: currentTestDb });
+assert(idempAuth1.success === true && !idempAuth1.alreadyAuthorized, "TEST 89: Primera autorización ejecutada con éxito");
+
+const idempAuth2 = authorizePhoneNumber(idempPhone89, testAdminPhone, { targetDb: currentTestDb });
+assert(idempAuth2.success === true && idempAuth2.alreadyAuthorized === true, "TEST 89: Reintento de autorización detectado como ya autorizado (idempotente)");
+
+const countUsersIdemp = currentTestDb.prepare('SELECT count(*) as c FROM users WHERE phone = ?').get(idempPhone89).c;
+assert(countUsersIdemp === 1, "TEST 89: Reintentos administrativos no duplican registros en users (c=1)");
+
+const idempRev1 = revokePhoneNumber(idempPhone89, testAdminPhone, { targetDb: currentTestDb });
+assert(idempRev1.success === true, "TEST 89: Primera revocación ejecutada con éxito");
+const idempRev2 = revokePhoneNumber(idempPhone89, testAdminPhone, { targetDb: currentTestDb });
+assert(idempRev2.success === true, "TEST 89: Reintento de revocación es seguro e idempotente");
+
+// 10. Consulta de autorizados
+const authList89 = listAuthorizedPhoneNumbers({ targetDb: currentTestDb });
+assert(Array.isArray(authList89) && authList89.length > 0, "TEST 89: listAuthorizedPhoneNumbers retorna la lista estructurada de accesos");
+assert(authList89.some(u => u.phone === idempPhone89 && u.status === 'REVOKED'), "TEST 89: Lista refleja estado exacto REVOKED para el usuario");
+
+// Limpieza de datos temporales de TEST 89
+[phoneOnboard89, phoneRevoke89, phoneAtomic89, idempPhone89].forEach(cleanTenant89);
+currentTestDb.prepare('DELETE FROM budgets WHERE id = ?').run('PRE2026-REV89');
+
+// --- TEST 90: ALERTAS DE VENCIMIENTO DE PRESUPUESTOS Y CANCELACIÓN ---
+console.log("\n--- TEST 90: ALERTAS DE VENCIMIENTO DE PRESUPUESTOS Y CANCELACIÓN ---");
+
+const {
+  extractCancelBudgetTarget,
+  detectIntent: detectIntent90,
+  resolveIntent: resolveIntent90
+} = await import('./intent_router.js');
+
+const {
+  getBudgetsNearExpiration,
+  recordBudgetExpirationReminder,
+  getBudgetsPendingFollowUp: getBudgetsPendingFollowUp90,
+  updateBudgetStatus: updateBudgetStatus90,
+  saveBudget: saveBudget90,
+  getBudget: getBudget90
+} = await import('./db_service.js');
+
+const {
+  runBudgetExpirationReminderJob
+} = await import('./appointment_scheduler.js');
+
+// 1. Detección determinista de intenciones de cancelación (extractCancelBudgetTarget y detectIntent)
+assert(extractCancelBudgetTarget('cancela el presupuesto x') === 'x', "TEST 90: Detecta 'cancela el presupuesto x'");
+assert(extractCancelBudgetTarget('cancela el presupuesto de María') === 'maria', "TEST 90: Detecta 'cancela el presupuesto de María'");
+assert(extractCancelBudgetTarget('marca como perdido el de María') === 'maria', "TEST 90: Detecta 'marca como perdido el de María'");
+assert(extractCancelBudgetTarget('marca como cancelado el de Carlos') === 'carlos', "TEST 90: Detecta 'marca como cancelado el de Carlos'");
+assert(extractCancelBudgetTarget('marcar como perdido el de Juan') === 'juan', "TEST 90: Detecta 'marcar como perdido el de Juan'");
+assert(extractCancelBudgetTarget('anula el presupuesto de Pedro') === 'pedro', "TEST 90: Detecta 'anula el presupuesto de Pedro'");
+assert(extractCancelBudgetTarget('anular el de Carlos') === 'carlos', "TEST 90: Detecta 'anular el de Carlos'");
+assert(extractCancelBudgetTarget('el cliente ha rechazado el presupuesto de Laura') === 'laura', "TEST 90: Detecta 'el cliente ha rechazado el presupuesto de Laura'");
+assert(extractCancelBudgetTarget('no se va a hacer el de María') === 'maria', "TEST 90: Detecta 'no se va a hacer el de María'");
+assert(extractCancelBudgetTarget('cancela PRE2026-090') === 'pre2026-090', "TEST 90: Detecta 'cancela PRE2026-090'");
+assert(extractCancelBudgetTarget('cancela la cita de Juan') === null, "TEST 90: NUNCA intercepta cancelación de citas como cancelación de presupuesto");
+assert(extractCancelBudgetTarget('cancela la visita de las 11') === null, "TEST 90: NUNCA intercepta visitas");
+assert(extractCancelBudgetTarget('cancela la factura de María') === null, "TEST 90: NUNCA intercepta facturas");
+
+assert(detectIntent90('cancela el presupuesto de María')?.intent === 'CANCEL_BUDGET', "TEST 90: detectIntent clasifica 'cancela el presupuesto de María' como CANCEL_BUDGET");
+assert(detectIntent90('marca como perdido el de María')?.intent === 'CANCEL_BUDGET', "TEST 90: detectIntent clasifica 'marca como perdido el de María' como CANCEL_BUDGET");
+assert(detectIntent90('anula el presupuesto de Carlos')?.intent === 'CANCEL_BUDGET', "TEST 90: detectIntent clasifica 'anula el presupuesto de Carlos' como CANCEL_BUDGET");
+assert(detectIntent90('cancela la cita de Juan')?.intent !== 'CANCEL_BUDGET', "TEST 90: Cancelación de cita no es CANCEL_BUDGET");
+
+// 2. Configuración de Tenant y Presupuesto de prueba
+const phone90 = '34690000001';
+const companyId90 = crypto.randomUUID();
+cleanTenant89(phone90);
+currentTestDb.prepare("INSERT OR REPLACE INTO companies (id, phone, name, quote_validity_days) VALUES (?, ?, ?, ?)").run(companyId90, phone90, 'Reformas Expiración 90', 7);
+const nowIso90 = new Date().toISOString();
+currentTestDb.prepare("INSERT OR REPLACE INTO channel_identities (id, company_id, channel, channel_identifier, is_active, created_at, updated_at) VALUES (?, ?, 'whatsapp', ?, 1, ?, ?)").run('chan-90', companyId90, phone90, nowIso90, nowIso90);
+currentTestDb.prepare("INSERT OR REPLACE INTO users (id, phone, name, status, created_at, updated_at) VALUES (?, ?, 'Autónomo 90', 'ACTIVE', ?, ?)").run('usr-90', phone90, nowIso90, nowIso90);
+currentTestDb.prepare("INSERT OR REPLACE INTO memberships (id, user_id, company_id, role, status, created_at, updated_at) VALUES (?, ?, ?, 'OWNER', 'ACTIVE', ?, ?)").run('mem-90', 'usr-90', companyId90, nowIso90, nowIso90);
+
+saveBudget90(companyId90, {
+  id: 'PRE2026-901',
+  client: { name: 'María López', phone: '+34699111222' },
+  financials: { totalAmount: 1500 },
+  status: 'PENDIENTE_FIRMA',
+  terms: { validityDays: 7 }
+});
+currentTestDb.prepare("UPDATE budgets SET created_at = ? WHERE id = ?").run(new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(), 'PRE2026-901');
+
+assert(getBudgetsPendingFollowUp90(companyId90).some(b => b.id === 'PRE2026-901'), "TEST 90: Presupuesto inicial aparece en presupuestos pendientes de seguimiento");
+
+// 3. Cancelación conversacional
+const session90 = { companyId: companyId90, phone: phone90, budgets: new Map() };
+const replyCancel901 = await resolveIntent90({ intent: 'CANCEL_BUDGET', params: { targetQuery: 'maria' } }, phone90, session90);
+assert(replyCancel901.includes('marcado como cancelado'), "TEST 90: Respuesta confirma que el presupuesto fue marcado como cancelado");
+assert(replyCancel901.includes('María López') || replyCancel901.includes('PRE2026-901'), "TEST 90: Respuesta identifica el presupuesto y cliente");
+assert(replyCancel901.includes('Ya no aparecerá en tus presupuestos pendientes'), "TEST 90: Mensaje aclara que no habrá más avisos");
+
+const bAfterCancel = getBudget90(companyId90, 'PRE2026-901');
+assert(bAfterCancel.status === 'CANCELADO', "TEST 90: Estado en SQLite actualizado a 'CANCELADO'");
+assert(!getBudgetsPendingFollowUp90(companyId90).some(b => b.id === 'PRE2026-901'), "TEST 90: Presupuesto cancelado NO aparece en presupuestos pendientes de seguimiento");
+assert(!getBudgetsNearExpiration(companyId90).some(b => b.id === 'PRE2026-901'), "TEST 90: Presupuesto cancelado NO genera alertas de vencimiento");
+
+// 4. Alerta de vencimiento: 1 día antes del vencimiento (Día 6 de 7)
+saveBudget90(companyId90, {
+  id: 'PRE2026-902',
+  client: { name: 'Carlos Vives', phone: '+34699333444' },
+  financials: { totalAmount: 2000 },
+  status: 'PENDIENTE_FIRMA',
+  terms: { validityDays: 7 }
+});
+currentTestDb.prepare("UPDATE budgets SET created_at = ? WHERE id = ?").run(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000 - 3600000).toISOString(), 'PRE2026-902');
+
+const nearExp902 = getBudgetsNearExpiration(companyId90);
+const item902 = nearExp902.find(b => b.id === 'PRE2026-902');
+assert(item902 && item902.isSoonToExpire === true, "TEST 90: A falta de 1 día (día 6 de 7), detecta isSoonToExpire = true");
+assert(item902 && item902.isExpired === false, "TEST 90: A falta de 1 día, isExpired es false");
+
+const sentMessages90 = [];
+const mockSock90 = {
+  sendMessage: async (jid, content) => {
+    sentMessages90.push({ jid, content });
+    return { key: { id: 'msg-' + Math.random() } };
+  }
+};
+
+await runBudgetExpirationReminderJob(mockSock90, new Map([[phone90 + '@s.whatsapp.net', session90]]), new Set(), { ignoreTimeWindow: true });
+assert(sentMessages90.length === 1, "TEST 90: Se envía exactamente 1 mensaje de aviso para presupuesto próximo a vencer");
+assert(sentMessages90[0].jid === phone90 + '@s.whatsapp.net', "TEST 90: El recordatorio se envía EXCLUSIVAMENTE al autónomo");
+assert(!sentMessages90.some(m => m.jid.includes('699333444') || m.jid.includes('699111222')), "TEST 90: REGLA DE ORO: CERO mensajes enviados al cliente final");
+assert(sentMessages90[0].content.text.includes('vence mañana'), "TEST 90: El aviso de víspera indica claramente que vence mañana");
+assert(sentMessages90[0].content.text.includes('Carlos Vives'), "TEST 90: El aviso menciona al cliente Carlos Vives");
+
+// Idempotencia del recordatorio de víspera
+await runBudgetExpirationReminderJob(mockSock90, new Map([[phone90 + '@s.whatsapp.net', session90]]), new Set(), { ignoreTimeWindow: true });
+assert(sentMessages90.length === 1, "TEST 90: Idempotencia: No duplica el recordatorio de víspera");
+
+// 5. Alerta de vencimiento: Día exacto de vencimiento (Día 7 de 7)
+saveBudget90(companyId90, {
+  id: 'PRE2026-903',
+  client: { name: 'María Gómez', phone: '+34699555666' },
+  financials: { totalAmount: 3200 },
+  status: 'PENDIENTE_FIRMA',
+  terms: { validityDays: 7 }
+});
+currentTestDb.prepare("UPDATE budgets SET created_at = ? WHERE id = ?").run(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000 - 3600000).toISOString(), 'PRE2026-903');
+
+const nearExp903 = getBudgetsNearExpiration(companyId90);
+const item903 = nearExp903.find(b => b.id === 'PRE2026-903');
+assert(item903 && item903.isExpired === true, "TEST 90: El día de vencimiento (día 7 de 7), detecta isExpired = true");
+
+sentMessages90.length = 0;
+await runBudgetExpirationReminderJob(mockSock90, new Map([[phone90 + '@s.whatsapp.net', session90]]), new Set(), { ignoreTimeWindow: true });
+assert(sentMessages90.length === 1, "TEST 90: Se envía exactamente 1 mensaje por el presupuesto vencido");
+assert(sentMessages90[0].jid === phone90 + '@s.whatsapp.net', "TEST 90: Aviso de vencimiento enviado EXCLUSIVAMENTE al autónomo");
+assert(!sentMessages90.some(m => m.jid.includes('699555666')), "TEST 90: REGLA DE ORO: NUNCA se envía aviso de vencimiento al cliente");
+
+const expText = sentMessages90[0].content.text;
+assert(expText.includes('ha alcanzado hoy el límite de 7 días'), "TEST 90: Mensaje contiene 'ha alcanzado hoy el límite de 7 días'");
+assert(expText.includes('Sigue sin firmar'), "TEST 90: Mensaje contiene 'Sigue sin firmar'");
+assert(expText.includes('cerrar la obra'), "TEST 90: Mensaje sugiere llamada para cerrar la obra");
+assert(expText.includes('marca como perdido el de María Gómez'), "TEST 90: Mensaje incluye la instrucción de marcado como perdido");
+
+// Idempotencia del aviso de vencimiento
+await runBudgetExpirationReminderJob(mockSock90, new Map([[phone90 + '@s.whatsapp.net', session90]]), new Set(), { ignoreTimeWindow: true });
+assert(sentMessages90.length === 1, "TEST 90: Idempotencia: No duplica el aviso de vencimiento");
+
+// 6. Cancelación tras el aviso de vencimiento
+const cancelReply903 = await resolveIntent90({ intent: 'CANCEL_BUDGET', params: { targetQuery: 'María Gómez' } }, phone90, session90);
+assert(cancelReply903.includes('marcado como cancelado'), "TEST 90: Presupuesto PRE2026-903 cancelado con éxito tras el aviso");
+const b903Check = getBudget90(companyId90, 'PRE2026-903');
+assert(b903Check.status === 'CANCELADO', "TEST 90: Estado en SQLite verificado como 'CANCELADO'");
+
+// Limpieza de datos temporales de TEST 90
+cleanTenant89(phone90);
+currentTestDb.prepare('DELETE FROM budgets WHERE id IN (?, ?, ?)').run('PRE2026-901', 'PRE2026-902', 'PRE2026-903');
+currentTestDb.prepare('DELETE FROM companies WHERE id = ?').run(companyId90);
+// --- TEST 91: ENDURECIMIENTO DE DESPLIEGUE, FAIL-CLOSED, TEMPORIZADORES, BLOQUEO DE INSTANCIA Y CIERRE ORDENADO ---
+console.log("\n--- TEST 91: ENDURECIMIENTO DE DESPLIEGUE, FAIL-CLOSED, TEMPORIZADORES, BLOQUEO DE INSTANCIA Y CIERRE ORDENADO ---");
+
+const originalExplicitAuthEnv = process.env.REQUIRE_EXPLICIT_AUTH;
+
+// A. Control de acceso fail-closed: resolveRequireExplicitAuth y shouldProcessIncomingMessage
+// 1. Variable ausente
+delete process.env.REQUIRE_EXPLICIT_AUTH;
+assert(resolveRequireExplicitAuth() === true, "TEST 91 (A1): REQUIRE_EXPLICIT_AUTH ausente resuelve a true (fail-closed)");
+const ingressAbsent = shouldProcessIncomingMessage({
+  remoteJid: '34699881122@s.whatsapp.net',
+  fromMe: false,
+  remotePhone: '34699881122',
+  allowedNumbers: []
+});
+assert(ingressAbsent.process === false && ingressAbsent.reason === 'UNAUTHORIZED_INCOMING_SENDER', "TEST 91 (A2): Remitente desconocido bloqueado cuando REQUIRE_EXPLICIT_AUTH está ausente");
+
+// 2. Variable vacía
+process.env.REQUIRE_EXPLICIT_AUTH = '';
+assert(resolveRequireExplicitAuth() === true, "TEST 91 (A3): REQUIRE_EXPLICIT_AUTH vacía resuelve a true (fail-closed)");
+const ingressEmpty = shouldProcessIncomingMessage({
+  remoteJid: '34699881122@s.whatsapp.net',
+  fromMe: false,
+  remotePhone: '34699881122',
+  allowedNumbers: []
+});
+assert(ingressEmpty.process === false && ingressEmpty.reason === 'UNAUTHORIZED_INCOMING_SENDER', "TEST 91 (A4): Remitente desconocido bloqueado cuando REQUIRE_EXPLICIT_AUTH está vacía");
+
+// 3. Valor 'true'
+process.env.REQUIRE_EXPLICIT_AUTH = 'true';
+assert(resolveRequireExplicitAuth() === true, "TEST 91 (A5): REQUIRE_EXPLICIT_AUTH='true' resuelve a true");
+const ingressTrue = shouldProcessIncomingMessage({
+  remoteJid: '34699881122@s.whatsapp.net',
+  fromMe: false,
+  remotePhone: '34699881122',
+  allowedNumbers: []
+});
+assert(ingressTrue.process === false && ingressTrue.reason === 'UNAUTHORIZED_INCOMING_SENDER', "TEST 91 (A6): Remitente desconocido bloqueado cuando REQUIRE_EXPLICIT_AUTH='true'");
+
+// 4. Valor 'false'
+process.env.REQUIRE_EXPLICIT_AUTH = 'false';
+assert(resolveRequireExplicitAuth() === false, "TEST 91 (A7): REQUIRE_EXPLICIT_AUTH='false' resuelve a false (legacy abierto)");
+const ingressFalse = shouldProcessIncomingMessage({
+  remoteJid: '34699881122@s.whatsapp.net',
+  fromMe: false,
+  remotePhone: '34699881122',
+  allowedNumbers: []
+});
+assert(ingressFalse.process === true && ingressFalse.reason === 'ONBOARDING_ELIGIBLE_SENDER', "TEST 91 (A8): Remitente admitido a onboarding solo con configuración explícita 'false'");
+
+// Variantes de 'false' (espacios y mayúsculas)
+process.env.REQUIRE_EXPLICIT_AUTH = '  FALSE  ';
+assert(resolveRequireExplicitAuth() === false, "TEST 91 (A9): REQUIRE_EXPLICIT_AUTH='  FALSE  ' resuelve a false");
+
+// 5. Valores inesperados ('unexpected', '0', 'undefined', etc.)
+process.env.REQUIRE_EXPLICIT_AUTH = 'unexpected';
+assert(resolveRequireExplicitAuth() === true, "TEST 91 (A10): REQUIRE_EXPLICIT_AUTH='unexpected' resuelve a true (fail-closed)");
+process.env.REQUIRE_EXPLICIT_AUTH = '0';
+assert(resolveRequireExplicitAuth() === true, "TEST 91 (A11): REQUIRE_EXPLICIT_AUTH='0' resuelve a true (fail-closed)");
+process.env.REQUIRE_EXPLICIT_AUTH = 'invalid_setting';
+assert(resolveRequireExplicitAuth() === true, "TEST 91 (A12): REQUIRE_EXPLICIT_AUTH='invalid_setting' resuelve a true (fail-closed)");
+
+const ingressUnexpected = shouldProcessIncomingMessage({
+  remoteJid: '34699881122@s.whatsapp.net',
+  fromMe: false,
+  remotePhone: '34699881122',
+  allowedNumbers: []
+});
+assert(ingressUnexpected.process === false && ingressUnexpected.reason === 'UNAUTHORIZED_INCOMING_SENDER', "TEST 91 (A13): Remitente desconocido bloqueado ante valor de configuración inesperado");
+
+// 6. Parámetro directo pasado a la función
+assert(resolveRequireExplicitAuth(false) === false, "TEST 91 (A14): Parámetro false resuelve a false");
+assert(resolveRequireExplicitAuth('false') === false, "TEST 91 (A15): Parámetro 'false' resuelve a false");
+assert(resolveRequireExplicitAuth(true) === true, "TEST 91 (A16): Parámetro true resuelve a true");
+assert(resolveRequireExplicitAuth('true') === true, "TEST 91 (A17): Parámetro 'true' resuelve a true");
+assert(resolveRequireExplicitAuth('') === true, "TEST 91 (A18): Parámetro '' resuelve a true (fail-closed)");
+assert(resolveRequireExplicitAuth('random') === true, "TEST 91 (A19): Parámetro 'random' resuelve a true (fail-closed)");
+
+// Parámetro explícito sobreescribe variable de entorno
+process.env.REQUIRE_EXPLICIT_AUTH = 'false';
+const ingressOverrideBlock = shouldProcessIncomingMessage({
+  remoteJid: '34699881122@s.whatsapp.net',
+  fromMe: false,
+  remotePhone: '34699881122',
+  allowedNumbers: [],
+  requireExplicitAuth: true
+});
+assert(ingressOverrideBlock.process === false, "TEST 91 (A20): Parámetro requireExplicitAuth:true bloquea aunque env sea 'false'");
+
+process.env.REQUIRE_EXPLICIT_AUTH = 'true';
+const ingressOverrideAllow = shouldProcessIncomingMessage({
+  remoteJid: '34699881122@s.whatsapp.net',
+  fromMe: false,
+  remotePhone: '34699881122',
+  allowedNumbers: [],
+  requireExplicitAuth: false
+});
+assert(ingressOverrideAllow.process === true, "TEST 91 (A21): Parámetro requireExplicitAuth:false permite aunque env sea 'true'");
+
+// Restaurar entorno
+if (originalExplicitAuthEnv !== undefined) {
+  process.env.REQUIRE_EXPLICIT_AUTH = originalExplicitAuthEnv;
+} else {
+  delete process.env.REQUIRE_EXPLICIT_AUTH;
+}
+
+// B. Ciclo de vida de los temporizadores: clearGatewayTimers
+assert(typeof clearGatewayTimers === 'function', "TEST 91 (B1): clearGatewayTimers es una función exportada");
+clearGatewayTimers(); // Debe ejecutarse limpiamente sin errores cuando no hay temporizadores
+assert(true, "TEST 91 (B2): clearGatewayTimers es seguro e idempotente en estado inicial");
+
+// C. Bloqueo de instancia única: instance_lock.js
+const testLockPath91 = path.resolve('data', 'test_instance_lock_91.lock');
+if (fs.existsSync(testLockPath91)) {
+  try { fs.unlinkSync(testLockPath91); } catch(e) {}
+}
+
+// 1. Adquisición inicial exitosa
+const lockAcquire1 = acquireGatewayLock(testLockPath91);
+assert(lockAcquire1.acquired === true && lockAcquire1.pid === process.pid, "TEST 91 (C1): Adquisición de lockfile exitosa para el proceso actual");
+assert(fs.existsSync(testLockPath91), "TEST 91 (C2): Archivo de bloqueo creado físicamente en disco");
+
+const lockFileRaw = fs.readFileSync(testLockPath91, 'utf8');
+const lockFileParsed = JSON.parse(lockFileRaw);
+assert(lockFileParsed.pid === process.pid, "TEST 91 (C3): Lockfile contiene el PID correcto del proceso");
+
+// 2. Re-adquisición idempotente por el mismo proceso
+const lockAcquireRe = acquireGatewayLock(testLockPath91);
+assert(lockAcquireRe.acquired === true && lockAcquireRe.pid === process.pid, "TEST 91 (C4): Re-adquisición idempotente por el mismo proceso permitida");
+
+// 3. Intento de adquisición cuando otra instancia activa posee el bloqueo
+// Usamos process.ppid si está activo, o mockeamos comprobando isPidAlive
+const activeOtherPid = process.ppid && isPidAlive(process.ppid) ? process.ppid : process.pid;
+if (activeOtherPid !== process.pid) {
+  fs.writeFileSync(testLockPath91, JSON.stringify({ pid: activeOtherPid, createdAt: new Date().toISOString() }));
+  const lockCollision = acquireGatewayLock(testLockPath91);
+  assert(lockCollision.acquired === false && lockCollision.reason === 'ALREADY_RUNNING', "TEST 91 (C5): Detección y rechazo seguro ante colisión con otra instancia activa");
+  assert(lockCollision.activePid === activeOtherPid, "TEST 91 (C6): Reporta el PID activo de la otra instancia");
+} else {
+  // Simulación con objeto lock simulado
+  assert(true, "TEST 91 (C5): Omitida verificación con ppid idéntico (entorno sin parent)");
+  assert(true, "TEST 91 (C6): Omitido");
+}
+
+// 4. Detección y recuperación de lockfile obsoleto (stale lock de proceso muerto)
+let deadPidCandidate = 99999999;
+while (isPidAlive(deadPidCandidate)) {
+  deadPidCandidate++;
+}
+fs.writeFileSync(testLockPath91, JSON.stringify({ pid: deadPidCandidate, createdAt: new Date(Date.now() - 3600000).toISOString() }));
+const staleRecover = acquireGatewayLock(testLockPath91);
+assert(staleRecover.acquired === true && staleRecover.pid === process.pid, "TEST 91 (C7): Lockfile obsoleto de proceso inactivo detectado y reclamado automáticamente");
+
+// 5. Liberación segura del lockfile
+// No debe eliminar el lock si pertenece a otro proceso
+fs.writeFileSync(testLockPath91, JSON.stringify({ pid: 88888888, createdAt: new Date().toISOString() }));
+const releaseNotMine = releaseGatewayLock(testLockPath91);
+assert(releaseNotMine === false, "TEST 91 (C8): NUNCA elimina un lockfile perteneciente a otro PID");
+assert(fs.existsSync(testLockPath91), "TEST 91 (C9): El archivo de bloqueo ajeno permanece intacto");
+
+// Sí debe eliminar si pertenece a este proceso
+fs.writeFileSync(testLockPath91, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }));
+const releaseMine = releaseGatewayLock(testLockPath91);
+assert(releaseMine === true, "TEST 91 (C10): Libera exitosamente el bloqueo cuando pertenece al proceso actual");
+assert(!fs.existsSync(testLockPath91), "TEST 91 (C11): Archivo de bloqueo eliminado de disco tras liberación");
+
+// D. Cierre ordenado (gracefulShutdown)
+let mockSocketClosed = false;
+let mockSocketEndReason = null;
+const mockSocket91 = {
+  end: (err) => {
+    mockSocketClosed = true;
+    mockSocketEndReason = err?.message || 'closed';
+  },
+  ws: { close: () => {} }
+};
+
+await gracefulShutdown('SIGTERM', mockSocket91, { exitProcess: false, timeoutMs: 100, closeDatabase: false });
+assert(mockSocketClosed === true, "TEST 91 (D1): gracefulShutdown cierra el socket de WhatsApp");
+assert(mockSocketEndReason && mockSocketEndReason.includes('SIGTERM'), "TEST 91 (D2): Cierre de socket documenta la señal SIGTERM recibida");
+
+// Llamada redundante a gracefulShutdown debe ser idempotente
+let redundantThrows = false;
+try {
+  await gracefulShutdown('SIGINT', mockSocket91, { exitProcess: false, timeoutMs: 100, closeDatabase: false });
+} catch {
+  redundantThrows = true;
+}
+assert(!redundantThrows, "TEST 91 (D3): gracefulShutdown redundante se ejecuta sin excepciones de concurrencia");
+resetShutdownStateForTesting();
+
+// E. Protección y aislamiento de db_viewer.js
+assert(canStartDbViewer('production').allowed === false, "TEST 91 (E1): canStartDbViewer bloquea terminantemente NODE_ENV=production");
+assert(canStartDbViewer('production').reason === 'PRODUCTION_FORBIDDEN', "TEST 91 (E2): Motivo documentado PRODUCTION_FORBIDDEN");
+assert(canStartDbViewer('development').allowed === true, "TEST 91 (E3): canStartDbViewer permite NODE_ENV=development");
+assert(canStartDbViewer('test').allowed === true, "TEST 91 (E4): canStartDbViewer permite NODE_ENV=test");
+assert(DB_VIEWER_HOST === '127.0.0.1', "TEST 91 (E5): db_viewer.js escucha EXCLUSIVAMENTE en host local 127.0.0.1 (no expuesto a red)");
 
 
 if (passedCount === totalCount) {

@@ -48,7 +48,18 @@ import {
 } from './fiscal_service.js';
 import { resolveAuthenticatedContext } from './identity_service.js';
 import {
+  normalizeToE164,
+  isPlatformAdmin,
+  isPhoneNumberAuthorized,
+  authorizePhoneNumber,
+  revokePhoneNumber,
+  listAuthorizedPhoneNumbers,
+  parseAdminCommand
+} from './access_control_service.js';
+import { acquireGatewayLock, releaseGatewayLock } from './instance_lock.js';
+import {
   db,
+  closeDb,
   getCompany,
   saveCompany,
   saveBudget,
@@ -699,6 +710,125 @@ export function setConversationState(remoteJid, state) {
 export const userSessions = new Map();
 export const botSentMessageIds = new Set();
 export const provisionalSessions = new Map();
+export const activeProcessingJids = new Set();
+
+// Temporizadores centralizados del ciclo de vida del Gateway (previenen acumulación en reconexiones)
+export let signatureSyncTimer = null;
+export let aiQueueTimer = null;
+export let schedulerTimer = null;
+export let isSyncingSignatures = false;
+export let isShuttingDown = false;
+export let isShutdownInProgress = false;
+
+let currentActiveSocket = null;
+let signalHandlersRegistered = false;
+
+/**
+ * Limpia y cancela todos los temporizadores de fondo del gateway.
+ * Es idempotente y previene fugas de recursos al desconectar y reconectar.
+ */
+export function clearGatewayTimers() {
+  if (signatureSyncTimer) {
+    clearInterval(signatureSyncTimer);
+    signatureSyncTimer = null;
+  }
+  if (aiQueueTimer) {
+    clearInterval(aiQueueTimer);
+    aiQueueTimer = null;
+  }
+  if (schedulerTimer) {
+    clearInterval(schedulerTimer);
+    schedulerTimer = null;
+  }
+}
+
+/**
+ * Cierre ordenado (graceful shutdown) para SIGTERM y SIGINT.
+ * Limpia temporizadores, cierra socket de WhatsApp, espera operaciones en curso,
+ * libera el lockfile y cierra la base de datos SQLite de forma consistente.
+ */
+export async function gracefulShutdown(signal = 'SIGTERM', sock = currentActiveSocket, { exitProcess = true, timeoutMs = 5000, closeDatabase = true } = {}) {
+  if (isShutdownInProgress) {
+    console.log('⏳ [Shutdown] Cierre ordenado ya en progreso, ignorando llamada redundante.');
+    return;
+  }
+  isShutdownInProgress = true;
+  isShuttingDown = true;
+  console.log(`\n🛑 [Shutdown] Recibida señal ${signal}. Iniciando cierre ordenado de PresuVoz...`);
+
+  // 1. Detener temporizadores de fondo de inmediato
+  clearGatewayTimers();
+
+  // 2. Cerrar socket de WhatsApp
+  const targetSock = sock || currentActiveSocket;
+  if (targetSock) {
+    try {
+      console.log('🔌 [Shutdown] Cerrando conexión de WhatsApp...');
+      if (typeof targetSock.end === 'function') {
+        targetSock.end(new Error(`Graceful shutdown via ${signal}`));
+      } else if (targetSock.ws && typeof targetSock.ws.close === 'function') {
+        targetSock.ws.close();
+      }
+    } catch (sockErr) {
+      console.warn('⚠️ [Shutdown] Aviso al cerrar socket de WhatsApp:', sockErr.message);
+    }
+  }
+
+  // 3. Esperar que finalicen operaciones activas (con timeout de gracia)
+  const startTime = Date.now();
+  while (activeProcessingJids.size > 0 && (Date.now() - startTime) < timeoutMs) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  if (activeProcessingJids.size > 0) {
+    console.warn(`⚠️ [Shutdown] Tiempo de espera agotado con ${activeProcessingJids.size} tareas aún en curso.`);
+  }
+
+  // 4. Liberar bloqueo de instancia única
+  try {
+    releaseGatewayLock();
+  } catch (lockErr) {
+    console.warn('⚠️ [Shutdown] Error liberando lockfile:', lockErr.message);
+  }
+
+  // 5. Cerrar base de datos SQLite solo cuando no hay operaciones pendientes
+  if (closeDatabase) {
+    try {
+      console.log('💾 [Shutdown] Cerrando conexión con base de datos SQLite...');
+      closeDb();
+    } catch (dbErr) {
+      console.warn('⚠️ [Shutdown] Error al cerrar base de datos SQLite:', dbErr.message);
+    }
+  }
+
+  console.log('✅ [Shutdown] PresuVoz finalizado de forma ordenada y consistente.');
+  if (exitProcess) {
+    process.exit(0);
+  }
+}
+
+/**
+ * Utilidad exclusiva para pruebas unitarias: reinicia el estado de apagado.
+ */
+export function resetShutdownStateForTesting() {
+  isShutdownInProgress = false;
+  isShuttingDown = false;
+}
+
+/**
+ * Registra los escuchadores de señales del proceso (SIGTERM y SIGINT) de forma única.
+ */
+export function setupSignalHandlers(sock) {
+  currentActiveSocket = sock;
+  if (!signalHandlersRegistered) {
+    signalHandlersRegistered = true;
+    process.on('SIGTERM', () => {
+      gracefulShutdown('SIGTERM', currentActiveSocket, { exitProcess: true });
+    });
+    process.on('SIGINT', () => {
+      gracefulShutdown('SIGINT', currentActiveSocket, { exitProcess: true });
+    });
+  }
+}
 
 /**
  * Obtiene o inicializa el contexto de sesión provisional para un usuario no autenticado en onboarding.
@@ -981,7 +1111,47 @@ function storeMessage(keyId, message) {
  * 3. Mensajes entrantes de terceros (!fromMe): SOLO se procesan si el remitente está
  *    explícitamente en ALLOWED_NUMBERS (ej. familiares/testers para sus pruebas). Contactos ajenos se descartan.
  */
-export function shouldProcessIncomingMessage({ remoteJid, fromMe, myNumber, myLid, remotePhone, allowedNumbers = [] }) {
+/**
+ * Resuelve si se exige autorización explícita previa para nuevos números.
+ * Principio de Denegación por Defecto (fail-closed):
+ * La autorización explícita está activada por defecto (true) a menos que
+ * exista una configuración explícita y válida con valor 'false'.
+ *
+ * @param {boolean|string|undefined|null} explicitSetting - Parámetro opcional pasado a la función
+ * @returns {boolean}
+ */
+export function resolveRequireExplicitAuth(explicitSetting = undefined) {
+  if (explicitSetting !== undefined && explicitSetting !== null) {
+    if (typeof explicitSetting === 'boolean') {
+      return explicitSetting;
+    }
+    if (typeof explicitSetting === 'string') {
+      const trimmed = explicitSetting.trim().toLowerCase();
+      if (trimmed === 'false') return false;
+      return true; // Cualquier otro valor ('true', '', '0', 'unexpected') es fail-closed
+    }
+    return Boolean(explicitSetting);
+  }
+
+  const envVal = process.env.REQUIRE_EXPLICIT_AUTH;
+  if (typeof envVal === 'string') {
+    return envVal.trim().toLowerCase() !== 'false';
+  }
+  // Variable ausente o no string: bloqueado por defecto (fail-closed)
+  return true;
+}
+
+export function shouldProcessIncomingMessage({
+  remoteJid,
+  fromMe,
+  myNumber,
+  myLid,
+  remotePhone,
+  allowedNumbers = [],
+  requireExplicitAuth = undefined
+}) {
+  const isAuthRequired = resolveRequireExplicitAuth(requireExplicitAuth);
+
   if (!remoteJid || typeof remoteJid !== 'string') {
     return { process: false, reason: 'INVALID_JID' };
   }
@@ -1015,13 +1185,18 @@ export function shouldProcessIncomingMessage({ remoteJid, fromMe, myNumber, myLi
   }
 
   // 5. REGLAS PARA MENSAJES ENTRANTES DE TERCEROS (!fromMe):
-  // a) Autorizado por lista explícita ALLOWED_NUMBERS (ej. testers/admin)
+  // a) Administrador de la plataforma (ADMIN_PHONE_NUMBERS)
+  if (isPlatformAdmin(remoteUser)) {
+    return { process: true, reason: 'PLATFORM_ADMIN', senderNumber: remoteUser };
+  }
+
+  // b) Autorizado por lista explícita ALLOWED_NUMBERS (ej. testers/admin)
   const isAllowed = allowedNumbers.some(num => num && remoteUser === String(num).replace(/\D/g, ''));
   if (isAllowed) {
     return { process: true, reason: 'AUTHORIZED_EXTERNAL_SENDER', senderNumber: remoteUser };
   }
 
-  // b) Canal ya registrado y autenticado en SQLite (channel_identities)
+  // c) Canal ya registrado y autenticado en SQLite (channel_identities)
   try {
     const authContext = resolveAuthenticatedContext('whatsapp', remoteUser);
     if (authContext && authContext.companyId) {
@@ -1029,8 +1204,24 @@ export function shouldProcessIncomingMessage({ remoteJid, fromMe, myNumber, myLi
     }
   } catch (e) {}
 
-  // c) Remitente 1:1 nuevo o en onboarding (candidato a onboarding seguro - DEF-01)
-  // Debe ser un JID individual legítimo de WhatsApp (@s.whatsapp.net, @c.us o número plano)
+  // d) Comprobar autorización explícita (pre-autorización para onboarding o revocación)
+  try {
+    const authCheck = isPhoneNumberAuthorized(remoteUser, { allowedNumbers });
+    if (authCheck.status === 'REVOKED') {
+      return { process: false, reason: 'REVOKED_SENDER' };
+    }
+    if (authCheck.authorized && authCheck.status === 'AUTHORIZED') {
+      return { process: true, reason: 'ONBOARDING_ELIGIBLE_SENDER', senderNumber: remoteUser };
+    }
+  } catch (e) {}
+
+  // e) Si se requiere autorización explícita (modo producción/lanzamiento Default-Deny):
+  // Todo número desconocido o no pre-autorizado queda denegado por defecto.
+  if (isAuthRequired) {
+    return { process: false, reason: 'UNAUTHORIZED_INCOMING_SENDER' };
+  }
+
+  // f) Modo compatibilidad legacy: Remitente 1:1 nuevo o en onboarding (candidato a onboarding seguro - DEF-01)
   const isDirectIndividualChat = remoteJid.includes('@s.whatsapp.net') || remoteJid.includes('@c.us') || !remoteJid.includes('@');
   if (isDirectIndividualChat && remoteUser.length >= 7) {
     return { process: true, reason: 'ONBOARDING_ELIGIBLE_SENDER', senderNumber: remoteUser };
@@ -1065,13 +1256,26 @@ export function isAuthorizedEgressRecipient(targetJid, { myNumber, myLid, allowe
     return { allowed: true, reason: 'SELF_CHAT' };
   }
 
-  // 3. Números expresamente autorizados en ALLOWED_NUMBERS
+  // 3. Comprobar si el destinatario está revocado: BLOQUEO INMEDIATO
+  try {
+    const authCheck = isPhoneNumberAuthorized(targetUser, { allowedNumbers });
+    if (authCheck.status === 'REVOKED') {
+      return { allowed: false, reason: 'REVOKED_RECIPIENT_BLOCKED' };
+    }
+  } catch (e) {}
+
+  // 4. Administrador de la plataforma
+  if (isPlatformAdmin(targetUser)) {
+    return { allowed: true, reason: 'PLATFORM_ADMIN' };
+  }
+
+  // 5. Números expresamente autorizados en ALLOWED_NUMBERS
   const isAllowed = allowedNumbers.some(num => num && targetUser === String(num).replace(/\D/g, ''));
   if (isAllowed) {
     return { allowed: true, reason: 'AUTHORIZED_NUMBER' };
   }
 
-  // 4. Si el canal está autenticado en channel_identities (tenant registrado en el sistema)
+  // 6. Si el canal está autenticado en channel_identities (tenant registrado en el sistema)
   try {
     const authContext = resolveAuthenticatedContext('whatsapp', targetUser);
     if (authContext && authContext.companyId) {
@@ -1079,7 +1283,15 @@ export function isAuthorizedEgressRecipient(targetJid, { myNumber, myLid, allowe
     }
   } catch (e) {}
 
-  // 5. Si está en proceso activo o provisional de onboarding (DEF-01)
+  // 7. Si está pre-autorizado para onboarding
+  try {
+    const authCheck = isPhoneNumberAuthorized(targetUser, { allowedNumbers });
+    if (authCheck.authorized && authCheck.status === 'AUTHORIZED') {
+      return { allowed: true, reason: 'PRE_AUTHORIZED_RECIPIENT' };
+    }
+  } catch (e) {}
+
+  // 8. Si está en proceso activo o provisional de onboarding (DEF-01)
   if (provisionalSessions.has(targetJid)) {
     return { allowed: true, reason: 'PROVISIONAL_ONBOARDING_RECIPIENT' };
   }
@@ -4731,7 +4943,63 @@ export async function handleAcceptBudget(sock, remoteJid, session, targetBudget)
   }
 }
 
+export async function handleCancelBudget(sock, remoteJid, session, targetBudget, cancelReason = 'Cancelado por el autónomo') {
+  if (!targetBudget) {
+    const sentErr = await sock.sendMessage(remoteJid, {
+      text: '⚠️ *No se encontró el presupuesto para marcar como cancelado.*\n\nIndica el nombre del cliente o número de obra (ej: *"cancela el presupuesto de María"* o *"marca como perdido el de Juan"*).'
+    });
+    if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    return;
+  }
+
+  try {
+    const cleanPhone = session.phone || String(remoteJid).replace(/\D/g, '');
+    const contextOrId = session.authContext || session.companyId || cleanPhone;
+    targetBudget.status = 'CANCELADO';
+    saveBudget(contextOrId, targetBudget);
+    if (session?.budgets?.has(targetBudget.id)) {
+      session.budgets.get(targetBudget.id).status = 'CANCELADO';
+    }
+
+    const total = targetBudget.financials?.totalAmount ? `${targetBudget.financials.totalAmount.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €` : '';
+
+    const lines = [
+      `❌ *Presupuesto ${targetBudget.id} marcado como cancelado*`,
+      `👤 *Cliente:* ${targetBudget.client?.name || 'Cliente Particular'}`,
+      total ? `💰 *Importe:* *${total}*` : '',
+      '',
+      `📌 _Ya no aparecerá en tus presupuestos pendientes de firma ni recibirás avisos de seguimiento para esta obra._`
+    ].filter(Boolean);
+
+    const sent = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+    if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+    console.log(`❌ Presupuesto ${targetBudget.id} marcado como CANCELADO para ${cleanPhone}`);
+  } catch (err) {
+    console.error('❌ Error cancelando presupuesto:', err.message);
+    const sentErr = await sock.sendMessage(remoteJid, {
+      text: `⚠️ *Error al marcar el presupuesto como cancelado:* ${err.message}`
+    });
+    if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+  }
+}
+
 async function startWhatsAppGateway() {
+  if (isShuttingDown) {
+    console.log('🛑 [Gateway] Proceso en fase de apagado. No se iniciará una nueva conexión.');
+    return;
+  }
+
+  // Adquirir bloqueo exclusivo de instancia antes de tocar auth_info o sockets
+  const lockResult = acquireGatewayLock();
+  if (!lockResult.acquired) {
+    console.error('\n======================================================');
+    console.error(`🛑 [INSTANCIA DUPLICADA] ${lockResult.message}`);
+    console.error('🛑 Para evitar corrupción de sesión Baileys o bloqueos de SQLite,');
+    console.error('🛑 este proceso se detiene inmediatamente.');
+    console.error('======================================================\n');
+    process.exit(1);
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
   const { version } = await fetchLatestBaileysVersion();
 
@@ -4759,6 +5027,8 @@ async function startWhatsAppGateway() {
       return undefined;
     }
   });
+
+  setupSignalHandlers(sock);
 
   // Interceptar todos los envíos con el Cortafuegos de Salida (Egress Firewall) para garantizar
   // que jamás salga un mensaje a un destinatario no autorizado o ajeno.
@@ -4833,9 +5103,10 @@ async function startWhatsAppGateway() {
     }
 
     if (connection === 'close') {
+      clearGatewayTimers();
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       console.log('⚠️ Conexión cerrada. ¿Reconectando?:', shouldReconnect);
-      if (shouldReconnect) {
+      if (shouldReconnect && !isShuttingDown) {
         startWhatsAppGateway();
       } else {
         console.log('❌ Sesión cerrada. Elimina la carpeta auth_info_baileys para vincular de nuevo.');
@@ -4844,8 +5115,13 @@ async function startWhatsAppGateway() {
       console.log('\n✅ ¡WHATSAPP CONECTADO CON ÉXITO!');
       console.log('🤖 PresuVoz Bot listo para recibir audios y mensajes.\n');
 
-      // Sondeo automático cada 8 segundos para detectar firmas del cliente en la web
-      setInterval(async () => {
+      // Limpiar temporizadores anteriores para evitar duplicaciones tras reconectar
+      clearGatewayTimers();
+
+      // 1. Sondeo automático cada 8 segundos para detectar firmas del cliente en la web (con guardia anti-solapamiento)
+      signatureSyncTimer = setInterval(async () => {
+        if (isShuttingDown || isSyncingSignatures) return;
+        isSyncingSignatures = true;
         try {
           const acceptedList = await syncPendingSignaturesFromCloud();
           for (const item of acceptedList) {
@@ -4908,25 +5184,28 @@ async function startWhatsAppGateway() {
               }
             }
           }
-        } catch (e) {}
+        } catch (e) {
+        } finally {
+          isSyncingSignatures = false;
+        }
       }, 8000);
 
-      // Sondeo cada 4 segundos para reintentar tareas en cola de espera (stand-by)
-      setInterval(async () => {
+      // 2. Sondeo cada 4 segundos para reintentar tareas en cola de espera (stand-by)
+      aiQueueTimer = setInterval(async () => {
+        if (isShuttingDown) return;
         try {
           await processAiStandbyQueue(sock);
         } catch (e) {}
       }, 4000);
 
-      // Inicializar Scheduler Autónomo e Idempotente de Visitas (Víspera 19:30, Mañana 07:30, Fin de Día 20:30)
-      initAppointmentScheduler(sock, userSessions, botSentMessageIds);
+      // 3. Inicializar Scheduler Autónomo e Idempotente de Visitas (Víspera 19:30, Mañana 07:30, Fin de Día 20:30)
+      schedulerTimer = initAppointmentScheduler(sock, userSessions, botSentMessageIds);
     }
   });
 
   // botSentMessageIds exportado a nivel de módulo
   const processedIncomingMsgIds = new Set();
   const recentMessageTexts = new Map();
-  const activeProcessingJids = new Set();
   
 
 
@@ -5635,7 +5914,8 @@ async function startWhatsAppGateway() {
         detected.intent === 'WEEKLY_REVENUE' ||
         detected.intent === 'DAILY_REVENUE' ||
         detected.intent === 'YEARLY_STATS' ||
-        detected.intent === 'REVENUE_STATS'
+        detected.intent === 'REVENUE_STATS' ||
+        detected.intent === 'CANCEL_BUDGET'
       )) {
         console.log(`⚡ [IntentRouter desde Audio] Intención detectada: ${detected.intent}`, detected.params);
         const resolvedReply = await resolveIntent(detected, cleanPhone, session);
@@ -6144,6 +6424,16 @@ async function startWhatsAppGateway() {
         || (session.budgets.size > 0 ? Array.from(session.budgets.values())[session.budgets.size - 1] : null);
 
       await handleAcceptBudget(sock, remoteJid, session, target);
+      return;
+    }
+
+    // 12b. Cancelar o marcar como perdido presupuesto
+    if (aiResult?.action === 'cancel_budget') {
+      const clientQuery = aiResult.clientName || aiResult.targetBudgetId;
+      const target = (aiResult.targetBudgetId && session.budgets.get(aiResult.targetBudgetId))
+        || findBudgetInSession(session, aiResult.clientName || aiResult.targetBudgetId)
+        || (session.activeBudgetId && session.budgets.get(session.activeBudgetId));
+      await handleCancelBudget(sock, remoteJid, session, target);
       return;
     }
 
@@ -6823,6 +7113,82 @@ async function startWhatsAppGateway() {
 
     let isSuccess = false;
     try {
+      // ─── COMANDOS ADMINISTRATIVOS DETERMINÍSTICOS (CONTROL DE ACCESO) ───
+      const adminCmd = parseAdminCommand(rawUserText);
+      if (adminCmd.isCommand) {
+        if (!isPlatformAdmin(senderNumber)) {
+          console.warn(`⛔ [AccessControl] Intento no autorizado de ejecutar comando admin '${rawUserText}' por ${senderNumber}`);
+          if (sock && typeof sock.sendMessage === 'function') {
+            const sent = await sock.sendMessage(remoteJid, {
+              text: '⛔ *Acceso Denegado:* No tienes permisos de administrador de la plataforma para ejecutar este comando.'
+            });
+            if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+          }
+          isSuccess = true;
+          if (wamId) updateMessageStatus(wamId, 'DELIVERED');
+          if (allWamIds) {
+            allWamIds.forEach(id => updateMessageStatus(id, 'DELIVERED'));
+          }
+          setConversationState(remoteJid, 'IDLE');
+          return;
+        }
+
+        if (adminCmd.error) {
+          if (sock && typeof sock.sendMessage === 'function') {
+            const sent = await sock.sendMessage(remoteJid, { text: `⚠️ ${adminCmd.error}` });
+            if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+          }
+          isSuccess = true;
+          if (wamId) updateMessageStatus(wamId, 'DELIVERED');
+          if (allWamIds) {
+            allWamIds.forEach(id => updateMessageStatus(id, 'DELIVERED'));
+          }
+          setConversationState(remoteJid, 'IDLE');
+          return;
+        }
+
+        let replyText = '';
+        if (adminCmd.action === 'AUTHORIZE') {
+          const res = authorizePhoneNumber(adminCmd.targetPhone, senderNumber);
+          replyText = res.message;
+        } else if (adminCmd.action === 'REVOKE') {
+          const res = revokePhoneNumber(adminCmd.targetPhone, senderNumber);
+          replyText = res.message;
+          for (const [sJid, sObj] of userSessions.entries()) {
+            if (sObj?.phone === adminCmd.digits) {
+              userSessions.delete(sJid);
+            }
+          }
+        } else if (adminCmd.action === 'LIST') {
+          const list = listAuthorizedPhoneNumbers();
+          if (list.length === 0) {
+            replyText = '📋 *No hay usuarios registrados ni autorizados actualmente.*';
+          } else {
+            const lines = ['📋 *USUARIOS Y ACCESOS REGISTRADOS:*', '━━━━━━━━━━━━━━━━━━━━━━━━━'];
+            for (const it of list) {
+              const statusEmoji = it.status === 'ACTIVE' ? '✅' : (it.status === 'AUTHORIZED' ? '🔑' : '🛑');
+              const compStr = it.companyName ? ` (${it.companyName})` : (it.hasCompany ? ' (Empresa activa)' : ' (Pendiente onboarding)');
+              lines.push(`${statusEmoji} *${it.e164}* — ${it.status}${compStr}`);
+            }
+            lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+            lines.push(`Total: ${list.length} registros.`);
+            replyText = lines.join('\n');
+          }
+        }
+
+        if (sock && typeof sock.sendMessage === 'function' && replyText) {
+          const sent = await sock.sendMessage(remoteJid, { text: replyText });
+          if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+        }
+        isSuccess = true;
+        if (wamId) updateMessageStatus(wamId, 'DELIVERED');
+        if (allWamIds) {
+          allWamIds.forEach(id => updateMessageStatus(id, 'DELIVERED'));
+        }
+        setConversationState(remoteJid, 'IDLE');
+        return;
+      }
+
       const session = getUserSession(remoteJid, senderNumber);
       if (!session || !session.authContext) {
         // Remitente no autenticado: ejecutar flujo de Onboarding Seguro Provisional
@@ -8431,7 +8797,8 @@ async function startWhatsAppGateway() {
         myNumber,
         myLid,
         remotePhone,
-        allowedNumbers: ALLOWED_NUMBERS
+        allowedNumbers: ALLOWED_NUMBERS,
+        requireExplicitAuth: (process.env.REQUIRE_EXPLICIT_AUTH !== 'false')
       });
 
       if (!ingressCheck.process) {
@@ -8604,5 +8971,19 @@ const isDirectRun = process.argv[1] && (
 if (isDirectRun) {
   startWhatsAppGateway().catch((err) => {
     console.error('Error fatal al iniciar WhatsApp Gateway:', err);
+    try { releaseGatewayLock(); } catch(e) {}
+    process.exit(1);
   });
 }
+
+export {
+  normalizeToE164,
+  isPlatformAdmin,
+  isPhoneNumberAuthorized,
+  authorizePhoneNumber,
+  revokePhoneNumber,
+  listAuthorizedPhoneNumbers,
+  parseAdminCommand,
+  startWhatsAppGateway
+};
+

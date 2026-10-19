@@ -26,6 +26,21 @@ export const db = new DatabaseSync(DB_PATH);
 // Activar integridad referencial estricta
 db.exec('PRAGMA foreign_keys = ON;');
 
+/**
+ * Cierra la conexión de base de datos de forma segura para permitir un cierre ordenado.
+ */
+export function closeDb() {
+  try {
+    if (db && typeof db.close === 'function') {
+      db.close();
+      return true;
+    }
+  } catch (err) {
+    console.warn('⚠️ [DB] Aviso al cerrar base de datos:', err.message);
+  }
+  return false;
+}
+
 let _cachedIs015 = null;
 export function isMigration015Applied(targetDb = db) {
   if (_cachedIs015 !== null && targetDb === db) return _cachedIs015;
@@ -628,7 +643,8 @@ export function saveBudget(companyContextOrIdOrPhone, budget) {
     advanceInvoices: budget.advanceInvoices || [],
     isDraft: budget.isDraft,
     status: budget.status || 'PENDIENTE_ACEPTACION',
-    workMemory: budget.workMemory || {}
+    workMemory: budget.workMemory || {},
+    expirationReminders: budget.expirationReminders || {}
   };
 
 
@@ -744,10 +760,10 @@ export async function syncPendingSignaturesFromCloud(companyContextOrId = null) 
         SELECT id, company_id, data_json 
         FROM budgets 
         WHERE company_id = ?
-          AND status != 'ACEPTADO' AND status != 'FIRMADO'
+          AND status NOT IN ('ACEPTADO', 'FIRMADO', 'CANCELADO', 'PERDIDO')
       `).all(targetCompanyId);
     } else {
-      const stmt = db.prepare("SELECT id, company_id, data_json FROM budgets WHERE company_id IS NOT NULL AND status != 'ACEPTADO' AND status != 'FIRMADO'");
+      const stmt = db.prepare("SELECT id, company_id, data_json FROM budgets WHERE company_id IS NOT NULL AND status NOT IN ('ACEPTADO', 'FIRMADO', 'CANCELADO', 'PERDIDO')");
       rows = stmt.all();
     }
 
@@ -3010,7 +3026,7 @@ export function getBudgetsPendingFollowUp(phoneOrCompany) {
   const companyId = tenant?.companyId;
   if (!companyId) return [];
 
-  const rows = db.prepare("SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets WHERE company_id = ? AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO') ORDER BY created_at ASC").all(companyId);
+  const rows = db.prepare("SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets WHERE company_id = ? AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO', 'CANCELADO', 'PERDIDO') ORDER BY created_at ASC").all(companyId);
   const now = Date.now();
   return rows.map(r => {
     let parsed = null;
@@ -3029,6 +3045,96 @@ export function getBudgetsPendingFollowUp(phoneOrCompany) {
       budget: parsed
     };
   }).filter(Boolean);
+}
+
+/**
+ * Obtiene los presupuestos próximos a vencer (1 día antes) o que han alcanzado su vencimiento hoy.
+ * Idempotente: comprueba budget.expirationReminders (soonSentAt y expiredSentAt) para no duplicar avisos.
+ * Excluye presupuestos aceptados, firmados, finalizados y cancelados/perdidos.
+ */
+export function getBudgetsNearExpiration(phoneOrCompany) {
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  if (!companyId) return [];
+
+  const company = getCompany(tenant);
+  const defaultValidityDays = Number(company?.quoteValidityDays ?? company?.quote_validity_days ?? 15);
+
+  const rows = db.prepare(`
+    SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json 
+    FROM budgets 
+    WHERE company_id = ? 
+      AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO', 'CANCELADO', 'PERDIDO')
+    ORDER BY created_at ASC
+  `).all(companyId);
+
+  const now = Date.now();
+  const results = [];
+
+  for (const r of rows) {
+    let parsed = null;
+    try { parsed = JSON.parse(r.data_json); } catch(e) {}
+    if (parsed?.isDraft) continue;
+
+    const createdAt = r.created_at ? new Date(r.created_at).getTime() : now;
+    const daysWaiting = Math.max(0, Math.floor((now - createdAt) / (1000 * 60 * 60 * 24)));
+    const validityDays = Number(parsed?.terms?.validityDays || defaultValidityDays || 15);
+
+    const reminders = parsed?.expirationReminders || {};
+    const soonSent = Boolean(reminders.soonSentAt);
+    const expiredSent = Boolean(reminders.expiredSentAt);
+
+    // Etapa 1: Falta 1 día para vencer (Día N-1 de N)
+    const isSoonToExpire = daysWaiting >= (validityDays - 1) && daysWaiting < validityDays && !soonSent;
+
+    // Etapa 2: Ha alcanzado o superado el límite de días (Día N de N o más)
+    const isExpired = daysWaiting >= validityDays && !expiredSent;
+
+    if (isSoonToExpire || isExpired) {
+      results.push({
+        id: r.id,
+        clientName: r.client_name || parsed?.client?.name || 'Cliente Particular',
+        clientPhone: r.client_phone || parsed?.client?.phone || null,
+        totalAmount: r.total_amount || parsed?.financials?.totalAmount || 0,
+        status: r.status,
+        createdAt: r.created_at,
+        daysWaiting,
+        validityDays,
+        isSoonToExpire,
+        isExpired,
+        reminders,
+        budget: parsed
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Registra en el JSON del presupuesto que se ha emitido un aviso de vencimiento
+ * para garantizar total idempotencia entre ejecuciones del planificador.
+ */
+export function recordBudgetExpirationReminder(phoneOrCompany, budgetId, reminderType) {
+  if (!phoneOrCompany || !budgetId) return false;
+  const tenant = resolveCompanyTenant(phoneOrCompany);
+  const companyId = tenant?.companyId;
+  if (!companyId) return false;
+
+  const budget = getBudget(tenant, budgetId);
+  if (!budget) return false;
+
+  if (!budget.expirationReminders || typeof budget.expirationReminders !== 'object') {
+    budget.expirationReminders = {};
+  }
+  const now = new Date().toISOString();
+  if (reminderType === 'SOON') {
+    budget.expirationReminders.soonSentAt = now;
+  } else if (reminderType === 'EXPIRED') {
+    budget.expirationReminders.expiredSentAt = now;
+  }
+  saveBudget(tenant, budget);
+  return true;
 }
 
 // ─── Métodos de Consultas Agregadas (Intent Router — sin IA) ─────────────────

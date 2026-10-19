@@ -5,9 +5,11 @@
   "type": "module",
   "main": "src/engine.js",
   "scripts": {
-    "start": "node src/test_run.js",
+    "start": "node src/whatsapp_gateway.js",
     "test": "node src/test_suite.js",
     "test:sign-retry": "node src/test_sign_api_retry.js",
+    "test:demo": "node src/test_run.js",
+    "demo": "node src/test_run.js",
     "simulador": "node src/interactive_cli.js",
     "whatsapp": "node src/whatsapp_gateway.js",
     "visor": "node --watch src/db_viewer.js",

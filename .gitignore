@@ -37,6 +37,11 @@ payload.json
 # SQLite Database & User Logos
 data/*.db
 data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/*.lock
+data/ai_standby_queue.json
+data/gateway_status.json
 data/test/
 data/test_scratch_55/
 data/backups/

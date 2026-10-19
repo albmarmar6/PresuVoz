@@ -11,7 +11,7 @@
  * Independencia: No depende de sesiones en RAM; consulta directamente la base de datos de empresas y visitas.
  */
 
-import { db, getCompany, recordAuditLog } from './db_service.js';
+import { db, getCompany, recordAuditLog, getBudgetsNearExpiration, recordBudgetExpirationReminder } from './db_service.js';
 import { formatListIndex } from './secretary_service.js';
 
 function getNowInTimezone(tz = 'Europe/Madrid') {
@@ -38,9 +38,9 @@ function resolveSchedulerTargetJid(companyIdOrPhone, userSessions) {
   }
   if (companyIdOrPhone && String(companyIdOrPhone).includes('-')) {
     try {
-      const chan = db.prepare("SELECT channel_user_id FROM channel_identities WHERE company_id = ? AND channel = 'whatsapp' AND status = 'ACTIVE' ORDER BY created_at DESC LIMIT 1").get(companyIdOrPhone);
-      if (chan?.channel_user_id) {
-        const clean = String(chan.channel_user_id).replace(/\D/g, '');
+      const chan = db.prepare("SELECT channel_identifier FROM channel_identities WHERE company_id = ? AND channel = 'whatsapp' AND is_active = 1 ORDER BY created_at DESC LIMIT 1").get(companyIdOrPhone);
+      if (chan?.channel_identifier) {
+        const clean = String(chan.channel_identifier).replace(/\D/g, '');
         return `${clean}@s.whatsapp.net`;
       }
     } catch (_) {}
@@ -309,6 +309,95 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
 }
 
 /**
+ * Job 4: Avisos de vencimiento de presupuestos pendientes de firma.
+ * 
+ * Reglas de negocio:
+ * 1. Día anterior al vencimiento (Día N-1 de N):
+ *    Se envía un recordatorio EXCLUSIVAMENTE al autónomo avisándole de que el presupuesto vence mañana y sigue sin firmar.
+ *    REGLA DE SEGURIDAD ESTRICTA: NUNCA se envía ningún mensaje al cliente final.
+ * 2. Día justo de vencimiento (Día N de N):
+ *    Se envía al autónomo el aviso de que ha alcanzado el límite de validez fijado en el onboarding:
+ *    «⏳ El presupuesto de "${clientName}" ha alcanzado hoy el límite de ${validityDays} días. Sigue sin firmar. Puedes llamarla para cerrar la obra o decirme "marca como perdido el de ${clientName}" si ha decidido no hacerlo.»
+ * 
+ * Idempotencia: Los jobs registran `soonSentAt` y `expiredSentAt` en SQLite (data_json), garantizando que no se duplican.
+ */
+export async function runBudgetExpirationReminderJob(sock, userSessions = new Map(), botSentMessageIds = new Set(), options = {}) {
+  if (!sock) return;
+  const { hour, minute } = getNowInTimezone('Europe/Madrid');
+
+  // Ventana matinal recomendada entre 08:30 y 14:00 (salvo ignoreTimeWindow)
+  if (!options?.ignoreTimeWindow) {
+    if (hour < 8 || (hour === 8 && minute < 30) || hour >= 14) return;
+  }
+
+  // Obtener empresas con presupuestos no aceptados ni cancelados
+  let companyRows = [];
+  try {
+    companyRows = db.prepare(`
+      SELECT DISTINCT company_id 
+      FROM budgets 
+      WHERE company_id IS NOT NULL 
+        AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO', 'CANCELADO', 'PERDIDO')
+    `).all();
+  } catch (err) {
+    console.error('❌ [Scheduler] Error consultando empresas para vencimientos:', err.message);
+    return;
+  }
+
+  if (!companyRows || companyRows.length === 0) return;
+
+  for (const { company_id } of companyRows) {
+    if (!company_id) continue;
+    try {
+      const nearExpiring = getBudgetsNearExpiration(company_id);
+      if (!nearExpiring || nearExpiring.length === 0) continue;
+
+      const targetJid = resolveSchedulerTargetJid(company_id, userSessions);
+
+      for (const item of nearExpiring) {
+        if (item.isExpired) {
+          // Día N (alcanzado o superado el límite de validez)
+          const callPronoun = (
+            item.clientName.toLowerCase().endsWith('a') ||
+            item.clientName.toLowerCase().includes('maría') ||
+            item.clientName.toLowerCase().includes('maria') ||
+            item.clientName.toLowerCase().includes('laura') ||
+            item.clientName.toLowerCase().includes('carmen')
+          ) ? 'llamarla' : 'llamarle';
+
+          const msgText = `⏳ El presupuesto de "${item.clientName}" ha alcanzado hoy el límite de ${item.validityDays} días. Sigue sin firmar. Puedes ${callPronoun} para cerrar la obra o decirme "marca como perdido el de ${item.clientName}" si ha decidido no hacerlo.`;
+
+          const sent = await sock.sendMessage(targetJid, { text: msgText });
+          if (sent?.status === 'BLOCKED') {
+            console.warn(`🛡️ [Scheduler] Aviso de vencimiento bloqueado por cortafuegos para ${targetJid}.`);
+            continue;
+          }
+          if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+
+          recordBudgetExpirationReminder(company_id, item.id, 'EXPIRED');
+          console.log(`⏳ [Scheduler] Aviso de vencimiento de presupuesto ${item.id} (${item.clientName}) enviado al autónomo ${targetJid}`);
+        } else if (item.isSoonToExpire) {
+          // Día N-1 (1 día antes del vencimiento) — EXCLUSIVAMENTE para el autónomo
+          const msgText = `⏳ *Recordatorio de presupuesto pendiente de firma*\nEl presupuesto de *${item.clientName}* (${item.id}) vence mañana (ha alcanzado ${item.daysWaiting} de ${item.validityDays} días de validez) y sigue pendiente de firma.\n\n💡 _No se ha enviado ningún mensaje al cliente._`;
+
+          const sent = await sock.sendMessage(targetJid, { text: msgText });
+          if (sent?.status === 'BLOCKED') {
+            console.warn(`🛡️ [Scheduler] Recordatorio de víspera de vencimiento bloqueado por cortafuegos para ${targetJid}.`);
+            continue;
+          }
+          if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+
+          recordBudgetExpirationReminder(company_id, item.id, 'SOON');
+          console.log(`⏳ [Scheduler] Recordatorio víspera de vencimiento ${item.id} (${item.clientName}) enviado al autónomo ${targetJid}`);
+        }
+      }
+    } catch (compErr) {
+      console.error(`❌ [Scheduler] Error procesando vencimientos para empresa ${company_id}:`, compErr.message);
+    }
+  }
+}
+
+/**
  * Reconciliación en arranque tras reinicio del servicio (DEF-06):
  * Comprueba visitas confirmadas no notificadas que se encuentren dentro de
  * ventanas razonables del mismo día y las notifica sin duplicar mensajes
@@ -317,7 +406,7 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
 export async function reconcilePendingSchedulerJobs(sock, userSessions = new Map(), botSentMessageIds = new Set(), options = {}) {
   if (!sock) return { reconciled: false, reason: 'NO_SOCKET' };
   const { hour, minute } = getNowInTimezone('Europe/Madrid');
-  const results = { morning: false, evening: false, endOfDay: false };
+  const results = { morning: false, evening: false, endOfDay: false, budgetExpiration: false };
 
   // 1. Recordatorio matinal: ventana válida si el bot arranca entre las 07:30 y las 14:00
   if (options.ignoreTimeWindow || ((hour > 7 || (hour === 7 && minute >= 30)) && hour < 14)) {
@@ -337,13 +426,19 @@ export async function reconcilePendingSchedulerJobs(sock, userSessions = new Map
     results.endOfDay = true;
   }
 
+  // 4. Vencimiento de presupuestos: ventana matinal/diurna (entre las 08:30 y las 14:00)
+  if (options.ignoreTimeWindow || ((hour > 8 || (hour === 8 && minute >= 30)) && hour < 14)) {
+    await runBudgetExpirationReminderJob(sock, userSessions, botSentMessageIds, { ignoreTimeWindow: true });
+    results.budgetExpiration = true;
+  }
+
   return { reconciled: true, results };
 }
 
 /**
  * Inicializador del Scheduler en segundo plano.
- * Corre cada 60 segundos ejecutando los 3 jobs con total idempotencia.
- * En arranque, reconcilia automáticamente citas pendientes dentro de ventanas válidas (DEF-06).
+ * Corre cada 60 segundos ejecutando los 4 jobs con total idempotencia.
+ * En arranque, reconcilia automáticamente citas y vencimientos pendientes dentro de ventanas válidas (DEF-06).
  */
 export function initAppointmentScheduler(sock, userSessions = new Map(), botSentMessageIds = new Set(), options = {}) {
   console.log('⏰ [Scheduler] Motor de visitas y recordatorios inicializado (Europe/Madrid).');
@@ -359,6 +454,7 @@ export function initAppointmentScheduler(sock, userSessions = new Map(), botSent
       await runMorningReminderJob(sock, userSessions, botSentMessageIds);
       await runEveningBeforeReminderJob(sock, userSessions, botSentMessageIds);
       await runEndOfDayReviewJob(sock, userSessions, botSentMessageIds);
+      await runBudgetExpirationReminderJob(sock, userSessions, botSentMessageIds);
     } catch (err) {
       console.error('❌ [Scheduler] Error en ciclo de reloj:', err.message);
     }

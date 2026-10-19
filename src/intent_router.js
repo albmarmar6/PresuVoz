@@ -28,7 +28,9 @@ import {
   getCompany,
   getCompanyById,
   saveCompany,
-  getProjectBillingSummary
+  getProjectBillingSummary,
+  updateBudgetStatus,
+  getBudget
 } from './db_service.js';
 
 import {
@@ -316,6 +318,42 @@ export function extractPeriodParams(text) {
   return { period: 'month', month: my.month, year: my.year, queryType };
 }
 
+/**
+ * Extrae el identificador o nombre del cliente cuando el profesional pide cancelar,
+ * anular o dar por perdido un presupuesto.
+ * Filtra citas y facturas para evitar falsos positivos con otros comandos de cancelación.
+ */
+export function extractCancelBudgetTarget(text) {
+  if (!text || typeof text !== 'string') return null;
+  const n = norm(text);
+
+  // No interceptar cancelaciones de citas ni facturas
+  if (/\b(?:cita|citas|visita|visitas|factura|facturas)\b/i.test(n)) return null;
+
+  const patterns = [
+    // "cancela el presupuesto PRE2026-001", "cancela el presupuesto de María", "cancela el de Juan", "anular presupuesto de Carlos", "anula el de María"
+    /(?:cancela|cancelar|anula|anular|dar?\s+de\s+baja)\s+(?:el\s+)?(?:presupuesto\s+)?(?:de\s+|del\s+)?([a-z0-9áéíóúñÁÉÍÓÚÑ.\s-]+)/i,
+    // "marca como perdido el de María", "marcar como cancelado el presupuesto de Juan", "da por perdido el de Carlos"
+    /(?:marca|marcar|da|dar|darle)\s+(?:por\s+)?(?:como\s+)?(?:perdido|cancelado|rechazado)\s+(?:el\s+)?(?:presupuesto\s+)?(?:de\s+|del\s+)?([a-z0-9áéíóúñÁÉÍÓÚÑ.\s-]+)/i,
+    // "el cliente ha rechazado el presupuesto de María", "ha rechazado el presupuesto de Juan", "rechazado el presupuesto de Carlos"
+    /(?:(?:el\s+)?cliente\s+ha\s+rechazado|ha\s+rechazado|rechaza(?:do)?)\s+(?:el\s+)?(?:presupuesto\s+)?(?:de\s+|del\s+)?([a-z0-9áéíóúñÁÉÍÓÚÑ.\s-]+)/i,
+    // "no se va a hacer el de María", "no se va a hacer el presupuesto de Carlos", "no lo va a hacer María"
+    /(?:no\s+se\s+va\s+a\s+hacer|no\s+lo\s+va\s+a\s+hacer|no\s+hacemos)\s+(?:el\s+)?(?:presupuesto\s+)?(?:de\s+|del\s+)?([a-z0-9áéíóúñÁÉÍÓÚÑ.\s-]+)/i
+  ];
+
+  for (const p of patterns) {
+    const m = n.match(p);
+    if (m && m[1]) {
+      let target = m[1].trim().replace(/[¿?¡!.]/g, '');
+      target = target.replace(/\b(?:por\s+favor|gracias|ya|ahora|definitivamente|al\s+final)\b/gi, '').trim();
+      target = target.replace(/^(?:el|la|los|las|de|del)\s+/i, '').trim();
+      if (target.length >= 1) return target;
+    }
+  }
+
+  return null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DETECTOR DE INTENCIONES
 // ─────────────────────────────────────────────────────────────────────────────
@@ -328,6 +366,13 @@ export function extractPeriodParams(text) {
 export function detectIntent(text, context = {}) {
   if (!text || typeof text !== 'string') return null;
   const n = norm(text);
+
+  // ── CANCELAR O DAR POR PERDIDO UN PRESUPUESTO ─────────────────────────────
+  // "cancela el presupuesto de María", "marca como perdido el de María", "anula el presupuesto de Carlos"
+  const cancelTarget = extractCancelBudgetTarget(text);
+  if (cancelTarget) {
+    return { intent: 'CANCEL_BUDGET', params: { targetQuery: cancelTarget } };
+  }
 
   // ── CIERRE FISCAL / GESTORÍA / RESUMEN TRIMESTRAL ──────────────────────────
   // "prepárame lo de la gestoría", "¿cómo llevo el trimestre?", "¿cuánto IVA llevo?", "resumen trimestre"
@@ -796,7 +841,7 @@ function formatBudgetStats(budgets) {
     lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
     lines.push('🕐 *Más recientes:*');
     for (const b of recent) {
-      const statusEmoji = { 'PENDIENTE_ACEPTACION': '⏳', 'ACEPTADO': '✅', 'FIRMADO': '✍️', 'FINALIZADO': '🏁', 'ENVIADO': '📤' }[b.status] || '📋';
+      const statusEmoji = { 'PENDIENTE_ACEPTACION': '⏳', 'ACEPTADO': '✅', 'FIRMADO': '✍️', 'FINALIZADO': '🏁', 'ENVIADO': '📤', 'CANCELADO': '❌', 'PERDIDO': '❌' }[b.status] || '📋';
       const total = b.financials?.totalAmount || 0;
       lines.push(`${statusEmoji} *${b.client?.name || 'Cliente'}* · ${fmt(total)} € · ${b.id}`);
     }
@@ -872,7 +917,7 @@ function formatClientLookup(clientName, matches) {
 
   if (matches.length === 1) {
     const m = matches[0];
-    const statusEmoji = { 'PENDIENTE_ACEPTACION': '⏳', 'ACEPTADO': '✅', 'FIRMADO': '✍️', 'FINALIZADO': '🏁', 'ENVIADO': '📤' }[m.status] || '📋';
+    const statusEmoji = { 'PENDIENTE_ACEPTACION': '⏳', 'ACEPTADO': '✅', 'FIRMADO': '✍️', 'FINALIZADO': '🏁', 'ENVIADO': '📤', 'CANCELADO': '❌', 'PERDIDO': '❌' }[m.status] || '📋';
     const lines = [
       `${statusEmoji} *${m.clientName}*`,
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
@@ -893,7 +938,7 @@ function formatClientLookup(clientName, matches) {
     '━━━━━━━━━━━━━━━━━━━━━━━━━'
   ];
   matches.slice(0, 5).forEach((m, i) => {
-    const statusEmoji = { 'PENDIENTE_ACEPTACION': '⏳', 'ACEPTADO': '✅', 'FIRMADO': '✍️', 'FINALIZADO': '🏁' }[m.status] || '📋';
+    const statusEmoji = { 'PENDIENTE_ACEPTACION': '⏳', 'ACEPTADO': '✅', 'FIRMADO': '✍️', 'FINALIZADO': '🏁', 'CANCELADO': '❌', 'PERDIDO': '❌' }[m.status] || '📋';
     lines.push(`*${i + 1}.* ${statusEmoji} *${m.clientName}* · ${fmt(m.totalAmount)} € · ${m.id}`);
     lines.push(`    📍 ${m.clientAddress || 'Sin dirección'}`);
   });
@@ -968,6 +1013,82 @@ export async function resolveIntent(intentResult, phone, session) {
 
   try {
     switch (intent) {
+
+      case 'CANCEL_BUDGET': {
+        const { targetQuery } = params;
+        if (!targetQuery) {
+          return '⚠️ *No entendí qué presupuesto deseas cancelar.*\n\nIndica el nombre del cliente o la referencia de la obra (ej: *"cancela el presupuesto de María"* o *"marca como perdido el PRE2026-001"*).';
+        }
+
+        // 1. Comprobar si coincide con un ID de presupuesto exacto (ej: PRE2026-001 o PRE-...)
+        let resolvedBudget = null;
+        try {
+          const direct = getBudget(tenantContext, targetQuery.toUpperCase());
+          if (direct) resolvedBudget = direct;
+        } catch (_) {}
+
+        // 2. Si no es por ID exacto, buscar por nombre de cliente o dirección en BD
+        if (!resolvedBudget) {
+          const candidates = findClientsByName(tenantContext, targetQuery);
+          if (candidates.length === 1) {
+            resolvedBudget = getBudget(tenantContext, candidates[0].id) || candidates[0];
+          } else if (candidates.length > 1) {
+            // Filtrar solo los que NO estén ya cancelados si hay varios
+            const nonFinalized = candidates.filter(c => c.status !== 'CANCELADO' && c.status !== 'PERDIDO');
+            if (nonFinalized.length === 1) {
+              resolvedBudget = getBudget(tenantContext, nonFinalized[0].id) || nonFinalized[0];
+            } else {
+              const lines = [
+                `⚠️ *Encontré varios presupuestos para "${targetQuery}":*`,
+                '━━━━━━━━━━━━━━━━━━━━━━━━━'
+              ];
+              const listToUse = nonFinalized.length > 0 ? nonFinalized : candidates;
+              listToUse.slice(0, 5).forEach((c, idx) => {
+                lines.push(`*${idx + 1}.* *${c.clientName}* (${fmt(c.totalAmount)} €) — Referencia: ${c.id}`);
+              });
+              lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
+              lines.push('💡 _Dime el número exacto de presupuesto que deseas cancelar (ej: "cancela ' + listToUse[0].id + '")._');
+              return lines.join('\n');
+            }
+          }
+        }
+
+        // 3. Si aún no se resolvió, buscar en sesión RAM
+        if (!resolvedBudget && session?.budgets) {
+          for (const [id, b] of session.budgets.entries()) {
+            const bName = norm(b.client?.name || '');
+            const qNorm = norm(targetQuery);
+            if (bName.includes(qNorm) || id.toLowerCase() === qNorm) {
+              resolvedBudget = b;
+              break;
+            }
+          }
+        }
+
+        if (!resolvedBudget) {
+          return `🔍 No encontré ningún presupuesto activo para *"${targetQuery}"*.\n\n💡 _Di "mis presupuestos" para ver la lista de obras o indica el número exacto (ej: "cancela PRE2026-001")._`;
+        }
+
+        // 4. Actualizar estado a CANCELADO en SQLite y sesión
+        updateBudgetStatus(tenantContext, resolvedBudget.id, 'CANCELADO');
+
+        if (session?.budgets?.has(resolvedBudget.id)) {
+          const inSess = session.budgets.get(resolvedBudget.id);
+          inSess.status = 'CANCELADO';
+        }
+
+        const clientName = resolvedBudget.client?.name || resolvedBudget.clientName || 'Cliente';
+        const total = resolvedBudget.financials?.totalAmount || resolvedBudget.totalAmount || 0;
+
+        return [
+          `❌ *Presupuesto ${resolvedBudget.id} marcado como cancelado*`,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          `👤 *Cliente:* ${clientName}`,
+          total > 0 ? `💰 *Importe:* *${fmt(total)} €*` : null,
+          '',
+          `📌 _Ya no aparecerá en tus presupuestos pendientes de firma ni recibirás avisos de seguimiento para esta obra._`
+        ].filter(Boolean).join('\n');
+      }
 
       case 'FISCAL_QUARTER_SUMMARY': {
         if (!isGestoriaEnabled()) {
