@@ -42,10 +42,13 @@ data/*.db-shm
 data/*.lock
 data/ai_standby_queue.json
 data/gateway_status.json
+data/signing_links*.json
+data/signed_budgets*.json
 data/test/
 data/test_scratch_55/
 data/backups/
 data/fiscal_exports/
 data/logos/*
 !data/logos/.gitkeep
+
 

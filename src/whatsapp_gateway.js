@@ -58,6 +58,13 @@ import {
 } from './access_control_service.js';
 import { acquireGatewayLock, releaseGatewayLock } from './instance_lock.js';
 import {
+  createCloudApiSocket,
+  createPresuVozHttpServer,
+  registerShortSigningLink,
+  getShortSigningLink,
+  downloadCloudMedia
+} from './cloud_api_adapter.js';
+import {
   db,
   closeDb,
   getCompany,
@@ -1620,7 +1627,7 @@ async function shortenUrl(longUrl) {
   return longUrl;
 }
 
-function generateSigningUrl(budget, company, cleanPhone) {
+export function generateSigningUrl(budget, company, cleanPhone) {
   const compactBudget = {
     i: budget.id,
     c: {
@@ -1667,7 +1674,45 @@ function generateSigningUrl(budget, company, cleanPhone) {
     throw new Error('La firma electrónica no está configurada. Define PRESUVOZ_SIGNING_SECRET (mínimo 32 caracteres) en el gateway y en Vercel.');
   }
   const proof = createHmac('sha256', signingSecret).update(budgetZ).digest('base64url');
+
+  const shortCode = registerShortSigningLink({
+    budgetId: budget.id,
+    companyId: budget.companyId || company?.companyId || company?.id || null,
+    companyPhone: company?.phone || cleanPhone || null,
+    z: budgetZ,
+    s: proof,
+    secret: signingSecret
+  });
+
+  const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (publicBaseUrl) {
+    return `${publicBaseUrl}/f/${shortCode}`;
+  }
+
   return `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z=${budgetZ}&s=${proof}`;
+}
+
+export async function downloadWhatsAppMediaBuffer(sock, msg, messageContent, logger) {
+  const cloudMediaId =
+    msg?._cloudMediaId ||
+    messageContent?.audioMessage?._cloudMediaId ||
+    messageContent?.imageMessage?._cloudMediaId ||
+    messageContent?.documentMessage?._cloudMediaId ||
+    null;
+
+  if (cloudMediaId) {
+    if (sock && typeof sock.downloadMedia === 'function') {
+      return sock.downloadMedia(cloudMediaId);
+    }
+    return downloadCloudMedia(cloudMediaId);
+  }
+
+  return downloadMediaMessage(
+    { key: msg.key, message: messageContent },
+    'buffer',
+    {},
+    { logger, reuploadRequest: sock?.updateMediaMessage }
+  );
 }
 
 export function detectAgendaQueryIntent(text) {
@@ -5000,33 +5045,66 @@ async function startWhatsAppGateway() {
     process.exit(1);
   }
 
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
-  const { version } = await fetchLatestBaileysVersion();
-
   const logger = pino({ level: 'silent' });
+  const provider = String(process.env.WHATSAPP_PROVIDER || 'baileys').trim().toLowerCase();
 
-  console.log('\n======================================================');
-  console.log('🚀 PresuVoz — WhatsApp Gateway');
-  console.log(`Versión Baileys: ${version.join('.')}`);
-  console.log(`Modo Seguro: ${SAFE_MODE ? 'ACTIVADO (solo responde a ti o lista blanca)' : 'DESACTIVADO (responde a todos)'}`);
-  if (ALLOWED_NUMBERS.length > 0) {
-    console.log(`Números autorizados: ${ALLOWED_NUMBERS.join(', ')}`);
-  }
-  console.log('======================================================\n');
+  let state;
+  let saveCreds;
+  let sock;
 
-  const sock = makeWASocket({
-    version,
-    auth: state,
-    logger,
-    printQRInTerminal: false,
-    browser: ['PresuVoz Bot', 'Chrome', '1.0.0'],
-    getMessage: async (key) => {
-      if (key?.id && messageStore.has(key.id)) {
-        return messageStore.get(key.id);
+  if (provider === 'cloud_api') {
+    const cloudPhone = String(process.env.META_DISPLAY_PHONE_NUMBER || '').replace(/\D/g, '');
+    state = {
+      creds: {
+        me: {
+          id: cloudPhone ? `${cloudPhone}@s.whatsapp.net` : 'cloud_api@s.whatsapp.net',
+          lid: ''
+        }
       }
-      return undefined;
+    };
+    saveCreds = () => {};
+
+    console.log('\n======================================================');
+    console.log('🚀 PresuVoz — WhatsApp Gateway (Meta Official Cloud API)');
+    console.log(`Proveedor: Meta WhatsApp Business Platform (Graph API)`);
+    console.log(`Modo Seguro: ${SAFE_MODE ? 'ACTIVADO (solo responde a autorizados)' : 'DESACTIVADO'}`);
+    if (ALLOWED_NUMBERS.length > 0) {
+      console.log(`Números autorizados: ${ALLOWED_NUMBERS.join(', ')}`);
     }
-  });
+    console.log('======================================================\n');
+
+    sock = createCloudApiSocket({
+      displayPhoneNumber: cloudPhone
+    });
+  } else {
+    const authState = await useMultiFileAuthState('auth_info_baileys');
+    state = authState.state;
+    saveCreds = authState.saveCreds;
+    const { version } = await fetchLatestBaileysVersion();
+
+    console.log('\n======================================================');
+    console.log('🚀 PresuVoz — WhatsApp Gateway');
+    console.log(`Versión Baileys: ${version.join('.')}`);
+    console.log(`Modo Seguro: ${SAFE_MODE ? 'ACTIVADO (solo responde a ti o lista blanca)' : 'DESACTIVADO (responde a todos)'}`);
+    if (ALLOWED_NUMBERS.length > 0) {
+      console.log(`Números autorizados: ${ALLOWED_NUMBERS.join(', ')}`);
+    }
+    console.log('======================================================\n');
+
+    sock = makeWASocket({
+      version,
+      auth: state,
+      logger,
+      printQRInTerminal: false,
+      browser: ['PresuVoz Bot', 'Chrome', '1.0.0'],
+      getMessage: async (key) => {
+        if (key?.id && messageStore.has(key.id)) {
+          return messageStore.get(key.id);
+        }
+        return undefined;
+      }
+    });
+  }
 
   setupSignalHandlers(sock);
 
@@ -7220,12 +7298,7 @@ async function startWhatsAppGateway() {
         if (isExplicitLogo) {
           try {
             console.log(`🖼️ Imagen de logotipo recibida de ${senderNumber}...`);
-            const buffer = await downloadMediaMessage(
-              { key: msg.key, message: messageContent },
-              'buffer',
-              {},
-              { logger, reuploadRequest: sock.updateMediaMessage }
-            );
+            const buffer = await downloadWhatsAppMediaBuffer(sock, msg, messageContent, logger);
             const authenticatedCompanyId = session.authContext?.companyId || session.companyId;
             const tenantIdentifier = authenticatedCompanyId ? String(authenticatedCompanyId).trim() : senderNumber;
             const safeFolder = tenantIdentifier.replace(/[^a-zA-Z0-9_-]/g, '');
@@ -7254,12 +7327,7 @@ async function startWhatsAppGateway() {
           // Procesamiento inteligente de factura recibida / ticket de gasto con IA Multimodal y validación determinística
           try {
             console.log(`🧾 Imagen de factura/ticket recibida de ${senderNumber}... Descargando...`);
-            const buffer = await downloadMediaMessage(
-              { key: msg.key, message: messageContent },
-              'buffer',
-              {},
-              { logger, reuploadRequest: sock.updateMediaMessage }
-            );
+            const buffer = await downloadWhatsAppMediaBuffer(sock, msg, messageContent, logger);
 
             const authenticatedCompanyId = session.authContext?.companyId || session.companyId;
             if (!authenticatedCompanyId) {
@@ -8593,12 +8661,7 @@ async function startWhatsAppGateway() {
       if (isAudio) {
         try {
           console.log('\n🎙️ Nota de voz recibida. Descargando audio de WhatsApp...');
-          audioBuffer = await downloadMediaMessage(
-            { key: msg.key, message: messageContent },
-            'buffer',
-            {},
-            { logger, reuploadRequest: sock.updateMediaMessage }
-          );
+          audioBuffer = await downloadWhatsAppMediaBuffer(sock, msg, messageContent, logger);
         } catch (dlErr) {
           console.error('❌ Error descargando audio:', dlErr.message);
           const sentDlErr = await sock.sendMessage(remoteJid, {
@@ -8959,6 +9022,12 @@ async function startWhatsAppGateway() {
       }
     }
   });
+
+  if (sock.isCloudApi && typeof sock.startServer === 'function') {
+    await sock.startServer();
+  }
+
+  return sock;
 }
 
 import { fileURLToPath } from 'node:url';

@@ -253,7 +253,8 @@
   </div>
 
 <script>
-const SIGN_ENDPOINT = 'https://presuvoz.vercel.app/api/sign';
+const PRELOAD = (typeof window !== 'undefined' && window.__PRESUVOZ_PRELOAD__) ? window.__PRESUVOZ_PRELOAD__ : null;
+const SIGN_ENDPOINT = PRELOAD?.signEndpoint || 'https://presuvoz.vercel.app/api/sign';
 let budget = null;
 let signedPayload = null;
 let payloadProof = null;
@@ -391,9 +392,9 @@ async function checkRemoteSigned(budgetId) {
 
 window.addEventListener('DOMContentLoaded', async () => {
   const params = new URLSearchParams(window.location.search);
-  const zParam = params.get('z');
+  const zParam = PRELOAD?.z || params.get('z');
   signedPayload = zParam;
-  payloadProof = params.get('s');
+  payloadProof = PRELOAD?.s || params.get('s');
 
   if (!zParam || !payloadProof) {
     showState('error');

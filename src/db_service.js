@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { getLocalSignedBudget } from './cloud_api_adapter.js';
 
 const DATA_DIR = path.resolve('data');
 if (!fs.existsSync(DATA_DIR)) {
@@ -775,19 +776,21 @@ export async function syncPendingSignaturesFromCloud(companyContextOrId = null) 
       try {
         const budgetId = row.id;
         const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
-        let signInfo = null;
+        let signInfo = getLocalSignedBudget(cleanId);
 
-        // 1. Consultar el backend oficial de PresuVoz (Vercel)
-        try {
-          const vUrl = `https://presuvoz.vercel.app/api/sign?check=${encodeURIComponent(cleanId)}`;
-          const vRes = await fetch(vUrl, { signal: AbortSignal.timeout(3500) });
-          if (vRes.ok) {
-            const vData = await vRes.json();
-            if (vData && vData.alreadySigned && vData.details) {
-              signInfo = vData.details;
+        // 1. Consultar el backend oficial de PresuVoz (Vercel) si aún no consta en el almacén local
+        if (!signInfo) {
+          try {
+            const vUrl = `https://presuvoz.vercel.app/api/sign?check=${encodeURIComponent(cleanId)}`;
+            const vRes = await fetch(vUrl, { signal: AbortSignal.timeout(3500) });
+            if (vRes.ok) {
+              const vData = await vRes.json();
+              if (vData && vData.alreadySigned && vData.details) {
+                signInfo = vData.details;
+              }
             }
-          }
-        } catch (eVercel) {}
+          } catch (eVercel) {}
+        }
 
         // 2. Fallback a nube secundaria de sincronización
         if (!signInfo) {

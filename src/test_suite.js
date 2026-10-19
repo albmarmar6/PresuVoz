@@ -12478,6 +12478,231 @@ assert(canStartDbViewer('test').allowed === true, "TEST 91 (E4): canStartDbViewe
 assert(DB_VIEWER_HOST === '127.0.0.1', "TEST 91 (E5): db_viewer.js escucha EXCLUSIVAMENTE en host local 127.0.0.1 (no expuesto a red)");
 
 
+// ==========================================================
+// TEST 92: META WHATSAPP CLOUD API ADAPTER Y ENLACES CORTOS DE FIRMA (/f/:code)
+// ==========================================================
+console.log("\n--- TEST 92: META WHATSAPP CLOUD API ADAPTER Y ENLACES CORTOS DE FIRMA (/f/:code) ---");
+const {
+  verifyWebhookSignature,
+  parseCloudWebhookToBaileysMessages,
+  createCloudApiSocket,
+  createPresuVozHttpServer,
+  getShortSigningLink,
+  getLocalSignedBudget,
+  clearShortLinksAndSignaturesForTesting
+} = await import('./cloud_api_adapter.js');
+const {
+  generateSigningUrl,
+  downloadWhatsAppMediaBuffer
+} = await import('./whatsapp_gateway.js');
+const {
+  ensureCompanyTenant: ensureTenant92,
+  saveBudget: saveBudget92,
+  getBudget: getBudget92,
+  syncPendingSignaturesFromCloud: syncSig92
+} = await import('./db_service.js');
+
+clearShortLinksAndSignaturesForTesting();
+
+// A. Verificación criptográfica X-Hub-Signature-256 de Meta
+const testAppSecret92 = 'meta_app_secret_92_test_key';
+const sampleWebhookRaw92 = JSON.stringify({
+  object: 'whatsapp_business_account',
+  entry: [{
+    id: 'WABA_92',
+    changes: [{
+      field: 'messages',
+      value: {
+        messaging_product: 'whatsapp',
+        contacts: [{ wa_id: '34600929292', profile: { name: 'Reformas Paco' } }],
+        messages: [
+          {
+            from: '34600929292',
+            id: 'wamid.test92_text_1',
+            timestamp: '1760000001',
+            type: 'text',
+            text: { body: 'Presupuesto para pintar salón de Ana por 450 euros' }
+          },
+          {
+            from: '34600929292',
+            id: 'wamid.test92_audio_1',
+            timestamp: '1760000002',
+            type: 'audio',
+            audio: { id: 'media_audio_92', mime_type: 'audio/ogg; codecs=opus', voice: true }
+          },
+          {
+            from: '34600929292',
+            id: 'wamid.test92_img_1',
+            timestamp: '1760000003',
+            type: 'image',
+            image: { id: 'media_img_92', mime_type: 'image/jpeg', caption: 'mi logo' }
+          }
+        ]
+      }
+    }]
+  }]
+});
+
+const validHubSig92 = 'sha256=' + crypto.createHmac('sha256', testAppSecret92).update(sampleWebhookRaw92).digest('hex');
+assert(verifyWebhookSignature(sampleWebhookRaw92, validHubSig92, testAppSecret92) === true, "TEST 92 (A1): verifyWebhookSignature acepta firma HMAC-SHA256 legítima de Meta");
+assert(verifyWebhookSignature(sampleWebhookRaw92, 'sha256=' + '0'.repeat(64), testAppSecret92) === false, "TEST 92 (A2): verifyWebhookSignature rechaza firma falsificada");
+assert(verifyWebhookSignature(sampleWebhookRaw92, '', testAppSecret92) === false, "TEST 92 (A3): verifyWebhookSignature rechaza petición sin cabecera X-Hub-Signature-256");
+
+// B. Normalización de eventos de Cloud API a estructura Baileys
+const parsedMsgs92 = parseCloudWebhookToBaileysMessages(JSON.parse(sampleWebhookRaw92));
+assert(parsedMsgs92.length === 3, "TEST 92 (B1): parseCloudWebhookToBaileysMessages extrae los 3 mensajes (texto, audio, imagen)");
+assert(parsedMsgs92[0].key.remoteJid === '34600929292@s.whatsapp.net' && parsedMsgs92[0].key.id === 'wamid.test92_text_1', "TEST 92 (B2): JID y WAMID mapeados al formato exacto de Baileys");
+assert(parsedMsgs92[0].message.conversation === 'Presupuesto para pintar salón de Ana por 450 euros', "TEST 92 (B3): Mensaje de texto mapeado a message.conversation");
+assert(parsedMsgs92[1].message.audioMessage?._cloudMediaId === 'media_audio_92', "TEST 92 (B4): Nota de voz mapeada a audioMessage con _cloudMediaId");
+assert(parsedMsgs92[2].message.imageMessage?.caption === 'mi logo' && parsedMsgs92[2].message.imageMessage?._cloudMediaId === 'media_img_92', "TEST 92 (B5): Imagen con caption mapeada a imageMessage con _cloudMediaId");
+
+// Ignorar webhooks de solo estado (statuses: sent/delivered/read)
+const statusOnlyPayload92 = {
+  object: 'whatsapp_business_account',
+  entry: [{ changes: [{ value: { statuses: [{ id: 'wamid.1', status: 'delivered' }] } }] }]
+};
+assert(parseCloudWebhookToBaileysMessages(statusOnlyPayload92).length === 0, "TEST 92 (B6): Webhooks de estado (delivered/read) se ignoran limpiamente sin disparar mensajes");
+
+// C. Adaptador de salida y descarga multimedia (createCloudApiSocket)
+const graphApiCalls92 = [];
+const mockFetch92 = async (url, init = {}) => {
+  graphApiCalls92.push({ url: String(url), method: init.method || 'GET', body: init.body });
+  const u = String(url);
+  if (u.endsWith('/media') && init.method === 'POST') {
+    return new Response(JSON.stringify({ id: 'uploaded_pdf_media_92' }), { status: 200 });
+  }
+  if (u.endsWith('/messages') && init.method === 'POST') {
+    return new Response(JSON.stringify({ messages: [{ id: 'wamid.out_92_ok' }] }), { status: 200 });
+  }
+  if (u.includes('/media_audio_92') && (!init.method || init.method === 'GET')) {
+    return new Response(JSON.stringify({ url: 'https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=media_audio_92', mime_type: 'audio/ogg' }), { status: 200 });
+  }
+  if (u.startsWith('https://lookaside.fbsbx.com/')) {
+    return new Response(Buffer.from('OGG_BINARY_AUDIO_CONTENT_92'), { status: 200 });
+  }
+  return new Response(JSON.stringify({ error: { message: 'Unexpected URL' } }), { status: 404 });
+};
+
+const cloudSock92 = createCloudApiSocket({
+  phoneNumberId: '109988776655',
+  accessToken: 'EAATestToken92',
+  displayPhoneNumber: '34699000111',
+  fetchImpl: mockFetch92
+});
+
+const sentText92 = await cloudSock92.sendMessage('34600929292@s.whatsapp.net', { text: 'Hola desde Cloud API oficial' });
+assert(sentText92.key.id === 'wamid.out_92_ok', "TEST 92 (C1): sock.sendMessage(text) envía mensaje por Graph API y retorna key.id compatible con Baileys");
+const lastTextCall92 = JSON.parse(graphApiCalls92[0].body);
+assert(lastTextCall92.to === '34600929292' && lastTextCall92.type === 'text' && lastTextCall92.text.body === 'Hola desde Cloud API oficial', "TEST 92 (C2): Payload JSON de texto enviado a Graph API cumple especificación oficial de Meta");
+
+const sentDoc92 = await cloudSock92.sendMessage('34600929292@s.whatsapp.net', {
+  document: Buffer.from('%PDF-1.4 test pdf'),
+  mimetype: 'application/pdf',
+  fileName: 'Presupuesto_92.pdf',
+  caption: '📄 Presupuesto 92'
+});
+assert(sentDoc92.key.id === 'wamid.out_92_ok', "TEST 92 (C3): sock.sendMessage(document) sube el PDF a /media y envía el documento con media_id");
+const docMsgCall92 = JSON.parse(graphApiCalls92[2].body);
+assert(docMsgCall92.type === 'document' && docMsgCall92.document.id === 'uploaded_pdf_media_92' && docMsgCall92.document.filename === 'Presupuesto_92.pdf', "TEST 92 (C4): Envío de PDF referencia el media_id devuelto por Meta /media");
+
+const downloadedAudio92 = await downloadWhatsAppMediaBuffer(cloudSock92, parsedMsgs92[1], parsedMsgs92[1].message, null);
+assert(Buffer.isBuffer(downloadedAudio92) && downloadedAudio92.toString('utf-8') === 'OGG_BINARY_AUDIO_CONTENT_92', "TEST 92 (C5): downloadWhatsAppMediaBuffer descarga binarios de voz desde Meta Graph API transparentemente");
+
+// D. Enlaces cortos de firma (/f/:code) y servidor HTTP de firma autohospedado
+const prevSigningSecret92 = process.env.PRESUVOZ_SIGNING_SECRET;
+const prevPublicBaseUrl92 = process.env.PUBLIC_BASE_URL;
+process.env.PRESUVOZ_SIGNING_SECRET = 'secret_key_test_92_presuvoz_32_chars_minimum!!';
+
+const tenant92 = ensureTenant92('34600929292');
+const sampleBudget92 = saveBudget92(tenant92, {
+  id: 'PRE-2026-092',
+  client: { name: 'Elena Gómez', address: 'Calle Sierpes 12', phone: '611223344', email: 'elena@test.es' },
+  items: [{ description: 'Pintura plástica lisa en salón', qty: 1, unit: 'pa', unitPrice: 450, total: 450 }],
+  financials: { subtotal: 450, taxableBase: 450, taxRatePercentage: 10, taxAmount: 45, totalAmount: 495, advancePercentage: 30, advanceAmount: 148.5 },
+  status: 'PENDIENTE_ACEPTACION'
+});
+
+// 1. Con PUBLIC_BASE_URL definido -> genera enlace corto profesional (/f/:code)
+process.env.PUBLIC_BASE_URL = 'https://presuvoz.es';
+const shortUrl92 = generateSigningUrl(sampleBudget92, { name: 'Reformas Paco', cif: 'B12345678', phone: '34600929292' }, '34600929292');
+assert(shortUrl92.startsWith('https://presuvoz.es/f/') && shortUrl92.length < 35, `TEST 92 (D1): generateSigningUrl con PUBLIC_BASE_URL genera enlace corto profesional (${shortUrl92})`);
+const shortCode92 = shortUrl92.split('/f/')[1];
+const storedLink92 = getShortSigningLink(shortCode92);
+assert(Boolean(storedLink92 && storedLink92.budgetId === 'PRE-2026-092' && storedLink92.z && storedLink92.s), "TEST 92 (D2): El enlace corto queda registrado con su payload comprimido z y firma HMAC s");
+
+// 2. Sin PUBLIC_BASE_URL -> mantiene compatibilidad legacy con GitHub Pages
+delete process.env.PUBLIC_BASE_URL;
+const legacyUrl92 = generateSigningUrl(sampleBudget92, { name: 'Reformas Paco', cif: 'B12345678', phone: '34600929292' }, '34600929292');
+assert(legacyUrl92.startsWith('https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z='), "TEST 92 (D3): Sin PUBLIC_BASE_URL mantiene retrocompatibilidad con URL clásica");
+
+// 3. Probar servidor HTTP real en puerto efímero (GET /webhook, GET /f/:code, POST /api/sign, GET /api/sign)
+let signedCallbackPayload92 = null;
+const httpServer92 = createPresuVozHttpServer({
+  verifyToken: 'mi_token_secreto_meta_92',
+  appSecret: testAppSecret92,
+  signingSecret: process.env.PRESUVOZ_SIGNING_SECRET,
+  onBudgetSigned: async (rec) => {
+    signedCallbackPayload92 = rec;
+  }
+});
+
+await new Promise((resolve) => httpServer92.listen(0, '127.0.0.1', resolve));
+const port92 = httpServer92.address().port;
+const baseHttp92 = `http://127.0.0.1:${port92}`;
+
+try {
+  // Verificación GET /webhook exitosa
+  const whOkRes = await fetch(`${baseHttp92}/webhook?hub.mode=subscribe&hub.verify_token=mi_token_secreto_meta_92&hub.challenge=challenge_92_xyz`);
+  const whOkText = await whOkRes.text();
+  assert(whOkRes.status === 200 && whOkText === 'challenge_92_xyz', "TEST 92 (D4): GET /webhook responde 200 con hub.challenge cuando verify_token coincide");
+
+  // Verificación GET /webhook fallida
+  const whFailRes = await fetch(`${baseHttp92}/webhook?hub.mode=subscribe&hub.verify_token=token_incorrecto&hub.challenge=challenge_92_xyz`);
+  assert(whFailRes.status === 403, "TEST 92 (D5): GET /webhook responde 403 cuando verify_token no coincide");
+
+  //Servir página corta GET /f/:code
+  const shortPageRes = await fetch(`${baseHttp92}/f/${shortCode92}`);
+  const shortPageHtml = await shortPageRes.text();
+  assert(shortPageRes.status === 200 && shortPageHtml.includes('window.__PRESUVOZ_PRELOAD__'), "TEST 92 (D6): GET /f/:code sirve studio/firmar.html inyectando window.__PRESUVOZ_PRELOAD__ sin redirección a URL larga");
+
+  // Firmar presupuesto en POST /api/sign
+  const signPostRes = await fetch(`${baseHttp92}/api/sign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      signedPayload: storedLink92.z,
+      payloadProof: storedLink92.s,
+      clientName: 'Elena Gómez',
+      clientNif: '12345678Z',
+      clientAddress: 'Calle Sierpes 12',
+      clientEmail: 'elena@test.es',
+      signatureDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+    })
+  });
+  const signPostData = await signPostRes.json();
+  assert(signPostRes.status === 200 && signPostData.ok === true, "TEST 92 (D7): POST /api/sign valida HMAC y registra la aceptación digital");
+  assert(signedCallbackPayload92 && signedCallbackPayload92.budgetId === 'PRE-2026-092', "TEST 92 (D8): Callback onBudgetSigned se dispara en tiempo real al firmar");
+
+  // Comprobar GET /api/sign?check=PRE-2026-092
+  const signCheckRes = await fetch(`${baseHttp92}/api/sign?check=PRE-2026-092`);
+  const signCheckData = await signCheckRes.json();
+  assert(signCheckRes.status === 200 && signCheckData.alreadySigned === true, "TEST 92 (D9): GET /api/sign?check=PRE-2026-092 confirma que el presupuesto ya está firmado");
+
+  // Sincronizar con SQLite mediante syncPendingSignaturesFromCloud
+  const synced92 = await syncSig92(tenant92);
+  assert(synced92.some(item => item.budgetId === 'PRE-2026-092'), "TEST 92 (D10): syncPendingSignaturesFromCloud detecta la firma local instantáneamente sin depender de servicios externos");
+  const updatedBudget92 = getBudget92(tenant92, 'PRE-2026-092');
+  assert(updatedBudget92?.status === 'ACEPTADO', "TEST 92 (D11): El presupuesto en SQLite pasa automáticamente a estado ACEPTADO");
+} finally {
+  httpServer92.close();
+  if (prevSigningSecret92 !== undefined) process.env.PRESUVOZ_SIGNING_SECRET = prevSigningSecret92;
+  else delete process.env.PRESUVOZ_SIGNING_SECRET;
+  if (prevPublicBaseUrl92 !== undefined) process.env.PUBLIC_BASE_URL = prevPublicBaseUrl92;
+  else delete process.env.PUBLIC_BASE_URL;
+  clearShortLinksAndSignaturesForTesting();
+}
+
+
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
   console.log("🛡️  El motor es 100% conversacional, tolerante a fallos y soporta borradores, capítulos y descuentos.");
@@ -12485,5 +12710,6 @@ if (passedCount === totalCount) {
   console.error(`❌ RESULTADO: ${passedCount}/${totalCount} pruebas superadas.`);
 }
 console.log("==========================================================");
+
 
 
