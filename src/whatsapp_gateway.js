@@ -1689,7 +1689,8 @@ export function generateSigningUrl(budget, company, cleanPhone) {
     return `${publicBaseUrl}/f/${shortCode}`;
   }
 
-  return `https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z=${budgetZ}&s=${proof}`;
+  const signingPortalUrl = String(process.env.SIGNING_PORTAL_URL || 'https://albmarmar6.github.io/PresuVoz/studio/firmar.html').trim();
+  return `${signingPortalUrl}?z=${budgetZ}&s=${proof}`;
 }
 
 export async function downloadWhatsAppMediaBuffer(sock, msg, messageContent, logger) {

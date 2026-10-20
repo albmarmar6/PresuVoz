@@ -348,8 +348,13 @@ async function releaseEmailRetryLock(lock) {
 export default async function handler(req, res) {
   const origin = req.headers.origin;
   const host = String(req.headers.host || '').toLowerCase();
-  const allowedOrigins = (process.env.PRESUVOZ_ALLOWED_ORIGINS || 'https://albmarmar6.github.io')
-    .split(',').map(value => value.trim()).filter(Boolean);
+  const allowedOrigins = [
+    'https://albmarmar6.github.io',
+    'https://presuvoz.online',
+    'https://www.presuvoz.online',
+    'https://presuvoz.vercel.app',
+    ...(process.env.PRESUVOZ_ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean)
+  ];
   let originAllowed = allowedOrigins.includes(origin);
   try { originAllowed ||= Boolean(origin) && new URL(origin).host.toLowerCase() === host; } catch (_) {}
   if (originAllowed) res.setHeader('Access-Control-Allow-Origin', origin);

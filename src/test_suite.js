@@ -12611,6 +12611,7 @@ assert(Buffer.isBuffer(downloadedAudio92) && downloadedAudio92.toString('utf-8')
 // D. Enlaces cortos de firma (/f/:code) y servidor HTTP de firma autohospedado
 const prevSigningSecret92 = process.env.PRESUVOZ_SIGNING_SECRET;
 const prevPublicBaseUrl92 = process.env.PUBLIC_BASE_URL;
+const prevSigningPortalUrl92 = process.env.SIGNING_PORTAL_URL;
 process.env.PRESUVOZ_SIGNING_SECRET = 'secret_key_test_92_presuvoz_32_chars_minimum!!';
 
 const tenant92 = ensureTenant92('34600929292');
@@ -12632,6 +12633,7 @@ assert(Boolean(storedLink92 && storedLink92.budgetId === 'PRE-2026-092' && store
 
 // 2. Sin PUBLIC_BASE_URL -> mantiene compatibilidad legacy con GitHub Pages
 delete process.env.PUBLIC_BASE_URL;
+delete process.env.SIGNING_PORTAL_URL;
 const legacyUrl92 = generateSigningUrl(sampleBudget92, { name: 'Reformas Paco', cif: 'B12345678', phone: '34600929292' }, '34600929292');
 assert(legacyUrl92.startsWith('https://albmarmar6.github.io/PresuVoz/studio/firmar.html?z='), "TEST 92 (D3): Sin PUBLIC_BASE_URL mantiene retrocompatibilidad con URL clásica");
 
@@ -12699,6 +12701,8 @@ try {
   else delete process.env.PRESUVOZ_SIGNING_SECRET;
   if (prevPublicBaseUrl92 !== undefined) process.env.PUBLIC_BASE_URL = prevPublicBaseUrl92;
   else delete process.env.PUBLIC_BASE_URL;
+  if (prevSigningPortalUrl92 !== undefined) process.env.SIGNING_PORTAL_URL = prevSigningPortalUrl92;
+  else delete process.env.SIGNING_PORTAL_URL;
   clearShortLinksAndSignaturesForTesting();
 }
 

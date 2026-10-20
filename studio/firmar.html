@@ -254,7 +254,11 @@
 
 <script>
 const PRELOAD = (typeof window !== 'undefined' && window.__PRESUVOZ_PRELOAD__) ? window.__PRESUVOZ_PRELOAD__ : null;
-const SIGN_ENDPOINT = PRELOAD?.signEndpoint || 'https://presuvoz.vercel.app/api/sign';
+const SIGN_ENDPOINT = PRELOAD?.signEndpoint || (
+  (typeof window !== 'undefined' && (window.location.hostname.endsWith('presuvoz.online') || window.location.hostname.endsWith('vercel.app')))
+    ? '/api/sign'
+    : 'https://presuvoz.online/api/sign'
+);
 let budget = null;
 let signedPayload = null;
 let payloadProof = null;
