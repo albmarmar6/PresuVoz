@@ -1425,10 +1425,13 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
   let lastError = null;
   for (const model of modelsToTry) {
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
       const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': GEMINI_API_KEY
+        },
         body: JSON.stringify({
           contents: [{ role: 'user', parts }],
           systemInstruction: { parts: [{ text: systemInstruction }] },
@@ -1628,9 +1631,11 @@ async function shortenUrl(longUrl) {
 }
 
 export function generateSigningUrl(budget, company, cleanPhone) {
+  const canonicalCompanyId = company?.companyId || company?.id || budget.companyId || budget.company_id || null;
   const compactBudget = {
     i: budget.id,
     c: {
+      id: canonicalCompanyId,
       n: company?.name || budget.company?.name || 'Carpintería y Reformas Manolo S.L.',
       c: company?.cif || budget.company?.cif || 'B-41987654',
       f: company?.cif || budget.company?.cif || 'B-41987654',
@@ -1694,6 +1699,29 @@ export function generateSigningUrl(budget, company, cleanPhone) {
 }
 
 export async function downloadWhatsAppMediaBuffer(sock, msg, messageContent, logger) {
+  // Blindaje de seguridad: rechazar descarga de vídeos
+  const isVideo = Boolean(
+    msg?.message?.videoMessage ||
+    messageContent?.videoMessage
+  );
+  if (isVideo) {
+    throw new Error('VIDEO_NOT_SUPPORTED: No se permite la descarga de archivos de vídeo.');
+  }
+
+  // Blindaje de seguridad: límite estricto de 15 MB para descarga de multimedia en memoria RAM
+  const rawFileLen = Number(
+    messageContent?.imageMessage?.fileLength ||
+    messageContent?.audioMessage?.fileLength ||
+    messageContent?.documentMessage?.fileLength ||
+    msg?.message?.imageMessage?.fileLength ||
+    msg?.message?.audioMessage?.fileLength ||
+    msg?.message?.documentMessage?.fileLength ||
+    0
+  );
+  if (rawFileLen > 15 * 1024 * 1024) {
+    throw new Error(`FILE_TOO_LARGE: El archivo supera el límite de seguridad de 15 MB (${rawFileLen} bytes).`);
+  }
+
   const cloudMediaId =
     msg?._cloudMediaId ||
     messageContent?.audioMessage?._cloudMediaId ||
@@ -5078,7 +5106,8 @@ async function startWhatsAppGateway() {
       displayPhoneNumber: cloudPhone
     });
   } else {
-    const authState = await useMultiFileAuthState('auth_info_baileys');
+    const authDir = process.env.BAILEYS_AUTH_DIR || 'auth_info_baileys';
+    const authState = await useMultiFileAuthState(authDir);
     state = authState.state;
     saveCreds = authState.saveCreds;
     const { version } = await fetchLatestBaileysVersion();
@@ -8895,11 +8924,41 @@ async function startWhatsAppGateway() {
         );
       }
 
+      const videoMsg = messageContent?.videoMessage;
+      if (videoMsg) {
+        console.log(`🎥 Vídeo recibido de ${senderNumber} (${remoteJid}). Rechazado sin descargar.`);
+        if (sock && typeof sock.sendMessage === 'function') {
+          const sent = await sock.sendMessage(remoteJid, {
+            text: '🎥 *Por ahora no proceso vídeos.*\n\nPor favor, envíame una nota de voz o un mensaje de texto explicándome los trabajos o la obra que necesitas presupuestar.'
+          });
+          if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+        }
+        continue;
+      }
+
       const imageMsg = messageContent?.imageMessage;
       const isImage = Boolean(imageMsg);
       const audioMsg = messageContent?.audioMessage;
       const isAudio = Boolean(audioMsg);
       const isText = Boolean(messageContent?.conversation || messageContent?.extendedTextMessage?.text);
+
+      // Blindaje de seguridad: rechazo temprano de archivos excesivamente pesados (>15 MB) antes de descargar
+      const rawFileLen = Number(
+        imageMsg?.fileLength ||
+        audioMsg?.fileLength ||
+        messageContent?.documentMessage?.fileLength ||
+        0
+      );
+      if (rawFileLen > 15 * 1024 * 1024) {
+        console.warn(`⚠️ Archivo recibido de ${senderNumber} demasiado pesado (${rawFileLen} bytes > 15 MB). Rechazado sin descargar.`);
+        if (sock && typeof sock.sendMessage === 'function') {
+          const sent = await sock.sendMessage(remoteJid, {
+            text: '⚠️ *El archivo es demasiado grande (máximo 15 MB).*\n\nPor favor, envía un archivo más ligero para no sobrecargar el sistema.'
+          });
+          if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+        }
+        continue;
+      }
 
       if (!isAudio && !isText && !isImage) {
         const keys = Object.keys(msg.message || {}).join(', ');
@@ -9026,6 +9085,18 @@ async function startWhatsAppGateway() {
 
   if (sock.isCloudApi && typeof sock.startServer === 'function') {
     await sock.startServer();
+  } else if (!sock.isCloudApi) {
+    // En modo Baileys, levantar el servidor HTTP si hay puerto configurado (Railway, Cloud, Docker)
+    const httpPort = process.env.PORT || process.env.WEBHOOK_PORT;
+    if (httpPort) {
+      const server = createPresuVozHttpServer({
+        signingSecret: process.env.PRESUVOZ_SIGNING_SECRET
+      });
+      const listenPort = Number(httpPort);
+      server.listen(listenPort, '0.0.0.0', () => {
+        console.log(`🌐 Servidor HTTP de PresuVoz (Healthcheck & Enlaces de Firma) activo en puerto ${listenPort}`);
+      });
+    }
   }
 
   return sock;

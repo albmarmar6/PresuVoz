@@ -587,6 +587,31 @@ export function resolveLegacyBusinessId(companyContextOrId) {
 }
 
 
+export function extractPublicEntityId(rawId) {
+  const str = String(rawId || '').trim();
+  const idx = str.indexOf('::');
+  return idx !== -1 ? str.slice(idx + 2) : str;
+}
+
+function resolveTenantStorageId(targetDb, table, companyId, rawId) {
+  const publicId = extractPublicEntityId(rawId);
+  if (!companyId || !publicId) return publicId;
+  const scopedId = `${companyId}::${publicId}`;
+  const ownRow = targetDb.prepare(
+    `SELECT id FROM ${table} WHERE company_id = ? AND (id = ? OR id = ?) LIMIT 1`
+  ).get(companyId, publicId, scopedId);
+  if (ownRow && ownRow.id) {
+    return ownRow.id;
+  }
+  const existingRow = targetDb.prepare(
+    `SELECT id, company_id FROM ${table} WHERE id = ? LIMIT 1`
+  ).get(publicId);
+  if (!existingRow || !existingRow.company_id || existingRow.company_id === companyId) {
+    return publicId;
+  }
+  return scopedId;
+}
+
 export function formatBudgetPublicId(year, sequence) {
   const cleanYear = Number(year);
   const cleanSequence = Number(sequence);
@@ -606,113 +631,141 @@ export function saveBudget(companyContextOrIdOrPhone, budget) {
   const companyId = tenant?.companyId || null;
   const cleanPhone = tenant?.phone || (typeof companyContextOrIdOrPhone === 'string' ? companyContextOrIdOrPhone.replace(/\D/g, '') : '');
 
-  // Convertir el ID aleatorio del motor a una referencia pública correlativa,
-  // solo al crear presupuestos nuevos. Las referencias históricas no cambian.
-  const generatedId = String(budget.id);
-  const generatedMatch = generatedId.match(/^PRE-(\d{4})-[0-9A-F]{16}$/i);
-  const alreadyExists = db.prepare('SELECT 1 FROM budgets WHERE company_id = ? AND id = ?').get(companyId, generatedId);
-  if (generatedMatch && !alreadyExists && isMigration016Applied()) {
-    const year = Number(generatedMatch[1]);
-    const existingNumberedIds = db.prepare('SELECT id FROM budgets WHERE company_id = ?').all(companyId);
-    const existingMax = existingNumberedIds.reduce((max, row) => {
-      const match = String(row.id || '').match(new RegExp(`^PRE${year}-(\\d+)$`));
-      return match ? Math.max(max, Number(match[1])) : max;
-    }, 0);
-    db.prepare(`
-      INSERT OR IGNORE INTO invoice_sequences (company_id, series, year, current_number, updated_at)
-      VALUES (?, 'BUDGET', ?, ?, ?)
-    `).run(companyId, year, existingMax, new Date().toISOString());
-    const allocation = allocateInvoiceNumber(companyId, 'BUDGET', year);
-    budget.id = formatBudgetPublicId(year, allocation.invoiceNumber);
-  }
-
-  const now = new Date().toISOString();
-  const total = budget.financials?.totalAmount || budget.totals?.total || budget.totalAmount || 0;
-
-  const cleanBudget = {
-    id: budget.id,
-    companyId: companyId,
-    company_id: companyId,
-    issueDate: budget.issueDate,
-    company: budget.company,
-    client: budget.client,
-    items: budget.items,
-    financials: budget.financials || { totalAmount: total },
-    terms: budget.terms,
-    payments: budget.payments || [],
-    paymentSummary: budget.paymentSummary || { totalPaid: 0, remainingBalance: total, status: 'PENDIENTE' },
-    advanceInvoices: budget.advanceInvoices || [],
-    isDraft: budget.isDraft,
-    status: budget.status || 'PENDIENTE_ACEPTACION',
-    workMemory: budget.workMemory || {},
-    expirationReminders: budget.expirationReminders || {}
-  };
-
-
-  if (!isMigration015Applied()) {
-    const stmt = db.prepare(`
-      INSERT INTO budgets (id, company_id, company_phone, client_name, client_address, client_phone, total_amount, status, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        company_id = COALESCE(excluded.company_id, budgets.company_id),
-        company_phone = COALESCE(excluded.company_phone, budgets.company_phone),
-        client_name = excluded.client_name,
-        client_address = excluded.client_address,
-        client_phone = excluded.client_phone,
-        total_amount = excluded.total_amount,
-        status = excluded.status,
-        data_json = excluded.data_json,
-        updated_at = excluded.updated_at
-      WHERE budgets.company_id = excluded.company_id 
-         OR budgets.company_id IS NULL
-         OR (budgets.company_phone = excluded.company_phone AND budgets.company_id IS NULL)
-    `);
-
-    stmt.run(
-      budget.id,
+  // Ejecución transaccional estrictamente atómica para correlativo y persistencia
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    // Convertir el ID aleatorio del motor a una referencia pública correlativa,
+    // solo al crear presupuestos nuevos. Las referencias históricas no cambian.
+    const generatedId = extractPublicEntityId(budget.id);
+    const generatedMatch = generatedId.match(/^PRE-(\d{4})-[0-9A-F]{16}$/i);
+    const alreadyExists = db.prepare('SELECT 1 FROM budgets WHERE company_id = ? AND (id = ? OR id = ?)').get(
       companyId,
-      cleanPhone,
-      budget.client?.name || 'Cliente Particular',
-      budget.client?.address || '',
-      budget.client?.phone || '',
-      total,
-      budget.status || 'PENDIENTE_ACEPTACION',
-      JSON.stringify(cleanBudget),
-      now,
-      now
+      generatedId,
+      `${companyId}::${generatedId}`
     );
-  } else {
-    const stmt = db.prepare(`
-      INSERT INTO budgets (id, company_id, client_name, client_address, client_phone, total_amount, status, data_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        company_id = COALESCE(excluded.company_id, budgets.company_id),
-        client_name = excluded.client_name,
-        client_address = excluded.client_address,
-        client_phone = excluded.client_phone,
-        total_amount = excluded.total_amount,
-        status = excluded.status,
-        data_json = excluded.data_json,
-        updated_at = excluded.updated_at
-      WHERE budgets.company_id = excluded.company_id 
-         OR budgets.company_id IS NULL
-    `);
+    if (generatedMatch && !alreadyExists) {
+      const year = Number(generatedMatch[1]);
+      let nextNum;
+      if (isMigration016Applied()) {
+        const existingNumberedIds = db.prepare('SELECT id FROM budgets WHERE company_id = ?').all(companyId);
+        const existingMax = existingNumberedIds.reduce((max, row) => {
+          const publicRowId = extractPublicEntityId(row.id || '');
+          const match = publicRowId.match(new RegExp(`^PRE${year}-(\\d+)$`));
+          return match ? Math.max(max, Number(match[1])) : max;
+        }, 0);
+        db.prepare(`
+          INSERT OR IGNORE INTO invoice_sequences (company_id, series, year, current_number, updated_at)
+          VALUES (?, 'BUDGET', ?, ?, ?)
+        `).run(companyId, year, existingMax, new Date().toISOString());
+        const allocation = allocateInvoiceNumber(companyId, 'BUDGET', year);
+        nextNum = allocation.invoiceNumber;
+      } else {
+        const existingNumberedIds = db.prepare('SELECT id FROM budgets WHERE company_id = ?').all(companyId);
+        const existingMax = existingNumberedIds.reduce((max, row) => {
+          const publicRowId = extractPublicEntityId(row.id || '');
+          const match = publicRowId.match(new RegExp(`^PRE${year}-(\\d+)$`));
+          return match ? Math.max(max, Number(match[1])) : max;
+        }, 0);
+        nextNum = existingMax + 1;
+      }
+      budget.id = formatBudgetPublicId(year, nextNum);
+    } else {
+      budget.id = generatedId;
+    }
 
-    stmt.run(
-      budget.id,
-      companyId,
-      budget.client?.name || 'Cliente Particular',
-      budget.client?.address || '',
-      budget.client?.phone || '',
-      total,
-      budget.status || 'PENDIENTE_ACEPTACION',
-      JSON.stringify(cleanBudget),
-      now,
-      now
-    );
+    const storageRowId = resolveTenantStorageId(db, 'budgets', companyId, budget.id);
+    const now = new Date().toISOString();
+    const total = budget.financials?.totalAmount || budget.totals?.total || budget.totalAmount || 0;
+
+    const cleanBudget = {
+      id: budget.id,
+      companyId: companyId,
+      company_id: companyId,
+      issueDate: budget.issueDate,
+      company: budget.company,
+      client: budget.client,
+      items: budget.items,
+      financials: budget.financials || { totalAmount: total },
+      terms: budget.terms,
+      payments: budget.payments || [],
+      paymentSummary: budget.paymentSummary || { totalPaid: 0, remainingBalance: total, status: 'PENDIENTE' },
+      advanceInvoices: budget.advanceInvoices || [],
+      isDraft: budget.isDraft,
+      status: budget.status || 'PENDIENTE_ACEPTACION',
+      workMemory: budget.workMemory || {},
+      expirationReminders: budget.expirationReminders || {}
+    };
+
+
+    if (!isMigration015Applied()) {
+      const stmt = db.prepare(`
+        INSERT INTO budgets (id, company_id, company_phone, client_name, client_address, client_phone, total_amount, status, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          company_id = COALESCE(excluded.company_id, budgets.company_id),
+          company_phone = COALESCE(excluded.company_phone, budgets.company_phone),
+          client_name = excluded.client_name,
+          client_address = excluded.client_address,
+          client_phone = excluded.client_phone,
+          total_amount = excluded.total_amount,
+          status = excluded.status,
+          data_json = excluded.data_json,
+          updated_at = excluded.updated_at
+        WHERE budgets.company_id = excluded.company_id 
+           OR budgets.company_id IS NULL
+           OR (budgets.company_phone = excluded.company_phone AND budgets.company_id IS NULL)
+      `);
+
+      stmt.run(
+        storageRowId,
+        companyId,
+        cleanPhone,
+        budget.client?.name || 'Cliente Particular',
+        budget.client?.address || '',
+        budget.client?.phone || '',
+        total,
+        budget.status || 'PENDIENTE_ACEPTACION',
+        JSON.stringify(cleanBudget),
+        now,
+        now
+      );
+    } else {
+      const stmt = db.prepare(`
+        INSERT INTO budgets (id, company_id, client_name, client_address, client_phone, total_amount, status, data_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          company_id = COALESCE(excluded.company_id, budgets.company_id),
+          client_name = excluded.client_name,
+          client_address = excluded.client_address,
+          client_phone = excluded.client_phone,
+          total_amount = excluded.total_amount,
+          status = excluded.status,
+          data_json = excluded.data_json,
+          updated_at = excluded.updated_at
+        WHERE budgets.company_id = excluded.company_id 
+           OR budgets.company_id IS NULL
+      `);
+
+      stmt.run(
+        storageRowId,
+        companyId,
+        budget.client?.name || 'Cliente Particular',
+        budget.client?.address || '',
+        budget.client?.phone || '',
+        total,
+        budget.status || 'PENDIENTE_ACEPTACION',
+        JSON.stringify(cleanBudget),
+        now,
+        now
+      );
+    }
+
+    db.exec('COMMIT;');
+    return cleanBudget;
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
   }
-
-  return cleanBudget;
 }
 
 export function updateBudget(companyContextOrIdOrPhone, budget) {
@@ -740,8 +793,10 @@ export function deleteBudget(companyContextOrIdOrPhone, id) {
   const companyId = tenant?.companyId;
   if (!companyId) return { deleted: false };
 
-  const result = db.prepare('DELETE FROM budgets WHERE id = ? AND company_id = ?').run(id, companyId);
-  return { deleted: result.changes > 0, id };
+  const publicId = extractPublicEntityId(id);
+  const scopedId = `${companyId}::${publicId}`;
+  const result = db.prepare('DELETE FROM budgets WHERE (id = ? OR id = ?) AND company_id = ?').run(publicId, scopedId, companyId);
+  return { deleted: result.changes > 0, id: publicId };
 }
 
 export async function syncPendingSignaturesFromCloud(companyContextOrId = null) {
@@ -774,14 +829,16 @@ export async function syncPendingSignaturesFromCloud(companyContextOrId = null) 
 
     await Promise.all(rows.map(async (row) => {
       try {
-        const budgetId = row.id;
+        const storageRowId = row.id;
+        const budgetId = extractPublicEntityId(row.id);
         const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
-        let signInfo = getLocalSignedBudget(cleanId);
+        let signInfo = getLocalSignedBudget(cleanId, row.company_id);
 
         // 1. Consultar el backend oficial de PresuVoz (Vercel) si aún no consta en el almacén local
         if (!signInfo) {
           try {
-            const vUrl = `https://presuvoz.vercel.app/api/sign?check=${encodeURIComponent(cleanId)}`;
+            const compQuery = row.company_id ? `&companyId=${encodeURIComponent(row.company_id)}` : '';
+            const vUrl = `https://presuvoz.vercel.app/api/sign?check=${encodeURIComponent(cleanId)}${compQuery}`;
             const vRes = await fetch(vUrl, { signal: AbortSignal.timeout(3500) });
             if (vRes.ok) {
               const vData = await vRes.json();
@@ -827,6 +884,7 @@ export async function syncPendingSignaturesFromCloud(companyContextOrId = null) 
           let budgetObj = null;
           try { budgetObj = JSON.parse(row.data_json); } catch(e) {}
           if (budgetObj) {
+            budgetObj.id = budgetId;
             budgetObj.status = 'ACEPTADO';
             budgetObj.signedAt = signInfo.signedAt || new Date().toISOString();
             budgetObj.signedEmail = signInfo.clientEmail || '';
@@ -843,7 +901,7 @@ export async function syncPendingSignaturesFromCloud(companyContextOrId = null) 
                 updated_at = ?,
                 data_json = ?
             WHERE id = ? AND company_id = ?
-          `).run(now, JSON.stringify(budgetObj || { id: budgetId, status: 'ACEPTADO' }), budgetId, row.company_id);
+          `).run(now, JSON.stringify(budgetObj || { id: budgetId, status: 'ACEPTADO' }), storageRowId, row.company_id);
 
           if (result && result.changes > 0) {
             newlyAccepted.push({
@@ -876,12 +934,15 @@ export function getBudget(companyContextOrIdOrPhone, id, options = {}) {
     const companyId = tenant?.companyId;
     if (!companyId) return null;
 
-    const stmt = targetDb.prepare('SELECT status, data_json, company_id FROM budgets WHERE id = ? AND company_id = ?');
-    const row = stmt.get(id, companyId);
+    const publicId = extractPublicEntityId(id);
+    const scopedId = `${companyId}::${publicId}`;
+    const stmt = targetDb.prepare('SELECT status, data_json, company_id FROM budgets WHERE (id = ? OR id = ?) AND company_id = ?');
+    const row = stmt.get(publicId, scopedId, companyId);
 
     if (!row) return null;
     try {
       const parsed = JSON.parse(row.data_json);
+      parsed.id = extractPublicEntityId(parsed.id || publicId);
       if (row.status) parsed.status = row.status;
       return parsed;
     } catch(e) { return null; }
@@ -1119,19 +1180,22 @@ export function emitInvoice(companyContextOrIdOrPhone, invoicePayload, options =
     // 6. Si es factura final y hay presupuesto asociado, marcar presupuesto como FACTURADO
     if (budgetId && invoiceType === 'FINAL') {
       try {
-        const budRow = targetDb.prepare('SELECT data_json FROM budgets WHERE id = ? AND company_id = ?').get(budgetId, companyId);
+        const publicBudId = extractPublicEntityId(budgetId);
+        const scopedBudId = `${companyId}::${publicBudId}`;
+        const budRow = targetDb.prepare('SELECT id, data_json FROM budgets WHERE (id = ? OR id = ?) AND company_id = ?').get(publicBudId, scopedBudId, companyId);
         let updatedDataJson = null;
         if (budRow?.data_json) {
           try {
             const bObj = JSON.parse(budRow.data_json);
+            bObj.id = publicBudId;
             bObj.status = 'FACTURADO';
             updatedDataJson = JSON.stringify(bObj);
           } catch {}
         }
         if (updatedDataJson) {
-          targetDb.prepare("UPDATE budgets SET status = 'FACTURADO', data_json = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?").run(updatedDataJson, budgetId, companyId);
+          targetDb.prepare("UPDATE budgets SET status = 'FACTURADO', data_json = ?, updated_at = datetime('now') WHERE (id = ? OR id = ?) AND company_id = ?").run(updatedDataJson, publicBudId, scopedBudId, companyId);
         } else {
-          targetDb.prepare("UPDATE budgets SET status = 'FACTURADO', updated_at = datetime('now') WHERE id = ? AND company_id = ?").run(budgetId, companyId);
+          targetDb.prepare("UPDATE budgets SET status = 'FACTURADO', updated_at = datetime('now') WHERE (id = ? OR id = ?) AND company_id = ?").run(publicBudId, scopedBudId, companyId);
         }
       } catch (budErr) {
         console.warn('⚠️ No se pudo actualizar estado del presupuesto a FACTURADO:', budErr.message);
@@ -1501,7 +1565,8 @@ export function savePayment(companyContextOrIdOrPhone, paymentOrBudgetId, maybeP
   let linkedInvoice = null;
   if (targetId) {
     linkedInvoice = getInvoice(companyContextOrIdOrPhone, targetId);
-    if (!linkedInvoice) {
+    const linkedOwnBudget = !linkedInvoice ? getBudget(companyContextOrIdOrPhone, targetId) : null;
+    if (!linkedInvoice && !linkedOwnBudget) {
       // Verificar si targetId pertenece a una factura de OTRA empresa (intento cross-tenant)
       const foreignInv = db.prepare('SELECT id, company_id FROM invoices WHERE id = ?').get(targetId);
       if (foreignInv && foreignInv.company_id !== companyId) {
@@ -1515,9 +1580,18 @@ export function savePayment(companyContextOrIdOrPhone, paymentOrBudgetId, maybeP
     }
   }
 
-  // Si está asociado a una factura en invoices, actualizar sus pagos dentro de data_json (retrocompatibilidad)
-  if (linkedInvoice) {
-    try {
+  // DEUDA TÉCNICA DOCUMENTADA (Fase 2B-3):
+  // La columna legacy 'payments.budget_id' tiene una semántica ambigua porque históricamente
+  // ha almacenado tanto budget_id (PRE-...) como invoice_id (INV-...).
+  // La nueva arquitectura formal desacopla los cobros de las facturas a través de la tabla
+  // canónica 'payment_allocations', donde la relación con la factura se almacena unívocamente
+  // en la columna 'invoice_id'. Se mantiene 'payments.budget_id' estrictamente por retrocompatibilidad.
+
+  // Ejecución transaccional estrictamente atómica de cobro, actualización de factura y allocations
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    // Si está asociado a una factura en invoices, actualizar sus pagos dentro de data_json (retrocompatibilidad)
+    if (linkedInvoice) {
       if (!linkedInvoice.payments) linkedInvoice.payments = [];
       linkedInvoice.payments.push({
         id: pId,
@@ -1529,19 +1603,8 @@ export function savePayment(companyContextOrIdOrPhone, paymentOrBudgetId, maybeP
       db.prepare('UPDATE invoices SET data_json = ? WHERE id = ? AND company_id = ?').run(
         JSON.stringify(linkedInvoice), targetId, companyId
       );
-    } catch (e) {}
-  }
+    }
 
-  // DEUDA TÉCNICA DOCUMENTADA (Fase 2B-3):
-  // La columna legacy 'payments.budget_id' tiene una semántica ambigua porque históricamente
-  // ha almacenado tanto budget_id (PRE-...) como invoice_id (INV-...).
-  // La nueva arquitectura formal desacopla los cobros de las facturas a través de la tabla
-  // canónica 'payment_allocations', donde la relación con la factura se almacena unívocamente
-  // en la columna 'invoice_id'. Se mantiene 'payments.budget_id' estrictamente por retrocompatibilidad.
-
-  // Ejecución transaccional estrictamente atómica
-  db.exec('BEGIN IMMEDIATE;');
-  try {
     if (!isMigration015Applied()) {
       const stmt = db.prepare(`
         INSERT INTO payments (id, company_id, budget_id, company_phone, amount, method, concept, data_json, created_at)
@@ -2138,16 +2201,15 @@ export function saveAppointment(companyContextOrIdOrPhone, appointment = {}) {
   const now = new Date().toISOString();
   const currentYear = new Date().getFullYear();
 
-  let id = appointment.id;
+  let id = appointment.id ? extractPublicEntityId(appointment.id) : null;
   let isNew = false;
   const existing = id ? getAppointment(companyContextOrIdOrPhone, id) : null;
-  
 
   if (id && !existing) {
-    // Verificar si el ID ya existe en otro tenant (cross-tenant overwrite attempt)
+    // Verificar si el ID explícito ya existe en otro tenant (cross-tenant overwrite attempt)
     const checkSql = 'SELECT id, company_id FROM appointments WHERE id = ?';
     const crossCheck = db.prepare(checkSql).get(id);
-    if (crossCheck) {
+    if (crossCheck && crossCheck.company_id !== companyId) {
       console.warn(`🛑 [Seguridad Tenant] Intento de sobreescritura cross-tenant en cita '${id}'. Rechazado.`);
       return null;
     }
@@ -2159,6 +2221,8 @@ export function saveAppointment(companyContextOrIdOrPhone, appointment = {}) {
     id = `CIT-${currentYear}-${nextSeq}`;
     isNew = true;
   }
+
+  const storageRowId = id;
 
   const clientName = (appointment.clientName || appointment.client_name || existing?.clientName || 'Cliente Particular').trim();
   const clientPhone = (appointment.clientPhone || appointment.client_phone || existing?.clientPhone || '').trim();
@@ -2214,7 +2278,7 @@ export function saveAppointment(companyContextOrIdOrPhone, appointment = {}) {
     `);
 
     stmt.run(
-      id, companyId, cleanPhone, clientName, clientPhone, clientAddress,
+      storageRowId, companyId, cleanPhone, clientName, clientPhone, clientAddress,
       date, time, title, notes, timezone,
       status, outcome, needsOutcomeConfirmation,
       scheduledStart, scheduledEnd, originalScheduledStart, rescheduleCount,
@@ -2250,7 +2314,7 @@ export function saveAppointment(companyContextOrIdOrPhone, appointment = {}) {
     `);
 
     stmt.run(
-      id, companyId, clientName, clientPhone, clientAddress,
+      storageRowId, companyId, clientName, clientPhone, clientAddress,
       date, time, title, notes, timezone,
       status, outcome, needsOutcomeConfirmation,
       scheduledStart, scheduledEnd, originalScheduledStart, rescheduleCount,
@@ -2283,12 +2347,14 @@ export function getAppointment(companyContextOrIdOrPhone, id) {
     const companyId = tenant?.companyId;
     if (!companyId) return null;
 
-    const stmt = db.prepare('SELECT * FROM appointments WHERE id = ? AND company_id = ?');
-    const row = stmt.get(id, companyId);
+    const publicId = extractPublicEntityId(id);
+    const scopedId = `${companyId}::${publicId}`;
+    const stmt = db.prepare('SELECT * FROM appointments WHERE (id = ? OR id = ?) AND company_id = ?');
+    const row = stmt.get(publicId, scopedId, companyId);
 
     if (!row) return null;
     return {
-      id: row.id,
+      id: extractPublicEntityId(row.id),
       companyId: row.company_id,
       companyPhone: row.company_phone,
       clientName: row.client_name,
@@ -2345,14 +2411,15 @@ export function findAppointments(companyContextOrIdOrPhone, query, options = {})
   const rows = stmt.all(companyId);
 
   const filtered = cleanQ ? rows.filter(r => {
-    return norm(r.id).includes(cleanQ) ||
+    const publicId = extractPublicEntityId(r.id);
+    return norm(publicId).includes(cleanQ) ||
            norm(r.client_name).includes(cleanQ) ||
            norm(r.notes).includes(cleanQ) ||
            norm(r.client_address).includes(cleanQ);
   }) : rows;
 
   return filtered.map(r => ({
-    id: r.id,
+    id: extractPublicEntityId(r.id),
     companyId: r.company_id,
     companyPhone: r.company_phone,
     clientName: r.client_name,
@@ -2375,18 +2442,21 @@ export function findConflictingAppointments(companyContextOrIdOrPhone, dateStr, 
   const companyId = tenant?.companyId;
   if (!companyId) return [];
 
+  const pubExclude = excludeId ? extractPublicEntityId(excludeId) : null;
+  const scopedExclude = pubExclude ? `${companyId}::${pubExclude}` : null;
+
   const stmt = db.prepare(`
     SELECT * FROM appointments
     WHERE company_id = ?
       AND date = ?
       AND time = ?
       AND status = 'CONFIRMED'
-      AND (? IS NULL OR id != ?)
+      AND (? IS NULL OR (id != ? AND id != ?))
   `);
-  const rows = stmt.all(companyId, dateStr, timeStr, excludeId, excludeId);
+  const rows = stmt.all(companyId, dateStr, timeStr, pubExclude, pubExclude, scopedExclude);
 
   return rows.map(r => ({
-    id: r.id,
+    id: extractPublicEntityId(r.id),
     companyId: r.company_id,
     companyPhone: r.company_phone,
     clientName: r.client_name,
@@ -2443,6 +2513,8 @@ export function rescheduleAppointment(companyContextOrIdOrPhone, queryOrId, newD
 
   if (!companyId) return { success: false, error: 'TENANT_REQUIRED' };
 
+  const pubTargetId = extractPublicEntityId(target.id);
+  const scopedTargetId = `${companyId}::${pubTargetId}`;
   const stmt = db.prepare(`
     UPDATE appointments
     SET date = ?,
@@ -2458,14 +2530,14 @@ export function rescheduleAppointment(companyContextOrIdOrPhone, queryOrId, newD
         reminder_morning_sent_at = NULL,
         end_of_day_review_sent_at = NULL,
         updated_at = ?
-    WHERE id = ? AND company_id = ?
+    WHERE (id = ? OR id = ?) AND company_id = ?
   `);
-  stmt.run(finalDate, finalTime, finalStart, finalEnd, now, now, target.id, companyId);
+  stmt.run(finalDate, finalTime, finalStart, finalEnd, now, now, pubTargetId, scopedTargetId, companyId);
 
   recordAuditLog({
     businessId: companyId || cleanPhone,
     entityType: 'APPOINTMENT',
-    entityId: target.id,
+    entityId: pubTargetId,
     action: 'RESCHEDULE',
     fieldChanged: 'scheduled_start',
     oldValue: oldDisplay,
@@ -2474,7 +2546,7 @@ export function rescheduleAppointment(companyContextOrIdOrPhone, queryOrId, newD
     reason
   });
 
-  return { success: true, appointment: getAppointment(companyContextOrIdOrPhone, target.id) };
+  return { success: true, appointment: getAppointment(companyContextOrIdOrPhone, pubTargetId) };
 }
 
 /**
@@ -2520,6 +2592,8 @@ export function completeAppointments(companyContextOrIdOrPhone, queriesOrIds = [
 
     if (target) {
       const apt = target;
+      const pubAptId = extractPublicEntityId(apt.id);
+      const scopedAptId = `${companyId}::${pubAptId}`;
       db.prepare(`
         UPDATE appointments
         SET status = 'COMPLETED',
@@ -2527,13 +2601,13 @@ export function completeAppointments(companyContextOrIdOrPhone, queriesOrIds = [
             completed_at = ?,
             needs_outcome_confirmation = 0,
             updated_at = ?
-        WHERE id = ? AND company_id = ?
-      `).run(outcome, now, now, apt.id, companyId);
+        WHERE (id = ? OR id = ?) AND company_id = ?
+      `).run(outcome, now, now, pubAptId, scopedAptId, companyId);
 
       recordAuditLog({
         businessId: companyId || cleanPhone,
         entityType: 'APPOINTMENT',
-        entityId: apt.id,
+        entityId: pubAptId,
         action: 'COMPLETE',
         fieldChanged: 'status',
         oldValue: apt.status || 'CONFIRMED',
@@ -2542,7 +2616,7 @@ export function completeAppointments(companyContextOrIdOrPhone, queriesOrIds = [
         reason
       });
 
-      completed.push(getAppointment(companyContextOrIdOrPhone, apt.id));
+      completed.push(getAppointment(companyContextOrIdOrPhone, pubAptId));
     } else {
       notFound.push(q);
     }
@@ -2596,19 +2670,21 @@ export function updateAppointment(companyContextOrIdOrPhone, query, changes = {}
 
   // Model injection defense: solo actualizar campos permitidos
   if (!companyId) return null;
+  const pubRowId = extractPublicEntityId(row.id);
+  const scopedRowId = `${companyId}::${pubRowId}`;
   const updateStmt = db.prepare(`
     UPDATE appointments
     SET date = ?, time = ?, scheduled_start = ?, scheduled_end = ?,
         client_address = ?, notes = ?, client_name = ?, client_phone = ?,
         updated_at = ?
-    WHERE id = ? AND company_id = ?
+    WHERE (id = ? OR id = ?) AND company_id = ?
   `);
-  updateStmt.run(newDate, newTime, newStart, newEnd, newAddress, newNotes, newClientName, newClientPhone, now, row.id, companyId);
+  updateStmt.run(newDate, newTime, newStart, newEnd, newAddress, newNotes, newClientName, newClientPhone, now, pubRowId, scopedRowId, companyId);
 
   recordAuditLog({
     businessId: companyId || cleanPhone,
     entityType: 'APPOINTMENT',
-    entityId: row.id,
+    entityId: pubRowId,
     action: 'UPDATE',
     fieldChanged: 'details',
     oldValue: `${row.date} ${row.time} - ${row.clientAddress}`,
@@ -2617,7 +2693,7 @@ export function updateAppointment(companyContextOrIdOrPhone, query, changes = {}
     reason: 'Modificación de detalles de visita'
   });
 
-  return getAppointment(companyContextOrIdOrPhone, row.id);
+  return getAppointment(companyContextOrIdOrPhone, pubRowId);
 }
 
 /**
@@ -2652,19 +2728,21 @@ export function cancelAppointment(companyContextOrIdOrPhone, query, reason = 'Ca
   }
   const now = new Date().toISOString();
 
+  const pubRowId = extractPublicEntityId(row.id);
+  const scopedRowId = `${companyId}::${pubRowId}`;
   db.prepare(`
     UPDATE appointments
     SET status = 'CANCELLED',
         cancelled_at = ?,
         needs_outcome_confirmation = 0,
         updated_at = ?
-    WHERE id = ? AND company_id = ?
-  `).run(now, now, row.id, companyId);
+    WHERE (id = ? OR id = ?) AND company_id = ?
+  `).run(now, now, pubRowId, scopedRowId, companyId);
 
   recordAuditLog({
     businessId: companyId || cleanPhone,
     entityType: 'APPOINTMENT',
-    entityId: row.id,
+    entityId: pubRowId,
     action: 'CANCEL',
     fieldChanged: 'status',
     oldValue: row.status || 'CONFIRMED',
@@ -2673,7 +2751,7 @@ export function cancelAppointment(companyContextOrIdOrPhone, query, reason = 'Ca
     reason
   });
 
-  return getAppointment(companyContextOrIdOrPhone, row.id);
+  return getAppointment(companyContextOrIdOrPhone, pubRowId);
 }
 
 export function listAppointments(companyContextOrIdOrPhone, filter = 'all') {
@@ -2739,7 +2817,7 @@ export function listAppointments(companyContextOrIdOrPhone, filter = 'all') {
   }
 
   return rows.map(r => ({
-    id: r.id,
+    id: extractPublicEntityId(r.id),
     companyId: r.company_id,
     companyPhone: r.company_phone,
     clientName: r.client_name,
@@ -2772,12 +2850,14 @@ export function updateAppointmentStatus(companyContextOrIdOrPhone, id, status) {
   if (!companyId) return;
   const now = new Date().toISOString();
 
+  const pubId = extractPublicEntityId(id);
+  const scopedId = `${companyId}::${pubId}`;
   const stmt = db.prepare(`
     UPDATE appointments 
     SET status = ?, updated_at = ? 
-    WHERE id = ? AND company_id = ?
+    WHERE (id = ? OR id = ?) AND company_id = ?
   `);
-  stmt.run(status, now, id, companyId);
+  stmt.run(status, now, pubId, scopedId, companyId);
 }
 
 export function getAppointmentHistory(companyContextOrIdOrPhone, appointmentId) {
@@ -2991,8 +3071,9 @@ export function getPendingWorksDebt(phoneOrCompany) {
     let parsed = null;
     try { parsed = JSON.parse(r.data_json); } catch(e) {}
     const totalAmount = r.total_amount || parsed?.financials?.totalAmount || 0;
+    const publicBudgetId = extractPublicEntityId(r.id);
 
-    const paymentRows = db.prepare('SELECT amount FROM payments WHERE company_id = ? AND budget_id = ?').all(companyId, r.id);
+    const paymentRows = db.prepare('SELECT amount FROM payments WHERE company_id = ? AND (budget_id = ? OR budget_id = ?)').all(companyId, publicBudgetId, r.id);
     const tablePaid = paymentRows.reduce((sum, p) => sum + (p.amount || 0), 0);
     const jsonPayments = Array.isArray(parsed?.payments) ? parsed.payments : [];
     const jsonPaid = jsonPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
@@ -3009,7 +3090,7 @@ export function getPendingWorksDebt(phoneOrCompany) {
 
     if (remainingBalance > 0.01) {
       results.push({
-        budgetId: r.id,
+        budgetId: publicBudgetId,
         clientName: r.client_name || parsed?.client?.name || 'Cliente Particular',
         clientPhone: r.client_phone || parsed?.client?.phone || null,
         clientAddress: r.client_address || parsed?.client?.address || '',
@@ -3035,10 +3116,12 @@ export function getBudgetsPendingFollowUp(phoneOrCompany) {
     let parsed = null;
     try { parsed = JSON.parse(r.data_json); } catch(e) {}
     if (parsed?.isDraft) return null; // Ignorar borradores incompletos de medición
+    const publicId = extractPublicEntityId(r.id);
+    if (parsed) parsed.id = publicId;
     const createdAt = r.created_at ? new Date(r.created_at).getTime() : now;
     const daysWaiting = Math.max(0, Math.floor((now - createdAt) / (1000 * 60 * 60 * 24)));
     return {
-      id: r.id,
+      id: publicId,
       clientName: r.client_name || parsed?.client?.name || 'Cliente Particular',
       clientPhone: r.client_phone || parsed?.client?.phone || null,
       totalAmount: r.total_amount || parsed?.financials?.totalAmount || 0,
@@ -3078,6 +3161,8 @@ export function getBudgetsNearExpiration(phoneOrCompany) {
     let parsed = null;
     try { parsed = JSON.parse(r.data_json); } catch(e) {}
     if (parsed?.isDraft) continue;
+    const publicId = extractPublicEntityId(r.id);
+    if (parsed) parsed.id = publicId;
 
     const createdAt = r.created_at ? new Date(r.created_at).getTime() : now;
     const daysWaiting = Math.max(0, Math.floor((now - createdAt) / (1000 * 60 * 60 * 24)));
@@ -3095,7 +3180,7 @@ export function getBudgetsNearExpiration(phoneOrCompany) {
 
     if (isSoonToExpire || isExpired) {
       results.push({
-        id: r.id,
+        id: publicId,
         clientName: r.client_name || parsed?.client?.name || 'Cliente Particular',
         clientPhone: r.client_phone || parsed?.client?.phone || null,
         totalAmount: r.total_amount || parsed?.financials?.totalAmount || 0,
@@ -3252,8 +3337,9 @@ export function getPeriodRevenue(phoneOrCompany, periodOptions = {}) {
     try { parsed = JSON.parse(r.data_json); } catch (e) {}
 
     let clientName = parsed?.clientName || parsed?.client?.name || '';
-    if (!clientName && r.budget_id) {
-      const bRow = db.prepare('SELECT client_name, data_json FROM budgets WHERE id = ? AND company_id = ?').get(r.budget_id, companyId);
+    const publicBudgetId = r.budget_id ? extractPublicEntityId(r.budget_id) : null;
+    if (!clientName && publicBudgetId) {
+      const bRow = db.prepare('SELECT client_name, data_json FROM budgets WHERE (id = ? OR id = ?) AND company_id = ?').get(publicBudgetId, `${companyId}::${publicBudgetId}`, companyId);
       if (bRow) {
         clientName = bRow.client_name;
         if (!clientName) {
@@ -3269,7 +3355,7 @@ export function getPeriodRevenue(phoneOrCompany, periodOptions = {}) {
       method: r.method || 'Bizum',
       concept: r.concept || parsed?.concept || 'Pago recibido',
       clientName: clientName || 'Cliente Particular',
-      budgetId: r.budget_id || null,
+      budgetId: publicBudgetId || null,
       date: (r.created_at || '').split('T')[0]
     });
   }
@@ -3285,6 +3371,7 @@ export function getPeriodRevenue(phoneOrCompany, periodOptions = {}) {
     let parsed = null;
     try { parsed = JSON.parse(b.data_json); } catch (e) {}
     if (!parsed) continue;
+    const publicBId = extractPublicEntityId(b.id);
 
     const bClientName = b.client_name || parsed.client?.name || 'Cliente Particular';
     const bPayments = [
@@ -3293,7 +3380,7 @@ export function getPeriodRevenue(phoneOrCompany, periodOptions = {}) {
     ];
 
     for (const p of bPayments) {
-      const pId = p.id || `BPAY-${b.id}-${p.amount}-${p.date || ''}`;
+      const pId = p.id || `BPAY-${publicBId}-${p.amount}-${p.date || ''}`;
       if (seenPaymentIds.has(pId)) continue;
 
       const pDateStr = p.date || p.timestamp || p.created_at;
@@ -3311,7 +3398,7 @@ export function getPeriodRevenue(phoneOrCompany, periodOptions = {}) {
           method: p.method || 'Bizum',
           concept: p.concept || 'Entrega a cuenta',
           clientName: bClientName,
-          budgetId: b.id,
+          budgetId: publicBId,
           date: (typeof pDateStr === 'string' ? pDateStr.split('T')[0] : '')
         });
       }
@@ -3343,7 +3430,7 @@ export function getPeriodRevenue(phoneOrCompany, periodOptions = {}) {
     totalPendingFromInvoices += remaining;
 
     invoicesList.push({
-      id: r.id,
+      id: extractPublicEntityId(r.id),
       totalAmount: total,
       status: r.status,
       clientName,
@@ -3430,7 +3517,7 @@ export function listAppointmentsWeek(companyContextOrIdOrPhone) {
   `).all(companyId, todayStr, weekEndStr);
 
   return rows.map(r => ({
-    id:            r.id,
+    id:            extractPublicEntityId(r.id),
     companyId:     r.company_id,
     companyPhone:  r.company_phone,
     clientName:    r.client_name,
@@ -3559,10 +3646,15 @@ export function addShoppingItems(companyContextOrIdOrPhone, items, defaultClient
 
     // Si hay budgetId, validar que pertenezca al mismo tenant si es posible
     if (budgetId && companyId) {
-      const bRow = db.prepare('SELECT company_id FROM budgets WHERE id = ?').get(budgetId);
-      if (bRow && bRow.company_id && bRow.company_id !== companyId) {
-        console.warn(`🛑 [Seguridad Tenant] Intento de asociar item de compra a presupuesto '${budgetId}' de otro tenant.`);
-        continue;
+      const publicBId = extractPublicEntityId(budgetId);
+      budgetId = publicBId;
+      const ownRow = db.prepare('SELECT id FROM budgets WHERE company_id = ? AND (id = ? OR id = ?)').get(companyId, publicBId, `${companyId}::${publicBId}`);
+      if (!ownRow) {
+        const bRow = db.prepare('SELECT company_id FROM budgets WHERE id = ?').get(publicBId);
+        if (bRow && bRow.company_id && bRow.company_id !== companyId) {
+          console.warn(`🛑 [Seguridad Tenant] Intento de asociar item de compra a presupuesto '${budgetId}' de otro tenant.`);
+          continue;
+        }
       }
     }
 
@@ -3620,7 +3712,7 @@ export function listShoppingItems(companyContextOrIdOrPhone, filter = 'pending',
     companyId: r.company_id,
     companyPhone: r.company_phone,
     clientName: r.client_name,
-    budgetId: r.budget_id,
+    budgetId: r.budget_id ? extractPublicEntityId(r.budget_id) : r.budget_id,
     description: r.description,
     qty: r.qty,
     unit: r.unit,
@@ -3694,7 +3786,7 @@ export function markShoppingItemBought(companyContextOrIdOrPhone, queryOrId, cli
       companyId: r.company_id,
       companyPhone: r.company_phone,
       clientName: r.client_name,
-      budgetId: r.budget_id,
+      budgetId: r.budget_id ? extractPublicEntityId(r.budget_id) : r.budget_id,
       description: r.description,
       qty: r.qty,
       unit: r.unit,
@@ -3733,7 +3825,7 @@ export function markShoppingItemsBoughtForClients(companyContextOrIdOrPhone, cli
   }
   return updated.map(row => ({
     id: row.id, companyId: row.company_id, companyPhone: row.company_phone,
-    clientName: row.client_name, budgetId: row.budget_id, description: row.description,
+    clientName: row.client_name, budgetId: row.budget_id ? extractPublicEntityId(row.budget_id) : row.budget_id, description: row.description,
     qty: row.qty, unit: row.unit, status: 'BOUGHT', boughtAt: now
   }));
 }
@@ -3760,9 +3852,10 @@ export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
   const params = [companyId];
 
   if (clientOrBudgetId) {
-    const q = String(clientOrBudgetId).trim().toLowerCase();
-    query += ' AND (LOWER(id) = ? OR LOWER(client_name) LIKE ?)';
-    params.push(q, `%${q}%`);
+    const q = String(extractPublicEntityId(clientOrBudgetId)).trim().toLowerCase();
+    const qScoped = `${companyId.toLowerCase()}::${q}`;
+    query += ' AND (LOWER(id) = ? OR LOWER(id) = ? OR LOWER(client_name) LIKE ?)';
+    params.push(q, qScoped, `%${q}%`);
   }
   query += ' ORDER BY updated_at DESC LIMIT 1';
 
@@ -3772,14 +3865,15 @@ export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
   let parsed = null;
   try { parsed = JSON.parse(budgetRow.data_json); } catch(e) {}
 
-  const budgetId = budgetRow.id;
+  const budgetId = extractPublicEntityId(budgetRow.id);
+  if (parsed) parsed.id = budgetId;
   const clientName = budgetRow.client_name || parsed?.client?.name || 'Cliente Particular';
   const clientAddress = budgetRow.client_address || parsed?.client?.address || 'Ubicación según visita';
   const clientPhone = budgetRow.client_phone || parsed?.client?.phone || null;
   const totalAmount = budgetRow.total_amount || parsed?.financials?.totalAmount || 0;
 
   // 2. Pagos acumulados scoped por tenant
-  const paymentRows = db.prepare('SELECT amount FROM payments WHERE company_id = ? AND budget_id = ?').all(companyId, budgetId);
+  const paymentRows = db.prepare('SELECT amount FROM payments WHERE company_id = ? AND (budget_id = ? OR budget_id = ?)').all(companyId, budgetId, budgetRow.id);
   const tablePaid = paymentRows.reduce((sum, p) => sum + (p.amount || 0), 0);
   const jsonPayments = Array.isArray(parsed?.payments) ? parsed.payments : [];
   const jsonPaid = jsonPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
@@ -3802,9 +3896,9 @@ export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
   const materialsRows = db.prepare(`
     SELECT id, description, qty, unit, status, created_at, bought_at
     FROM shopping_items
-    WHERE company_id = ? AND (budget_id = ? OR LOWER(client_name) = LOWER(?))
+    WHERE company_id = ? AND (budget_id = ? OR budget_id = ? OR LOWER(client_name) = LOWER(?))
     ORDER BY created_at ASC
-  `).all(companyId, budgetId, clientName);
+  `).all(companyId, budgetId, budgetRow.id, clientName);
 
   const materialsBought = [];
   const materialsPending = [];
@@ -3892,9 +3986,10 @@ export function updateWorkTaskStatus(phoneOrCompany, clientOrBudgetId, taskQuery
   const params = [companyId];
 
   if (clientOrBudgetId) {
-    const q = String(clientOrBudgetId).trim().toLowerCase();
-    query += ' AND (LOWER(id) = ? OR LOWER(client_name) LIKE ?)';
-    params.push(q, `%${q}%`);
+    const q = String(extractPublicEntityId(clientOrBudgetId)).trim().toLowerCase();
+    const qScoped = `${companyId.toLowerCase()}::${q}`;
+    query += ' AND (LOWER(id) = ? OR LOWER(id) = ? OR LOWER(client_name) LIKE ?)';
+    params.push(q, qScoped, `%${q}%`);
   }
   query += ' ORDER BY updated_at DESC LIMIT 1';
 
@@ -3944,6 +4039,8 @@ export function updateWorkTaskStatus(phoneOrCompany, clientOrBudgetId, taskQuery
     matchedTask = { description: newTask.description, isDone: newTask.isDone };
   }
 
+  const publicBudgetId = extractPublicEntityId(budgetRow.id);
+  parsed.id = publicBudgetId;
   const now = new Date().toISOString();
   db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE id = ? AND company_id = ?').run(
     JSON.stringify(parsed),
@@ -3953,10 +4050,10 @@ export function updateWorkTaskStatus(phoneOrCompany, clientOrBudgetId, taskQuery
   );
 
   return {
-    budgetId: budgetRow.id,
+    budgetId: publicBudgetId,
     clientName: budgetRow.client_name,
     task: matchedTask,
-    workMemory: getWorkMemory(companyId, budgetRow.id)
+    workMemory: getWorkMemory(companyId, publicBudgetId)
   };
 }
 
@@ -3969,9 +4066,10 @@ export function updateWorkDates(phoneOrCompany, clientOrBudgetId, startDate, est
   const params = [companyId];
 
   if (clientOrBudgetId) {
-    const q = String(clientOrBudgetId).trim().toLowerCase();
-    query += ' AND (LOWER(id) = ? OR LOWER(client_name) LIKE ?)';
-    params.push(q, `%${q}%`);
+    const q = String(extractPublicEntityId(clientOrBudgetId)).trim().toLowerCase();
+    const qScoped = `${companyId.toLowerCase()}::${q}`;
+    query += ' AND (LOWER(id) = ? OR LOWER(id) = ? OR LOWER(client_name) LIKE ?)';
+    params.push(q, qScoped, `%${q}%`);
   }
   query += ' ORDER BY updated_at DESC LIMIT 1';
 
@@ -3982,6 +4080,8 @@ export function updateWorkDates(phoneOrCompany, clientOrBudgetId, startDate, est
   try { parsed = JSON.parse(budgetRow.data_json); } catch(e) {}
   if (!parsed) return null;
 
+  const publicBudgetId = extractPublicEntityId(budgetRow.id);
+  parsed.id = publicBudgetId;
   parsed.workMemory = parsed.workMemory || {};
   if (startDate) parsed.workMemory.startDate = startDate;
   if (estimatedEndDate) parsed.workMemory.estimatedEndDate = estimatedEndDate;
@@ -3995,7 +4095,7 @@ export function updateWorkDates(phoneOrCompany, clientOrBudgetId, startDate, est
   );
 
   return {
-    budgetId: budgetRow.id,
+    budgetId: publicBudgetId,
     clientName: budgetRow.client_name,
     startDate: parsed.workMemory.startDate,
     estimatedEndDate: parsed.workMemory.estimatedEndDate
@@ -4027,9 +4127,10 @@ export function findClientsByName(phoneOrCompany, clientNameQuery) {
 
   const matched = [];
   for (const r of rows) {
+    const publicId = extractPublicEntityId(r.id);
     const cName = norm(r.client_name);
     const cAddr = norm(r.client_address);
-    const bId = norm(r.id);
+    const bId = norm(publicId);
 
     if (
       cName === qNorm ||
@@ -4040,7 +4141,7 @@ export function findClientsByName(phoneOrCompany, clientNameQuery) {
       let parsed = null;
       try { parsed = JSON.parse(r.data_json); } catch(e) {}
       matched.push({
-        id: r.id,
+        id: publicId,
         clientName: r.client_name,
         clientAddress: r.client_address || parsed?.client?.address || 'Sin dirección registrada',
         clientPhone: r.client_phone || parsed?.client?.phone || null,
@@ -4066,7 +4167,7 @@ export function findClientsByName(phoneOrCompany, clientNameQuery) {
         const allMatch = tokens.every(t => combined.includes(t));
         if (allMatch) {
           matched.push({
-            id: r.id,
+            id: extractPublicEntityId(r.id),
             clientName: r.client_name,
             clientAddress: addr || 'Sin dirección registrada',
             clientPhone: r.client_phone || parsed?.client?.phone || null,
@@ -4107,9 +4208,10 @@ export function renameClientBudget(phoneOrCompany, budgetIdOrQuery, newNameWithB
   if (!companyId) return null;
 
   const newName = String(newNameWithBadge).trim();
+  const publicQueryId = extractPublicEntityId(budgetIdOrQuery);
 
   // Localizar el presupuesto
-  let budgetRow = db.prepare(`SELECT * FROM budgets WHERE company_id = ? AND id = ?`).get(companyId, budgetIdOrQuery);
+  let budgetRow = db.prepare(`SELECT * FROM budgets WHERE company_id = ? AND (id = ? OR id = ?)`).get(companyId, publicQueryId, `${companyId}::${publicQueryId}`);
   if (!budgetRow) {
     const q = String(budgetIdOrQuery).trim().toLowerCase();
     budgetRow = db.prepare(`
@@ -4121,11 +4223,15 @@ export function renameClientBudget(phoneOrCompany, budgetIdOrQuery, newNameWithB
 
   if (!budgetRow) return null;
 
+  const publicBudgetId = extractPublicEntityId(budgetRow.id);
   const oldName = budgetRow.client_name;
   let parsed = null;
   try { parsed = JSON.parse(budgetRow.data_json); } catch(e) {}
-  if (parsed && parsed.client) {
-    parsed.client.name = newName;
+  if (parsed) {
+    parsed.id = publicBudgetId;
+    if (parsed.client) {
+      parsed.client.name = newName;
+    }
   }
 
   const now = new Date().toISOString();
@@ -4141,18 +4247,18 @@ export function renameClientBudget(phoneOrCompany, budgetIdOrQuery, newNameWithB
   db.prepare(`
     UPDATE shopping_items
     SET client_name = ?
-    WHERE company_id = ? AND (budget_id = ? OR client_name = ?)
-  `).run(newName, companyId, budgetRow.id, oldName);
+    WHERE company_id = ? AND (budget_id = ? OR budget_id = ? OR client_name = ?)
+  `).run(newName, companyId, publicBudgetId, budgetRow.id, oldName);
 
   // 3. Actualizar facturas vinculadas scoped por tenant (company_id)
   db.prepare(`
     UPDATE invoices
     SET client_name = ?
-    WHERE company_id = ? AND budget_id = ?
-  `).run(newName, companyId, budgetRow.id);
+    WHERE company_id = ? AND (budget_id = ? OR budget_id = ?)
+  `).run(newName, companyId, publicBudgetId, budgetRow.id);
 
   return {
-    budgetId: budgetRow.id,
+    budgetId: publicBudgetId,
     oldName,
     newName,
     clientAddress: budgetRow.client_address

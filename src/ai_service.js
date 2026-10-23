@@ -396,7 +396,7 @@ export async function callGeminiAPI(userPrompt, systemInstruction, apiKey) {
   let lastError = null;
   for (const model of GEMINI_MODELS) {
     try {
-      const url = `${GEMINI_API_BASE}/${model}:generateContent?key=${apiKey}`;
+      const url = `${GEMINI_API_BASE}/${model}:generateContent`;
       const body = {
         contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
         systemInstruction: { parts: [{ text: systemInstruction }] },
@@ -409,7 +409,10 @@ export async function callGeminiAPI(userPrompt, systemInstruction, apiKey) {
 
       const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(30000)
       });
@@ -552,7 +555,7 @@ export async function callGeminiMultimodal({
 }) {
   if (!apiKey) throw new Error('API key de Gemini no configurada');
 
-  const url = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const url = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent`;
   const parts = [];
 
   if (imageBuffer) {
@@ -581,7 +584,10 @@ export async function callGeminiMultimodal({
 
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey
+    },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(25000)
   });

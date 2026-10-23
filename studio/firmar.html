@@ -305,6 +305,7 @@ function normalizeBudget(raw) {
   return {
     id: raw.i || raw.id || 'PRE-2026',
     company: {
+      id: raw.c?.id || raw.company?.id || '',
       name: raw.c?.n || raw.company?.name || 'Carpintería y Reformas Manolo S.L.',
       cif: raw.c?.c || raw.c?.f || raw.company?.cif || 'B-41987654',
       address: raw.c?.a || raw.company?.address || '',
@@ -381,14 +382,18 @@ function normalizeBudget(raw) {
   };
 }
 
-function getStorageKey(budgetId) {
-  return 'presuvoz_signed_' + String(budgetId || '').trim().replace(/\s+/g, '_');
+function getStorageKey(budgetId, companyId = '') {
+  const cleanId = String(budgetId || '').trim().replace(/\s+/g, '_');
+  const cleanComp = String(companyId || '').trim();
+  return cleanComp ? `presuvoz_signed_${cleanComp}_${cleanId}` : `presuvoz_signed_${cleanId}`;
 }
 
-async function checkRemoteSigned(budgetId) {
+async function checkRemoteSigned(budgetId, companyId = '') {
   if (!budgetId) return null;
   const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
-  const res = await fetch(`${SIGN_ENDPOINT}?check=${encodeURIComponent(cleanId)}`, { signal: AbortSignal.timeout(5000) });
+  const cleanComp = String(companyId || '').trim();
+  const compParam = cleanComp ? `&companyId=${encodeURIComponent(cleanComp)}` : '';
+  const res = await fetch(`${SIGN_ENDPOINT}?check=${encodeURIComponent(cleanId)}${compParam}`, { signal: AbortSignal.timeout(5000) });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) throw new Error(data.error || 'No se pudo comprobar el estado de la firma.');
   return data.alreadySigned ? data.details : null;
@@ -419,11 +424,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
-  const storageKey = getStorageKey(budget.id);
+  const storageKey = getStorageKey(budget.id, budget.company?.id);
 
   let remoteRecord;
   try {
-    remoteRecord = await checkRemoteSigned(budget.id);
+    remoteRecord = await checkRemoteSigned(budget.id, budget.company?.id);
   } catch (error) {
     console.error('No se pudo verificar el registro de firmas:', error);
     showState('error');
@@ -598,7 +603,7 @@ window.submitSignatures = async function() {
   const errorEl = document.getElementById('formError');
   errorEl.classList.add('hidden');
 
-  const storageKey = getStorageKey(budget.id);
+  const storageKey = getStorageKey(budget.id, budget.company?.id);
 
   // Pre-verificación local
   if (localStorage.getItem(storageKey)) {
@@ -675,7 +680,7 @@ window.submitSignatures = async function() {
 };
 
 window.retryEmailCopy = async function() {
-  const storageKey = getStorageKey(budget?.id);
+  const storageKey = getStorageKey(budget?.id, budget?.company?.id);
   let record;
   try { record = JSON.parse(localStorage.getItem(storageKey) || '{}'); } catch (_) { record = {}; }
   if (!signedPayload || !payloadProof || !record.clientSignature) {

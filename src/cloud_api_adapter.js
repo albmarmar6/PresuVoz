@@ -147,12 +147,23 @@ export function getShortSigningLink(code) {
 /**
  * Consulta si un presupuesto ya ha sido firmado en el almacén local del servidor.
  * @param {string} budgetId
+ * @param {string|null} [companyId=null]
  * @returns {object|null}
  */
-export function getLocalSignedBudget(budgetId) {
+export function getLocalSignedBudget(budgetId, companyId = null) {
   ensureStoresLoaded();
   if (!budgetId) return null;
   const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
+  const cleanCompanyId = companyId ? String(companyId).trim() : null;
+  if (cleanCompanyId) {
+    const scoped = signedBudgetsMemory.get(`${cleanCompanyId}::${cleanId}`);
+    if (scoped) return scoped;
+    const unscoped = signedBudgetsMemory.get(cleanId);
+    if (unscoped && (!unscoped.companyId || unscoped.companyId === cleanCompanyId)) {
+      return unscoped;
+    }
+    return null;
+  }
   return signedBudgetsMemory.get(cleanId) || null;
 }
 
@@ -160,18 +171,30 @@ export function getLocalSignedBudget(budgetId) {
  * Registra una firma completada en el almacén local del servidor.
  * @param {string} budgetId
  * @param {object} details
+ * @param {string|null} [companyId=null]
  */
-export function saveLocalSignedBudget(budgetId, details) {
+export function saveLocalSignedBudget(budgetId, details, companyId = null) {
   ensureStoresLoaded();
   if (!budgetId) return null;
   const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
+  const effectiveCompanyId = (companyId || details?.companyId || '')
+    ? String(companyId || details?.companyId).trim()
+    : null;
   const record = {
     signed: true,
     budgetId: String(budgetId).trim(),
     ...details,
+    ...(effectiveCompanyId ? { companyId: effectiveCompanyId } : {}),
     signedAt: details?.signedAt || new Date().toISOString()
   };
-  signedBudgetsMemory.set(cleanId, record);
+  if (effectiveCompanyId) {
+    signedBudgetsMemory.set(`${effectiveCompanyId}::${cleanId}`, record);
+    if (!signedBudgetsMemory.has(cleanId)) {
+      signedBudgetsMemory.set(cleanId, record);
+    }
+  } else {
+    signedBudgetsMemory.set(cleanId, record);
+  }
   persistSignedBudgets();
   return record;
 }
@@ -625,13 +648,14 @@ export function createPresuVozHttpServer(options = {}) {
 
       // 5. API de Firma Digital Local (GET /api/sign?check=... & POST /api/sign)
       if (pathname === '/api/sign' && req.method === 'GET') {
-        const checkId = parsedUrl.searchParams.get('check');
+        const checkId = parsedUrl.searchParams.get('check') || parsedUrl.searchParams.get('id');
+        const companyId = parsedUrl.searchParams.get('companyId') || null;
         if (!checkId) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, error: 'Falta parámetro check' }));
           return;
         }
-        const record = getLocalSignedBudget(checkId);
+        const record = getLocalSignedBudget(checkId, companyId);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
           ok: true,
@@ -663,15 +687,20 @@ export function createPresuVozHttpServer(options = {}) {
         const {
           signedPayload,
           payloadProof,
+          proof,
           clientName,
           clientNif,
           clientAddress,
           clientEmail,
           signatureDataUrl,
+          signatureClient,
           signedAt
         } = body || {};
 
-        if (!verifyPayloadProof(signedPayload, payloadProof, activeSecret)) {
+        const activeProof = payloadProof || proof;
+        const activeSignature = signatureDataUrl || signatureClient;
+
+        if (!verifyPayloadProof(signedPayload, activeProof, activeSecret)) {
           res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, error: 'El enlace de firma no es válido o ha sido modificado.' }));
           return;
@@ -687,27 +716,30 @@ export function createPresuVozHttpServer(options = {}) {
         }
 
         const budgetId = String(verifiedBudget?.i || verifiedBudget?.id || '').trim();
+        const companyId = String(verifiedBudget?.c?.id || verifiedBudget?.company?.id || '').trim() || null;
         const companyName = String(verifiedBudget?.c?.n || verifiedBudget?.company?.name || '').trim();
         const companyEmail = String(verifiedBudget?.c?.e || verifiedBudget?.company?.email || '').trim();
         const companyPhone = String(verifiedBudget?.c?.p || verifiedBudget?.company?.phone || '').replace(/\D/g, '');
+        const resolvedClientName = String(clientName || verifiedBudget?.k?.n || verifiedBudget?.client?.name || 'Cliente Particular').trim();
+        const resolvedClientAddress = String(clientAddress || verifiedBudget?.k?.a || verifiedBudget?.client?.address || 'Ubicación según visita').trim();
         const totalFormatted = `${Number(verifiedBudget?.f?.t ?? verifiedBudget?.financials?.totalAmount ?? 0).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
 
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (
           !budgetId ||
-          !clientName || String(clientName).trim().length < 2 ||
-          !clientNif || String(clientNif).trim().length < 5 ||
-          !clientAddress || String(clientAddress).trim().length < 4 ||
+          !resolvedClientName || resolvedClientName.length < 2 ||
+          (clientNif !== undefined && String(clientNif).trim().length > 0 && String(clientNif).trim().length < 5) ||
+          !resolvedClientAddress || resolvedClientAddress.length < 2 ||
           !clientEmail || !emailRegex.test(String(clientEmail).trim()) ||
-          typeof signatureDataUrl !== 'string' ||
-          !signatureDataUrl.startsWith('data:image/png;base64,')
+          typeof activeSignature !== 'string' ||
+          !activeSignature.startsWith('data:image/png;base64,')
         ) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, error: 'Datos obligatorios de firma incompletos o inválidos.' }));
           return;
         }
 
-        const existingRecord = getLocalSignedBudget(budgetId);
+        const existingRecord = getLocalSignedBudget(budgetId, companyId);
         if (existingRecord && existingRecord.signed) {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({
@@ -723,15 +755,16 @@ export function createPresuVozHttpServer(options = {}) {
         const timestamp = signedAt || new Date().toLocaleString('es-ES', { timeZone: 'Europe/Madrid' });
         const savedRecord = saveLocalSignedBudget(budgetId, {
           budgetId,
-          clientName: String(clientName).trim(),
-          clientNif: String(clientNif).trim(),
-          clientAddress: String(clientAddress).trim(),
+          ...(companyId ? { companyId } : {}),
+          clientName: resolvedClientName,
+          clientNif: clientNif ? String(clientNif).trim() : '',
+          clientAddress: resolvedClientAddress,
           clientEmail: String(clientEmail).trim(),
           companyName,
           companyPhone,
           totalFormatted,
           signedAt: timestamp
-        });
+        }, companyId);
 
         if (typeof onBudgetSigned === 'function') {
           try {

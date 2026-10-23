@@ -12707,6 +12707,271 @@ try {
 }
 
 
+// ==========================================================
+// TEST 93: AISLAMIENTO MULTI-EMPRESA CON NUMERACIÓN CORRELATIVA IDÉNTICA Y FIRMAS AISLADAS
+// ==========================================================
+console.log("\n--- TEST 93: AISLAMIENTO MULTI-EMPRESA CON NUMERACIÓN CORRELATIVA IDÉNTICA Y FIRMAS AISLADAS ---");
+
+const phone93A = '34600930001';
+const phone93B = '34600930002';
+
+function cleanupTest93(phone) {
+  const comp = currentTestDb.prepare('SELECT id FROM companies WHERE phone = ?').get(phone);
+  if (comp) {
+    currentTestDb.prepare('DELETE FROM payment_allocations WHERE company_id = ?').run(comp.id);
+    currentTestDb.prepare('DELETE FROM payments WHERE company_id = ?').run(comp.id);
+    currentTestDb.prepare('DELETE FROM invoices WHERE company_id = ?').run(comp.id);
+    currentTestDb.prepare('DELETE FROM shopping_items WHERE company_id = ?').run(comp.id);
+    currentTestDb.prepare('DELETE FROM budgets WHERE company_id = ?').run(comp.id);
+    currentTestDb.prepare('DELETE FROM appointments WHERE company_id = ?').run(comp.id);
+    currentTestDb.prepare('DELETE FROM audit_logs WHERE company_id = ? OR business_id = ?').run(comp.id, phone);
+    currentTestDb.prepare('DELETE FROM messages WHERE company_id = ? OR business_id = ?').run(comp.id, phone);
+    currentTestDb.prepare('DELETE FROM channel_identities WHERE company_id = ?').run(comp.id);
+    currentTestDb.prepare('DELETE FROM memberships WHERE company_id = ?').run(comp.id);
+    currentTestDb.prepare('DELETE FROM companies WHERE id = ?').run(comp.id);
+  }
+  currentTestDb.prepare('DELETE FROM users WHERE phone = ?').run(phone);
+}
+
+cleanupTest93(phone93A);
+cleanupTest93(phone93B);
+
+const tenant93A = dbService.ensureCompanyTenant(phone93A);
+const tenant93B = dbService.ensureCompanyTenant(phone93B);
+dbService.saveCompany(tenant93A, { name: 'Reformas Norte S.L.', cif: 'B11111111', phone: phone93A });
+dbService.saveCompany(tenant93B, { name: 'Instalaciones Sur S.L.', cif: 'B22222222', phone: phone93B });
+
+const currentYear93 = new Date().getFullYear();
+const expectedFirstBudgetId93 = `PRE${currentYear93}-001`;
+const expectedSecondBudgetId93 = `PRE${currentYear93}-002`;
+
+// 1. Presupuestos con la misma numeración correlativa (PRE2026-001 y PRE2026-002) en ambas empresas
+const rawBud93A1 = {
+  id: `PRE-${currentYear93}-${crypto.randomBytes(8).toString('hex').toUpperCase()}`,
+  company: { name: 'Reformas Norte S.L.', cif: 'B11111111', phone: phone93A },
+  client: { name: 'Cliente Norte Uno', address: 'Calle Norte 1', phone: '611000001' },
+  items: [{ description: 'Reforma baño Norte', qty: 1, unit: 'pa', unitPrice: 1000, total: 1000 }],
+  financials: { subtotal: 1000, taxableBase: 1000, taxRatePercentage: 21, taxAmount: 210, totalAmount: 1210 }
+};
+const savedBud93A1 = dbService.saveBudget(tenant93A, rawBud93A1);
+
+const rawBud93B1 = {
+  id: `PRE-${currentYear93}-${crypto.randomBytes(8).toString('hex').toUpperCase()}`,
+  company: { name: 'Instalaciones Sur S.L.', cif: 'B22222222', phone: phone93B },
+  client: { name: 'Cliente Sur Uno', address: 'Avenida Sur 99', phone: '622000001' },
+  items: [{ description: 'Climatización Sur', qty: 1, unit: 'pa', unitPrice: 3000, total: 3000 }],
+  financials: { subtotal: 3000, taxableBase: 3000, taxRatePercentage: 21, taxAmount: 630, totalAmount: 3630 }
+};
+const savedBud93B1 = dbService.saveBudget(tenant93B, rawBud93B1);
+
+assert(savedBud93A1.id === expectedFirstBudgetId93, `TEST 93 (1.1): Empresa A obtiene numeración correlativa ${expectedFirstBudgetId93} (obtenido: ${savedBud93A1.id})`);
+assert(savedBud93B1.id === expectedFirstBudgetId93, `TEST 93 (1.2): Empresa B obtiene la MISMA numeración correlativa ${expectedFirstBudgetId93} (obtenido: ${savedBud93B1.id})`);
+
+const readBud93A1 = dbService.getBudget(tenant93A, expectedFirstBudgetId93);
+const readBud93B1 = dbService.getBudget(tenant93B, expectedFirstBudgetId93);
+
+assert(readBud93A1 !== null && readBud93A1.client?.name === 'Cliente Norte Uno' && readBud93A1.financials?.totalAmount === 1210,
+  "TEST 93 (1.3): getBudget(Empresa A, PRE2026-001) devuelve exclusivamente el presupuesto de Empresa A");
+assert(readBud93B1 !== null && readBud93B1.client?.name === 'Cliente Sur Uno' && readBud93B1.financials?.totalAmount === 3630,
+  "TEST 93 (1.4): getBudget(Empresa B, PRE2026-001) devuelve exclusivamente el presupuesto de Empresa B (sin colisión en SQLite)");
+
+// Segundo presupuesto correlativo en cada empresa (PRE2026-002)
+const rawBud93A2 = {
+  id: `PRE-${currentYear93}-${crypto.randomBytes(8).toString('hex').toUpperCase()}`,
+  company: { name: 'Reformas Norte S.L.', cif: 'B11111111', phone: phone93A },
+  client: { name: 'Cliente Norte Dos', address: 'Calle Norte 2', phone: '611000002' },
+  items: [{ description: 'Pintura Norte', qty: 1, unit: 'pa', unitPrice: 500, total: 500 }],
+  financials: { subtotal: 500, taxableBase: 500, taxRatePercentage: 10, taxAmount: 50, totalAmount: 550 }
+};
+const savedBud93A2 = dbService.saveBudget(tenant93A, rawBud93A2);
+
+const rawBud93B2 = {
+  id: `PRE-${currentYear93}-${crypto.randomBytes(8).toString('hex').toUpperCase()}`,
+  company: { name: 'Instalaciones Sur S.L.', cif: 'B22222222', phone: phone93B },
+  client: { name: 'Cliente Sur Dos', address: 'Avenida Sur 2', phone: '622000002' },
+  items: [{ description: 'Fontanería Sur', qty: 1, unit: 'pa', unitPrice: 800, total: 800 }],
+  financials: { subtotal: 800, taxableBase: 800, taxRatePercentage: 10, taxAmount: 80, totalAmount: 880 }
+};
+const savedBud93B2 = dbService.saveBudget(tenant93B, rawBud93B2);
+
+assert(savedBud93A2.id === expectedSecondBudgetId93 && savedBud93B2.id === expectedSecondBudgetId93,
+  `TEST 93 (1.5): Ambas empresas avanzan su secuencia independientemente a ${expectedSecondBudgetId93}`);
+
+const listBud93A = dbService.listBudgets(tenant93A);
+const listBud93B = dbService.listBudgets(tenant93B);
+assert(listBud93A.length === 2 && listBud93A.every(b => b.companyId === tenant93A.companyId),
+  "TEST 93 (1.6): listBudgets(Empresa A) devuelve sus 2 presupuestos sin fugas");
+assert(listBud93B.length === 2 && listBud93B.every(b => b.companyId === tenant93B.companyId),
+  "TEST 93 (1.7): listBudgets(Empresa B) devuelve sus 2 presupuestos sin fugas");
+
+// 2. Citas/Visitas con la misma numeración correlativa (CIT-YYYY-0001) en ambas empresas
+const apt93A1 = dbService.saveAppointment(tenant93A, {
+  clientName: 'Cliente Norte Uno',
+  clientAddress: 'Calle Norte 1',
+  date: '2026-11-10',
+  time: '10:00',
+  notes: 'Visita Norte'
+});
+const apt93B1 = dbService.saveAppointment(tenant93B, {
+  clientName: 'Cliente Sur Uno',
+  clientAddress: 'Avenida Sur 99',
+  date: '2026-11-10',
+  time: '10:00',
+  notes: 'Visita Sur'
+});
+assert(Boolean(apt93A1 && /^CIT-\d{4}-\d{4}$/.test(apt93A1.id)), `TEST 93 (2.1): Cita de Empresa A recibe numeración válida con patrón CIT-YYYY-NNNN (${apt93A1?.id})`);
+assert(Boolean(apt93B1 && /^CIT-\d{4}-\d{4}$/.test(apt93B1.id)), `TEST 93 (2.2): Cita de Empresa B recibe numeración válida con patrón CIT-YYYY-NNNN (${apt93B1?.id})`);
+
+const readApt93A1 = dbService.getAppointment(tenant93A, apt93A1.id);
+const readApt93B1 = dbService.getAppointment(tenant93B, apt93B1.id);
+assert(readApt93A1?.clientName === 'Cliente Norte Uno' && readApt93B1?.clientName === 'Cliente Sur Uno',
+  "TEST 93 (2.3): getAppointment devuelve a cada empresa su propia cita sin fugas");
+assert(dbService.getAppointment(tenant93A, apt93B1.id) === null,
+  "TEST 93 (2.4): Empresa A no puede leer la cita de Empresa B (Zero-Disclosure)");
+assert(dbService.getAppointment(tenant93B, apt93A1.id) === null,
+  "TEST 93 (2.5): Empresa B no puede leer la cita de Empresa A (Zero-Disclosure)");
+
+const resched93B = dbService.rescheduleAppointment(tenant93B, apt93B1.id, '2026-11-12', '17:30');
+assert(resched93B.success === true && resched93B.appointment.time === '17:30', "TEST 93 (2.6): Empresa B reprograma su cita a las 17:30");
+assert(dbService.getAppointment(tenant93A, apt93A1.id)?.time === '10:00', "TEST 93 (2.7): La cita de Empresa A sigue intacta a las 10:00");
+
+// 3. Lista de la compra y Modo Obra (WorkMemory) asociados a PRE2026-001 en cada empresa
+const shop93A = dbService.addShoppingItems(tenant93A, [{ description: 'Azulejos blancos Norte', qty: 25, unit: 'm2', budgetId: expectedFirstBudgetId93, clientName: 'Cliente Norte Uno' }]);
+const shop93B = dbService.addShoppingItems(tenant93B, [{ description: 'Split Conductos Sur', qty: 1, unit: 'ud', budgetId: expectedFirstBudgetId93, clientName: 'Cliente Sur Uno' }]);
+assert(shop93A.length === 1 && shop93B.length === 1, "TEST 93 (3.1): Ambas empresas pueden añadir materiales vinculados a su propio PRE2026-001");
+
+const listShop93A = dbService.listShoppingItems(tenant93A);
+const listShop93B = dbService.listShoppingItems(tenant93B);
+assert(listShop93A.length === 1 && listShop93A[0].description === 'Azulejos blancos Norte', "TEST 93 (3.2): Lista de la compra de Empresa A aislada");
+assert(listShop93B.length === 1 && listShop93B[0].description === 'Split Conductos Sur', "TEST 93 (3.3): Lista de la compra de Empresa B aislada");
+
+const wm93A = dbService.getWorkMemory(tenant93A, expectedFirstBudgetId93);
+const wm93B = dbService.getWorkMemory(tenant93B, expectedFirstBudgetId93);
+assert(wm93A?.clientName === 'Cliente Norte Uno' && wm93A?.materials?.pending?.length === 1 && wm93A.materials.pending[0].description === 'Azulejos blancos Norte',
+  "TEST 93 (3.4): getWorkMemory(Empresa A, PRE2026-001) devuelve exclusivamente la obra y materiales de A");
+assert(wm93B?.clientName === 'Cliente Sur Uno' && wm93B?.materials?.pending?.length === 1 && wm93B.materials.pending[0].description === 'Split Conductos Sur',
+  "TEST 93 (3.5): getWorkMemory(Empresa B, PRE2026-001) devuelve exclusivamente la obra y materiales de B");
+
+// 4. Pagos y Facturas con la misma numeración correlativa (FAC-2026-0001) y vinculados a PRE2026-001
+const pay93A = dbService.savePayment(tenant93A, expectedFirstBudgetId93, { amount: 500, method: 'Bizum', concept: 'Anticipo Norte' });
+const pay93B = dbService.savePayment(tenant93B, expectedFirstBudgetId93, { amount: 1500, method: 'Transferencia', concept: 'Anticipo Sur' });
+assert(pay93A && pay93B, "TEST 93 (4.1): Ambas empresas registran cobros sobre su respectivo PRE2026-001 sin falso positivo cross-tenant");
+
+const emit93A = dbService.emitInvoice(tenant93A, {
+  budgetId: expectedFirstBudgetId93,
+  type: 'FINAL',
+  series: 'FAC',
+  client: readBud93A1.client,
+  items: readBud93A1.items,
+  financials: readBud93A1.financials
+});
+const emit93B = dbService.emitInvoice(tenant93B, {
+  budgetId: expectedFirstBudgetId93,
+  type: 'FINAL',
+  series: 'FAC',
+  client: readBud93B1.client,
+  items: readBud93B1.items,
+  financials: readBud93B1.financials
+});
+const expectedFirstInvoiceNum93 = `FAC-${currentYear93}-0001`;
+assert(emit93A.invoice.visibleNumber === expectedFirstInvoiceNum93 && emit93B.invoice.visibleNumber === expectedFirstInvoiceNum93,
+  `TEST 93 (4.2): Ambas empresas emiten su primera factura con la misma numeración visible ${expectedFirstInvoiceNum93}`);
+assert(dbService.getBudget(tenant93A, expectedFirstBudgetId93)?.status === 'FACTURADO' && dbService.getBudget(tenant93B, expectedFirstBudgetId93)?.status === 'FACTURADO',
+  "TEST 93 (4.3): emitInvoice actualiza el estado a FACTURADO en el presupuesto correcto de cada empresa");
+
+// 5. Registro de firmas digitales aislado por companyId + budgetId
+const prevSecret93 = process.env.PRESUVOZ_SIGNING_SECRET;
+const prevBaseUrl93 = process.env.PUBLIC_BASE_URL;
+process.env.PRESUVOZ_SIGNING_SECRET = 'secret_key_test_93_presuvoz_32_chars_minimum!!';
+process.env.PUBLIC_BASE_URL = 'https://presuvoz.es';
+
+const shortUrl93A = generateSigningUrl(savedBud93A2, { id: tenant93A.companyId, name: 'Reformas Norte S.L.', cif: 'B11111111', phone: phone93A }, phone93A);
+const shortUrl93B = generateSigningUrl(savedBud93B2, { id: tenant93B.companyId, name: 'Instalaciones Sur S.L.', cif: 'B22222222', phone: phone93B }, phone93B);
+const code93A = shortUrl93A.split('/f/')[1];
+const code93B = shortUrl93B.split('/f/')[1];
+assert(code93A !== code93B, "TEST 93 (5.1): Enlaces cortos de PRE2026-002 para Empresa A y Empresa B tienen códigos distintos");
+
+const link93A = getShortSigningLink(code93A);
+const link93B = getShortSigningLink(code93B);
+
+const httpServer93 = createPresuVozHttpServer({
+  verifyToken: 'verify_93',
+  appSecret: testAppSecret92,
+  signingSecret: process.env.PRESUVOZ_SIGNING_SECRET
+});
+await new Promise((resolve) => httpServer93.listen(0, '127.0.0.1', resolve));
+const port93 = httpServer93.address().port;
+const baseHttp93 = `http://127.0.0.1:${port93}`;
+
+try {
+  // Cliente de Empresa A firma su PRE2026-002
+  const signRes93A = await fetch(`${baseHttp93}/api/sign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      signedPayload: link93A.z,
+      payloadProof: link93A.s,
+      clientName: 'Cliente Norte Dos',
+      clientNif: '11111111A',
+      clientAddress: 'Calle Norte 2',
+      clientEmail: 'norte2@test.es',
+      signatureDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+    })
+  });
+  const signData93A = await signRes93A.json();
+  assert(signRes93A.status === 200 && signData93A.ok === true && !signData93A.alreadySigned,
+    "TEST 93 (5.2): Cliente de Empresa A firma su presupuesto PRE2026-002 con éxito");
+
+  // Comprobar estado de firma para Empresa A vs Empresa B sobre el mismo número PRE2026-002
+  const checkRes93A = await fetch(`${baseHttp93}/api/sign?check=${encodeURIComponent(expectedSecondBudgetId93)}&companyId=${encodeURIComponent(tenant93A.companyId)}`);
+  const checkData93A = await checkRes93A.json();
+  assert(checkData93A.alreadySigned === true, "TEST 93 (5.3): GET /api/sign confirma que PRE2026-002 de Empresa A está firmado");
+
+  const checkRes93B = await fetch(`${baseHttp93}/api/sign?check=${encodeURIComponent(expectedSecondBudgetId93)}&companyId=${encodeURIComponent(tenant93B.companyId)}`);
+  const checkData93B = await checkRes93B.json();
+  assert(checkData93B.alreadySigned === false, "TEST 93 (5.4): GET /api/sign confirma que PRE2026-002 de Empresa B sigue PENDIENTE de firma");
+
+  // Sincronizar firmas: solo el PRE2026-002 de Empresa A debe pasar a ACEPTADO
+  await dbService.syncPendingSignaturesFromCloud(tenant93A);
+  await dbService.syncPendingSignaturesFromCloud(tenant93B);
+  assert(dbService.getBudget(tenant93A, expectedSecondBudgetId93)?.status === 'ACEPTADO',
+    "TEST 93 (5.5): syncPendingSignaturesFromCloud marca como ACEPTADO el PRE2026-002 de Empresa A");
+  assert(dbService.getBudget(tenant93B, expectedSecondBudgetId93)?.status === 'PENDIENTE_ACEPTACION',
+    "TEST 93 (5.6): El PRE2026-002 de Empresa B NO se ve afectado por la firma de Empresa A");
+
+  // Ahora el cliente de Empresa B firma su propio PRE2026-002 sin bloqueo
+  const signRes93B = await fetch(`${baseHttp93}/api/sign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      signedPayload: link93B.z,
+      payloadProof: link93B.s,
+      clientName: 'Cliente Sur Dos',
+      clientNif: '22222222B',
+      clientAddress: 'Avenida Sur 2',
+      clientEmail: 'sur2@test.es',
+      signatureDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+    })
+  });
+  const signData93B = await signRes93B.json();
+  assert(signRes93B.status === 200 && signData93B.ok === true && !signData93B.alreadySigned,
+    "TEST 93 (5.7): Cliente de Empresa B puede firmar su propio PRE2026-002 sin colisionar con Empresa A");
+
+  await dbService.syncPendingSignaturesFromCloud(tenant93B);
+  assert(dbService.getBudget(tenant93B, expectedSecondBudgetId93)?.status === 'ACEPTADO',
+    "TEST 93 (5.8): El PRE2026-002 de Empresa B pasa a ACEPTADO tras su propia firma");
+} finally {
+  httpServer93.close();
+  if (prevSecret93 !== undefined) process.env.PRESUVOZ_SIGNING_SECRET = prevSecret93;
+  else delete process.env.PRESUVOZ_SIGNING_SECRET;
+  if (prevBaseUrl93 !== undefined) process.env.PUBLIC_BASE_URL = prevBaseUrl93;
+  else delete process.env.PUBLIC_BASE_URL;
+  clearShortLinksAndSignaturesForTesting();
+  cleanupTest93(phone93A);
+  cleanupTest93(phone93B);
+}
+
+
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
   console.log("🛡️  El motor es 100% conversacional, tolerante a fallos y soporta borradores, capítulos y descuentos.");

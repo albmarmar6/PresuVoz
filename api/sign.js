@@ -228,6 +228,7 @@ function getTrustedBudget(signedPayload, proof) {
   return {
     id: compact.i,
     company: {
+      id: String(compact.c?.id || ''),
       name: String(compact.c?.n || 'Empresa'), cif: String(compact.c?.c || ''),
       address: String(compact.c?.a || ''), phone: String(compact.c?.p || ''), email: String(compact.c?.e || '')
     },
@@ -246,11 +247,16 @@ function getTrustedBudget(signedPayload, proof) {
   };
 }
 
-async function checkSignedRemote(budgetId) {
-  if (!budgetId) return null;
+function buildScopedSignKey(prefix, budgetId, companyId = null) {
   const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
+  const cleanComp = companyId ? String(companyId).trim() : '';
+  return cleanComp ? `${prefix}:${cleanComp}:${cleanId}` : `${prefix}:${cleanId}`;
+}
+
+async function checkSignedRemote(budgetId, companyId = null) {
+  if (!budgetId) return null;
   const { url, token } = getSigningStoreConfig();
-  const key = `presuvoz:signed:${cleanId}`;
+  const key = buildScopedSignKey('presuvoz:signed', budgetId, companyId);
   const response = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
     headers: { Authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(5000)
@@ -273,13 +279,15 @@ function getRequestFingerprint({ signedPayload, proof, signaturePro, signatureCl
     .digest('hex');
 }
 
-async function markSignedRemote(budgetId, info) {
+async function markSignedRemote(budgetId, info, companyId = null) {
   if (!budgetId) return;
   const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
+  const effectiveCompanyId = companyId || info?.companyId || null;
   const { url, token } = getSigningStoreConfig();
   const record = {
     signed: true,
     budgetId: cleanId,
+    ...(effectiveCompanyId ? { companyId: String(effectiveCompanyId).trim() } : {}),
     signedAt: info.signedAt || new Date().toISOString(),
     clientEmail: info.clientEmail || '',
     clientName: info.clientName || '',
@@ -287,7 +295,7 @@ async function markSignedRemote(budgetId, info) {
     emailSent: false,
     emailId: null
   };
-  const key = `presuvoz:signed:${cleanId}`;
+  const key = buildScopedSignKey('presuvoz:signed', budgetId, effectiveCompanyId);
   const response = await fetch(`${url}/set/${encodeURIComponent(key)}?NX=true`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'text/plain' },
@@ -299,10 +307,11 @@ async function markSignedRemote(budgetId, info) {
   return data.result === 'OK';
 }
 
-async function updateSignedRemote(budgetId, record) {
-  const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
+async function updateSignedRemote(budgetId, record, companyId = null) {
+  const effectiveCompanyId = companyId || record?.companyId || null;
+  const key = buildScopedSignKey('presuvoz:signed', budgetId, effectiveCompanyId);
   const { url, token } = getSigningStoreConfig();
-  const response = await fetch(`${url}/set/presuvoz%3Asigned%3A${encodeURIComponent(cleanId)}`, {
+  const response = await fetch(`${url}/set/${encodeURIComponent(key)}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'text/plain' },
     body: JSON.stringify(record),
@@ -313,10 +322,9 @@ async function updateSignedRemote(budgetId, record) {
   if (data.result !== 'OK') throw new Error('No se pudo guardar el estado del correo.');
 }
 
-async function acquireEmailRetryLock(budgetId) {
-  const cleanId = String(budgetId).trim().replace(/\s+/g, '_');
+async function acquireEmailRetryLock(budgetId, companyId = null) {
   const { url, token } = getSigningStoreConfig();
-  const lockKey = `presuvoz:email-lock:${cleanId}`;
+  const lockKey = buildScopedSignKey('presuvoz:email-lock', budgetId, companyId);
   const lockToken = randomUUID();
   const response = await fetch(`${url}/set/${encodeURIComponent(lockKey)}?NX=true&EX=120`, {
     method: 'POST',
@@ -368,18 +376,21 @@ export default async function handler(req, res) {
     if (req.query.all) return res.status(404).json({ ok: false, error: 'Endpoint no disponible.' });
 
     const budgetId = req.query.id || req.query.check;
+    const companyId = req.query.companyId || null;
     if (!budgetId) {
       return res.status(400).json({ ok: false, error: 'Falta parámetro id o check.' });
     }
     let check;
-    try { check = await checkSignedRemote(budgetId); }
+    try { check = await checkSignedRemote(budgetId, companyId); }
     catch (error) { return res.status(503).json({ ok: false, error: error.message }); }
     return res.status(200).json({
       ok: true,
       budgetId,
       alreadySigned: Boolean(check),
       details: check ? {
-        signed: true, budgetId: check.budgetId, signedAt: check.signedAt,
+        signed: true, budgetId: check.budgetId,
+        ...(check.companyId ? { companyId: check.companyId } : {}),
+        signedAt: check.signedAt,
         clientEmail: check.clientEmail, emailSent: Boolean(check.emailSent),
         emailId: check.emailId || null, retryable: !check.emailSent
       } : null
@@ -411,13 +422,14 @@ export default async function handler(req, res) {
   }
 
   const budgetId = budget.id || 'PRE-2026';
+  const companyId = budget.company?.id || null;
   let requestFingerprint;
   try { requestFingerprint = getRequestFingerprint({ signedPayload, proof, signaturePro, signatureClient, clientEmail }); }
   catch (error) { return res.status(503).json({ ok: false, error: error.message }); }
 
   // Repetir exactamente la misma petición puede reintentar el correo, nunca aceptar una segunda firma.
   let alreadySigned;
-  try { alreadySigned = await checkSignedRemote(budgetId); }
+  try { alreadySigned = await checkSignedRemote(budgetId, companyId); }
   catch (error) { return res.status(503).json({ ok: false, error: error.message }); }
   if (alreadySigned) {
     if (alreadySigned.requestFingerprint !== requestFingerprint) {
@@ -444,10 +456,10 @@ export default async function handler(req, res) {
   const signedAt = alreadySigned?.signedAt || new Date().toISOString();
   if (!alreadySigned) {
     let recorded;
-    try { recorded = await markSignedRemote(budgetId, { budgetId, clientEmail, signedAt, clientName: budget.client?.name, requestFingerprint }); }
+    try { recorded = await markSignedRemote(budgetId, { budgetId, companyId, clientEmail, signedAt, clientName: budget.client?.name, requestFingerprint }, companyId); }
     catch (error) { return res.status(503).json({ ok: false, error: error.message }); }
     if (!recorded) {
-      try { alreadySigned = await checkSignedRemote(budgetId); }
+      try { alreadySigned = await checkSignedRemote(budgetId, companyId); }
       catch (error) { return res.status(503).json({ ok: false, error: error.message }); }
       if (!alreadySigned || alreadySigned.requestFingerprint !== requestFingerprint || alreadySigned.emailSent) {
         return res.status(409).json({ ok: false, alreadySigned: true, emailSent: Boolean(alreadySigned?.emailSent), error: 'Este presupuesto ya tiene una aceptación registrada.', details: alreadySigned });
@@ -456,7 +468,7 @@ export default async function handler(req, res) {
   }
 
   let deliveryLock;
-  try { deliveryLock = await acquireEmailRetryLock(budgetId); }
+  try { deliveryLock = await acquireEmailRetryLock(budgetId, companyId); }
   catch (error) { return res.status(503).json({ ok: false, signed: true, emailSent: false, retryable: true, error: error.message }); }
   if (!deliveryLock) {
     return res.status(409).json({
@@ -516,6 +528,7 @@ export default async function handler(req, res) {
 
     let mailError = null;
     try {
+      const idempotencyScope = companyId ? `${companyId}/${budgetId}` : budgetId;
       const emailResult = await resend.emails.send({
         from: process.env.RESEND_FROM_EMAIL || 'PresuVoz <onboarding@resend.dev>',
         to:   recipients,
@@ -527,7 +540,7 @@ export default async function handler(req, res) {
             content:  pdfBase64
           }
         ]
-      }, { idempotencyKey: `presuvoz-acceptance/${budgetId}` });
+      }, { idempotencyKey: `presuvoz-acceptance/${idempotencyScope}` });
 
       if (emailResult?.error) throw new Error(emailResult.error.message || 'El proveedor de correo rechazó el envío.');
       emailSentId = emailResult?.data?.id || null;
@@ -538,12 +551,14 @@ export default async function handler(req, res) {
     }
 
     const finalRecord = {
-      ...(alreadySigned || {}), signed: true, budgetId, signedAt, clientEmail,
+      ...(alreadySigned || {}), signed: true, budgetId,
+      ...(companyId ? { companyId } : {}),
+      signedAt, clientEmail,
       clientName: budget.client?.name || '', requestFingerprint,
       emailSent: Boolean(emailSentId), emailId: emailSentId,
       emailError: mailError ? String(mailError).slice(0, 300) : null
     };
-    try { await updateSignedRemote(budgetId, finalRecord); }
+    try { await updateSignedRemote(budgetId, finalRecord, companyId); }
     catch (error) {
       console.error('No se pudo actualizar el estado de entrega del correo:', error.message);
       if (emailSentId) {
