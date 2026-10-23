@@ -799,6 +799,14 @@ export function createPresuVozHttpServer(options = {}) {
     }
   });
 
+  server.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE') {
+      console.warn('ℹ️ [HTTP] Puerto ya en uso en el host. Continuando con la instancia activa.');
+      return;
+    }
+    console.error('❌ [HTTP Server Error]:', err.message);
+  });
+
   return server;
 }
 

@@ -13,6 +13,16 @@ import makeWASocketPkg, {
 } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
+
+// Blindaje global del proceso ante conflictos de puerto en entornos de contenedor (Railway/Docker)
+process.on('uncaughtException', (err) => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.warn(`ℹ️ [Gateway Safe Guard] Puerto ${err.port || '8080'} ya asignado. Continuando en segundo plano.`);
+    return;
+  }
+  console.error('❌ Error no capturado en el proceso:', err);
+  process.exit(1);
+});
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
