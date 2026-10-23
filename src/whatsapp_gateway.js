@@ -5080,13 +5080,20 @@ async function startWhatsAppGateway() {
   // Iniciar inmediatamente el servidor HTTP para responder al Healthcheck de Railway y enlaces de firma
   const httpPort = process.env.PORT || process.env.WEBHOOK_PORT;
   if (provider !== 'cloud_api' && httpPort && !globalThis.__PRESUVOZ_HTTP_SERVER_RUNNING__) {
+    globalThis.__PRESUVOZ_HTTP_SERVER_RUNNING__ = true;
     try {
       const server = createPresuVozHttpServer({
         signingSecret: process.env.PRESUVOZ_SIGNING_SECRET
       });
       const listenPort = Number(httpPort);
+      server.on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+          console.warn(`ℹ️ [HTTP] Puerto ${listenPort} ya asignado. Continuando sin conflicto.`);
+          return;
+        }
+        console.error('❌ [HTTP Server Error]:', err.message);
+      });
       server.listen(listenPort, '0.0.0.0', () => {
-        globalThis.__PRESUVOZ_HTTP_SERVER_RUNNING__ = true;
         console.log(`🌐 Servidor HTTP de PresuVoz (Healthcheck & Enlaces de Firma) activo en puerto ${listenPort}`);
       });
     } catch (httpErr) {
