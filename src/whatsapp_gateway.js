@@ -9105,18 +9105,6 @@ async function startWhatsAppGateway() {
 
   if (sock.isCloudApi && typeof sock.startServer === 'function') {
     await sock.startServer();
-  } else if (!sock.isCloudApi) {
-    // En modo Baileys, levantar el servidor HTTP si hay puerto configurado (Railway, Cloud, Docker)
-    const httpPort = process.env.PORT || process.env.WEBHOOK_PORT;
-    if (httpPort) {
-      const server = createPresuVozHttpServer({
-        signingSecret: process.env.PRESUVOZ_SIGNING_SECRET
-      });
-      const listenPort = Number(httpPort);
-      server.listen(listenPort, '0.0.0.0', () => {
-        console.log(`🌐 Servidor HTTP de PresuVoz (Healthcheck & Enlaces de Firma) activo en puerto ${listenPort}`);
-      });
-    }
   }
 
   return sock;
