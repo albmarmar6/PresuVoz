@@ -26,6 +26,9 @@
   ],
   "author": "PresuVoz",
   "license": "ISC",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc14",
     "archiver": "^8.0.0",
