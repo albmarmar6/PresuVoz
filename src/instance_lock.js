@@ -89,6 +89,8 @@ export function acquireGatewayLock(lockPath = DEFAULT_LOCK_PATH) {
       const lockCreatedAtMs = existingData.createdAt ? Date.parse(existingData.createdAt) : 0;
       if (lockCreatedAtMs > 0 && lockCreatedAtMs < (systemBootTimeMs - 5000)) {
         isStale = true;
+      } else if (existingData.hostname && existingData.hostname !== os.hostname()) {
+        isStale = true;
       } else {
         const alive = isPidAlive(existingData.pid);
         if (alive) {
@@ -99,7 +101,6 @@ export function acquireGatewayLock(lockPath = DEFAULT_LOCK_PATH) {
             message: `Ya existe otra instancia activa del bot ejecutándose (PID: ${existingData.pid}, Host: ${existingData.hostname || 'desconocido'}).`
           };
         } else {
-          // El proceso murió sin limpiar el lockfile (stale lock)
           isStale = true;
         }
       }

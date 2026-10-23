@@ -5077,6 +5077,23 @@ async function startWhatsAppGateway() {
   const logger = pino({ level: 'silent' });
   const provider = String(process.env.WHATSAPP_PROVIDER || 'baileys').trim().toLowerCase();
 
+  // Iniciar inmediatamente el servidor HTTP para responder al Healthcheck de Railway y enlaces de firma
+  const httpPort = process.env.PORT || process.env.WEBHOOK_PORT;
+  if (provider !== 'cloud_api' && httpPort && !globalThis.__PRESUVOZ_HTTP_SERVER_RUNNING__) {
+    try {
+      const server = createPresuVozHttpServer({
+        signingSecret: process.env.PRESUVOZ_SIGNING_SECRET
+      });
+      const listenPort = Number(httpPort);
+      server.listen(listenPort, '0.0.0.0', () => {
+        globalThis.__PRESUVOZ_HTTP_SERVER_RUNNING__ = true;
+        console.log(`🌐 Servidor HTTP de PresuVoz (Healthcheck & Enlaces de Firma) activo en puerto ${listenPort}`);
+      });
+    } catch (httpErr) {
+      console.warn('⚠️ No se pudo iniciar el servidor HTTP inmediato:', httpErr.message);
+    }
+  }
+
   let state;
   let saveCreds;
   let sock;
@@ -5107,6 +5124,9 @@ async function startWhatsAppGateway() {
     });
   } else {
     const authDir = process.env.BAILEYS_AUTH_DIR || 'auth_info_baileys';
+    if (!fs.existsSync(authDir)) {
+      try { fs.mkdirSync(authDir, { recursive: true }); } catch (e) {}
+    }
     const authState = await useMultiFileAuthState(authDir);
     state = authState.state;
     saveCreds = authState.saveCreds;
