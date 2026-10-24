@@ -17,6 +17,30 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto, { EventEmitter } from 'node:events';
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+
+function renderQrSvg(text) {
+  try {
+    const QRCode = require('qrcode-terminal/vendor/QRCode');
+    const qr = new QRCode(0, 1);
+    qr.addData(text);
+    qr.make();
+    const count = qr.modules.length;
+    let rects = '';
+    for (let r = 0; r < count; r++) {
+      for (let c = 0; c < count; c++) {
+        if (qr.isDark(r, c)) {
+          rects += '<rect x="' + c + '" y="' + r + '" width="1" height="1" fill="#000"/>';
+        }
+      }
+    }
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + count + ' ' + count + '" shape-rendering="crispEdges" width="280" height="280">' + rects + '</svg>';
+  } catch (err) {
+    return '<p style="color:red">Error al generar QR: ' + err.message + '</p>';
+  }
+}
 
 const DATA_DIR = path.resolve('data');
 if (!fs.existsSync(DATA_DIR)) {
@@ -531,6 +555,21 @@ export function createPresuVozHttpServer(options = {}) {
           res.end();
           return;
         }
+      }
+
+      // 1b. Visual QR Code for WhatsApp linking
+      if ((pathname === '/qr' || pathname === '/login') && req.method === 'GET') {
+        const qrString = globalThis.__PRESUVOZ_LATEST_QR__;
+        const isConnected = Boolean(globalThis.__PRESUVOZ_WHATSAPP_CONNECTED__);
+        if (!qrString || isConnected) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end('<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>PresuVoz WhatsApp</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#0b0f19;color:#f1f5f9;text-align:center;padding:20px;box-sizing:border-box;}.card{background:#1e293b;padding:36px;border-radius:20px;box-shadow:0 20px 40px rgba(0,0,0,0.5);border:1px solid #334155;max-width:420px;width:100%;}h1{font-size:22px;margin:0 0 12px;color:#10b981;}p{color:#94a3b8;font-size:14px;margin:0 0 16px;line-height:1.5;}</style></head><body><div class="card"><h1>' + (isConnected ? '✅ WhatsApp Vinculado con Éxito' : '⏳ Esperando Código QR...') + '</h1><p>' + (isConnected ? 'El bot de PresuVoz está conectado y listo para procesar audios y presupuestos.' : 'Generando código de vinculación. Esta página se actualizará automáticamente.') + '</p>' + (isConnected ? '' : '<script>setTimeout(() => location.reload(), 2500);</script>') + '</div></body></html>');
+          return;
+        }
+        const svg = renderQrSvg(qrString);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end('<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta http-equiv="refresh" content="20"><title>Vincular WhatsApp - PresuVoz</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#0b0f19;color:#f1f5f9;text-align:center;padding:20px;box-sizing:border-box;}.card{background:#1e293b;padding:32px;border-radius:20px;box-shadow:0 20px 40px rgba(0,0,0,0.5);border:1px solid #334155;max-width:420px;width:100%;}h1{font-size:22px;margin:0 0 8px;color:#38bdf8;}p{color:#94a3b8;font-size:14px;margin:0 0 20px;line-height:1.5;}.qr-container{background:#ffffff;padding:16px;border-radius:12px;display:inline-block;margin-bottom:20px;box-shadow:0 8px 24px rgba(0,0,0,0.3);}ol{text-align:left;color:#cbd5e1;font-size:13px;line-height:1.8;margin:0 auto;padding-left:20px;}.badge{display:inline-block;background:rgba(56,189,248,0.1);color:#38bdf8;padding:4px 12px;border-radius:999px;font-size:12px;font-weight:600;margin-bottom:16px;}</style></head><body><div class="card"><div class="badge">PresuVoz WhatsApp Gateway</div><h1>Vincula tu WhatsApp Business</h1><p>Escanea este código con la cámara de WhatsApp desde tu móvil</p><div class="qr-container">' + svg + '</div><ol><li>Abre <b>WhatsApp Business</b> en tu móvil</li><li>Toca en <b>Ajustes</b> &gt; <b>Dispositivos vinculados</b></li><li>Toca en <b>Vincular un dispositivo</b> y enfoca este código</li></ol></div></body></html>');
+        return;
       }
 
       // 1. Healthcheck

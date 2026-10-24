@@ -5240,7 +5240,10 @@ async function startWhatsAppGateway() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
+      globalThis.__PRESUVOZ_LATEST_QR__ = qr;
+      globalThis.__PRESUVOZ_WHATSAPP_CONNECTED__ = false;
       console.log('\n📲 ESCANEA ESTE CÓDIGO QR CON WHATSAPP:');
+      console.log('🌐 O abre en tu navegador /qr para verlo nítido en alta resolución');
       console.log('1. Abre WhatsApp en tu móvil');
       console.log('2. Ve a Ajustes ➔ Dispositivos vinculados ➔ Vincular un dispositivo');
       console.log('3. Apunta tu cámara a este código:\n');
@@ -5257,6 +5260,8 @@ async function startWhatsAppGateway() {
         console.log('❌ Sesión cerrada. Elimina la carpeta auth_info_baileys para vincular de nuevo.');
       }
     } else if (connection === 'open') {
+      globalThis.__PRESUVOZ_LATEST_QR__ = null;
+      globalThis.__PRESUVOZ_WHATSAPP_CONNECTED__ = true;
       console.log('\n✅ ¡WHATSAPP CONECTADO CON ÉXITO!');
       console.log('🤖 PresuVoz Bot listo para recibir audios y mensajes.\n');
 
