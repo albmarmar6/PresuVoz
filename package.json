@@ -1,6 +1,6 @@
 {
   "name": "presuvoz-engine",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Motor de generación de presupuestos técnicos por voz para gremios y reformas",
   "type": "module",
   "main": "src/engine.js",
