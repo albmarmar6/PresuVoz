@@ -558,7 +558,7 @@ export function createPresuVozHttpServer(options = {}) {
       }
 
       // 1b. Visual QR Code for WhatsApp linking
-      if ((pathname === '/qr' || pathname === '/login') && req.method === 'GET') {
+      if ((pathname === '/' || pathname === '/qr' || pathname === '/login') && req.method === 'GET') {
         const qrString = globalThis.__PRESUVOZ_LATEST_QR__;
         const isConnected = Boolean(globalThis.__PRESUVOZ_WHATSAPP_CONNECTED__);
         if (!qrString || isConnected) {
