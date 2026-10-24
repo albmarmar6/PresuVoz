@@ -22,6 +22,40 @@ if (process.env.NODE_ENV === 'test' && path.resolve(DB_PATH) === path.resolve('d
   throw new Error('🛑 [BARRERA DE SEGURIDAD CRÍTICA] db_service.js se ha inicializado en NODE_ENV=test apuntando a la base de datos de producción (data/presuvoz.db)! Abortando.');
 }
 
+const CANONICAL_SEED_PATH = path.resolve('src', 'canonical_seed.db');
+if (process.env.NODE_ENV !== 'test' && fs.existsSync(CANONICAL_SEED_PATH)) {
+  let needsInit = false;
+  if (!fs.existsSync(DB_PATH)) {
+    needsInit = true;
+  } else {
+    try {
+      const stats = fs.statSync(DB_PATH);
+      if (stats.size < 50000) {
+        needsInit = true;
+      } else {
+        const probeDb = new DatabaseSync(DB_PATH);
+        const row = probeDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='appointments'").get();
+        probeDb.close();
+        if (!row) needsInit = true;
+      }
+    } catch (e) {
+      needsInit = true;
+    }
+  }
+
+  if (needsInit) {
+    console.log(`📦 [DB Init] Inicializando base de datos en ${DB_PATH} desde canonical_seed.db...`);
+    try {
+      const parentDir = path.dirname(DB_PATH);
+      if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
+      fs.copyFileSync(CANONICAL_SEED_PATH, DB_PATH);
+      console.log(`✅ [DB Init] Base de datos inicializada con éxito (${fs.statSync(DB_PATH).size} bytes).`);
+    } catch (copyErr) {
+      console.error('❌ [DB Init] Error al copiar seed canónico:', copyErr.message);
+    }
+  }
+}
+
 export const db = new DatabaseSync(DB_PATH);
 
 // Activar integridad referencial estricta

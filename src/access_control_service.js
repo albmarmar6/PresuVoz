@@ -338,49 +338,60 @@ export function parseAdminCommand(text) {
   const raw = text.trim();
 
   // 1. Listar autorizados
-  if (/^(?:!|\/)?(?:autorizados|listar\s+autorizados|ver\s+autorizados)$/i.test(raw)) {
+  if (/^(?:!|\/)?(?:autorizados|listar\s+autorizados|ver\s+autorizados|quien\s+tiene\s+acceso)$/i.test(raw)) {
     return { isCommand: true, action: 'LIST' };
   }
 
   // 2. Autorizar número
-  const authMatch = raw.match(/^(?:!|\/)?autorizar(?:\s+(.+))?$/i);
+  const authMatch = raw.match(/^(?:!|\/)?(?:autorizar|autoriza|dar\s+acceso(?:\s+a)?|acceso)(?:\s*[:,-]?\s*(?:al|a)?\s*(.+))?$/i);
   if (authMatch) {
     const candidate = (authMatch[1] || '').trim();
     if (!candidate) {
       return {
         isCommand: true,
         action: 'AUTHORIZE',
-        error: 'Indica el número a autorizar (ej: !autorizar +34600112233).'
+        error: 'Indica el número a autorizar (ej: AUTORIZAR 600112233 o AUTORIZAR ULTIMO).'
       };
+    }
+    if (/^(?:ultimo|último|reciente)$/i.test(candidate)) {
+      return { isCommand: true, action: 'AUTHORIZE', targetPhone: 'ULTIMO', digits: 'ULTIMO' };
     }
     const norm = normalizeToE164(candidate);
     if (!norm.isValid) {
+      const cleanDigits = candidate.replace(/\D/g, '');
+      if (cleanDigits.length >= 7) {
+        return { isCommand: true, action: 'AUTHORIZE', targetPhone: `+${cleanDigits}`, digits: cleanDigits };
+      }
       return {
         isCommand: true,
         action: 'AUTHORIZE',
-        error: `Formato de número no válido: '${candidate}'. Usa formato internacional (ej: +34600112233).`
+        error: `Formato de número no válido: '${candidate}'. Usa formato español o internacional (ej: 600112233).`
       };
     }
     return { isCommand: true, action: 'AUTHORIZE', targetPhone: norm.e164, digits: norm.digits };
   }
 
   // 3. Revocar número
-  const revokeMatch = raw.match(/^(?:!|\/)?revocar(?:\s+(.+))?$/i);
+  const revokeMatch = raw.match(/^(?:!|\/)?(?:revocar|revoca|quitar\s+acceso(?:\s+a)?|bloquear)(?:\s*[:,-]?\s*(?:al|a)?\s*(.+))?$/i);
   if (revokeMatch) {
     const candidate = (revokeMatch[1] || '').trim();
     if (!candidate) {
       return {
         isCommand: true,
         action: 'REVOKE',
-        error: 'Indica el número a revocar (ej: !revocar +34600112233).'
+        error: 'Indica el número a revocar (ej: REVOCAR 600112233).'
       };
     }
     const norm = normalizeToE164(candidate);
     if (!norm.isValid) {
+      const cleanDigits = candidate.replace(/\D/g, '');
+      if (cleanDigits.length >= 7) {
+        return { isCommand: true, action: 'REVOKE', targetPhone: `+${cleanDigits}`, digits: cleanDigits };
+      }
       return {
         isCommand: true,
         action: 'REVOKE',
-        error: `Formato de número no válido: '${candidate}'. Usa formato internacional (ej: +34600112233).`
+        error: `Formato de número no válido: '${candidate}'. Usa formato español o internacional (ej: 600112233).`
       };
     }
     return { isCommand: true, action: 'REVOKE', targetPhone: norm.e164, digits: norm.digits };

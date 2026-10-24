@@ -7299,8 +7299,28 @@ async function startWhatsAppGateway() {
 
         let replyText = '';
         if (adminCmd.action === 'AUTHORIZE') {
-          const res = authorizePhoneNumber(adminCmd.targetPhone, senderNumber);
-          replyText = res.message;
+          let target = adminCmd.targetPhone;
+          const lastUnauth = globalThis.__PRESUVOZ_LAST_UNAUTHORIZED__;
+          if (target === 'ULTIMO') {
+            if (lastUnauth && (Date.now() - lastUnauth.time) < 30 * 60 * 1000) {
+              target = lastUnauth.user;
+            } else {
+              target = '';
+            }
+            if (!target) {
+              replyText = '⚠️ No se ha detectado ningún contacto no autorizado reciente para autorizar.';
+            }
+          }
+          if (target) {
+            const res = authorizePhoneNumber(target, senderNumber);
+            replyText = res.message;
+            if (lastUnauth && lastUnauth.user && (Date.now() - lastUnauth.time) < 30 * 60 * 1000 && lastUnauth.user !== adminCmd.digits) {
+              try {
+                authorizePhoneNumber(lastUnauth.user, senderNumber);
+                console.log(`🔗 [AccessControl] Vinculado y autorizado automáticamente identificador técnico: ${lastUnauth.user} (${lastUnauth.jid})`);
+              } catch (e) {}
+            }
+          }
         } else if (adminCmd.action === 'REVOKE') {
           const res = revokePhoneNumber(adminCmd.targetPhone, senderNumber);
           replyText = res.message;
@@ -8941,6 +8961,9 @@ async function startWhatsAppGateway() {
           const ignoreMsg = `[${new Date().toLocaleTimeString()}] 🛡️ [Ingress Gatekeeper] Ignorado [${ingressCheck.reason}]: jid=${remoteJid}, fromMe=${isFromMe}\n`;
           try { (await import('fs')).appendFileSync('gateway.log', ignoreMsg); } catch(e) {}
           console.log(`🛡️ [Ingress Gatekeeper] Ignorado [${ingressCheck.reason}]: jid=${remoteJid}, fromMe=${isFromMe}`);
+          if (ingressCheck.reason === 'UNAUTHORIZED_INCOMING_SENDER') {
+            globalThis.__PRESUVOZ_LAST_UNAUTHORIZED__ = { jid: remoteJid, user: remoteUser, time: Date.now() };
+          }
         }
         continue;
       }
