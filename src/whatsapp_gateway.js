@@ -1125,6 +1125,100 @@ function storeMessage(keyId, message) {
   }
   messageStore.set(keyId, message);
 }
+export { storeMessage };
+
+export function extractQuotedMessageContext(msg) {
+  if (!msg) return null;
+  const rawMsg = msg.message || msg;
+  const contextInfo =
+    rawMsg?.extendedTextMessage?.contextInfo ||
+    rawMsg?.imageMessage?.contextInfo ||
+    rawMsg?.audioMessage?.contextInfo ||
+    rawMsg?.documentMessage?.contextInfo ||
+    rawMsg?.templateButtonReplyMessage?.contextInfo ||
+    rawMsg?.buttonsResponseMessage?.contextInfo;
+
+  if (!contextInfo) return null;
+
+  const stanzaId = contextInfo.stanzaId || null;
+  const participant = contextInfo.participant || null;
+  const qm = contextInfo.quotedMessage;
+
+  let text = '';
+  if (qm) {
+    text = (
+      qm.conversation ||
+      qm.extendedTextMessage?.text ||
+      qm.imageMessage?.caption ||
+      qm.documentMessage?.caption ||
+      ''
+    ).trim();
+  }
+
+  if (!text && stanzaId && messageStore.has(stanzaId)) {
+    const stored = messageStore.get(stanzaId);
+    text = (
+      stored?.conversation ||
+      stored?.extendedTextMessage?.text ||
+      stored?.text ||
+      ''
+    ).trim();
+  }
+
+  if (!text && !stanzaId) return null;
+
+  return {
+    stanzaId,
+    participant,
+    text
+  };
+}
+
+export function resolveDateFromNaturalText(text, referenceDate = new Date()) {
+  if (!text || typeof text !== 'string') return null;
+  const t = text.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const ref = new Date(referenceDate.getTime());
+
+  if (/\bhoy\b/.test(t)) {
+    return ref.toISOString().split('T')[0];
+  }
+  if (/\bpasado\s+manana\b/.test(t)) {
+    const d = new Date(ref.getTime() + 2 * 24 * 60 * 60 * 1000);
+    return d.toISOString().split('T')[0];
+  }
+  if (/\bmanana\b/.test(t)) {
+    const d = new Date(ref.getTime() + 24 * 60 * 60 * 1000);
+    return d.toISOString().split('T')[0];
+  }
+
+  const dMatch = t.match(/(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?/);
+  if (dMatch) {
+    const y = dMatch[3] ? (dMatch[3].length === 2 ? `20${dMatch[3]}` : dMatch[3]) : ref.getFullYear();
+    return `${y}-${dMatch[2].padStart(2, '0')}-${dMatch[1].padStart(2, '0')}`;
+  }
+
+  const daysMap = {
+    'domingo': 0,
+    'lunes': 1,
+    'martes': 2,
+    'miercoles': 3,
+    'jueves': 4,
+    'viernes': 5,
+    'sabado': 6
+  };
+
+  for (const [dayName, targetDayIdx] of Object.entries(daysMap)) {
+    if (new RegExp(`\\b${dayName}\\b`).test(t)) {
+      const currentDayIdx = ref.getDay();
+      let diff = targetDayIdx - currentDayIdx;
+      if (diff <= 0) diff += 7;
+      const target = new Date(ref.getTime() + diff * 24 * 60 * 60 * 1000);
+      return target.toISOString().split('T')[0];
+    }
+  }
+
+  return null;
+}
 
 /**
  * ─── INGRESS GATEKEEPER: Blindaje Estricto de Entrada ───
@@ -1829,8 +1923,36 @@ export function detectAgendaQueryIntent(text) {
   return { isMatch: true, filter, clientFilter: clientFilter || null };
 }
 
+export function detectBoughtShoppingListQueryIntent(text) {
+  if (!text || typeof text !== 'string') return null;
+  const t = text.trim().toLowerCase();
+
+  // Excluir acciones de tachar un material específico dictado en ese momento (ej: "ya compré el cemento")
+  if (/^ya\s+compr[eé]\s+[a-záéíóúñ0-9]/i.test(t) && !/\b(?:todo|todas|los\s+materiales|materiales|compras?|historial)\b/i.test(t)) {
+    return null;
+  }
+
+  const isBoughtQuery =
+    /\b(?:historial\s+de\s+(?:la\s+)?compras?|historial\s+de\s+materiales|materiales\s+(?:ya\s+)?comprados?|compras?\s+realizadas?|qu[eé]\s+(?:materiales?\s+)?(?:he\s+comprado|compr[eé]|se\s+han\s+comprado)|ver\s+(?:lo\s+)?comprado|ver\s+materiales\s+comprados|cosas\s+compradas|lo\s+que\s+he\s+comprado)\b/i.test(t);
+
+  if (!isBoughtQuery) return null;
+
+  let clientFilter = null;
+  const cleanT = t.replace(/[¿?¡!.,;:]+$/g, '').trim();
+  const clientMatch = cleanT.match(/(?:de|para|en\s+la\s+obra\s+de)\s+([a-záéíóúñA-ZÁÉÍÓÚÑ\s]{2,40})$/i);
+  if (clientMatch) {
+    clientFilter = clientMatch[1].replace(/^(?:la\s+obra\s+de|el\s+piso\s+de)\s+/i, '').trim();
+    if (/^(?:la\s+compra|comprar|materiales?)$/i.test(clientFilter)) {
+      clientFilter = null;
+    }
+  }
+
+  return { isMatch: true, clientFilter, showBoughtOnly: true };
+}
+
 export function detectShoppingListQueryIntent(text) {
   if (!text || typeof text !== 'string') return null;
+  if (detectBoughtShoppingListQueryIntent(text)) return null;
   const t = text.trim().toLowerCase();
 
   // Excluir acciones explícitas sobre compras
@@ -2054,8 +2176,16 @@ export function formatAppointmentsListForWhatsApp(appointments, title = '📅 *T
   return text;
 }
 
-export function formatShoppingListForWhatsApp(items, clientFilter = null) {
+export function formatShoppingListForWhatsApp(items, clientFilter = null, options = {}) {
+  const showBoughtOnly = Boolean(options?.showBoughtOnly);
+
   if (!items || items.length === 0) {
+    if (showBoughtOnly) {
+      if (clientFilter) {
+        return `🛒 *No hay materiales registrados como comprados para la obra de ${clientFilter}.*`;
+      }
+      return '🛒 *Tu historial de compras está vacío.*\n\nNo tienes ningún material registrado como comprado todavía.';
+    }
     if (clientFilter) {
       return `🛒 *No hay materiales pendientes para la obra de ${clientFilter}.*\n\n💡 Para añadir materiales para este cliente, di: _"comprar 14 m² de azulejo para ${clientFilter}"_.`;
     }
@@ -2065,8 +2195,50 @@ export function formatShoppingListForWhatsApp(items, clientFilter = null) {
   const pending = items.filter(i => i.status === 'PENDING');
   const bought = items.filter(i => i.status === 'BOUGHT');
 
+  // Modo 1: Historial de compras (lo ya comprado / tachado)
+  if (showBoughtOnly) {
+    if (bought.length === 0) {
+      if (clientFilter) {
+        return `🛒 *No hay materiales registrados como comprados para la obra de ${clientFilter}.*`;
+      }
+      return '🛒 *Tu historial de compras está vacío.*\n\nNo tienes ningún material registrado como comprado todavía.';
+    }
+
+    const title = clientFilter
+      ? `🛒 *HISTORIAL DE COMPRAS REALIZADAS — OBRA DE ${clientFilter.toUpperCase()}*`
+      : '🛒 *HISTORIAL GENERAL DE COMPRAS REALIZADAS*';
+
+    const lines = [
+      title,
+      '━━━━━━━━━━━━━━━━━━━━━━━━━'
+    ];
+
+    const groups = new Map();
+    bought.forEach(it => {
+      const groupKey = it.clientName ? `🏠 *Obra de ${it.clientName}:*` : '📦 *Materiales Generales / Almacén:*';
+      if (!groups.has(groupKey)) groups.set(groupKey, []);
+      groups.get(groupKey).push(it);
+    });
+
+    let globalIdx = 1;
+    for (const [groupHeader, groupItems] of groups.entries()) {
+      lines.push(`\n${groupHeader}`);
+      groupItems.forEach(it => {
+        const qtyUnit = it.qty && it.unit ? `*${it.qty} ${it.unit}* ` : '';
+        lines.push(`  ${formatListIndex(globalIdx)} ~${qtyUnit}${it.description}~ ✔️`);
+        globalIdx++;
+      });
+    }
+
+    lines.push('\n━━━━━━━━━━━━━━━━━━━━━━━━━');
+    lines.push(`📊 *Total materiales comprados:* ${bought.length}`);
+    lines.push('💡 _Para ver los materiales pendientes por comprar, di: "¿qué tengo que comprar?" o "lista de la compra"._');
+    return lines.join('\n');
+  }
+
+  // Modo 2: Lista de la compra pendiente (exclusivamente lo que falta por comprar)
   const title = clientFilter
-    ? `🛒 *LISTA DE MATERIALES — OBRA DE ${clientFilter.toUpperCase()}*`
+    ? `🛒 *LISTA DE MATERIALES PENDIENTES — OBRA DE ${clientFilter.toUpperCase()}*`
     : '🛒 *LISTA GENERAL DE COMPRAS Y MATERIALES*';
 
   const lines = [
@@ -2095,16 +2267,10 @@ export function formatShoppingListForWhatsApp(items, clientFilter = null) {
     lines.push('\n✅ _¡No tienes ningún material pendiente de compra!_');
   }
 
-  if (bought.length > 0) {
-    lines.push('\n━━━━━━━━━━━━━━━━━━━━━━━━━');
-    lines.push(`✔️ *Comprados / Tachados recientemente (${bought.length}):*`);
-    bought.slice(0, 5).forEach(it => {
-      const clientTag = it.clientName ? ` _(${it.clientName})_` : '';
-      lines.push(`   ~${it.description}~${clientTag}`);
-    });
-  }
-
   lines.push('\n━━━━━━━━━━━━━━━━━━━━━━━━━');
+  if (bought.length > 0) {
+    lines.push(`💡 _Tienes ${bought.length} material(es) en tu historial de compras. Para verlos di: "ver compras realizadas" o "historial de compras"._`);
+  }
   if (!clientFilter) {
     lines.push('💡 _Puedes consultar una obra concreta diciendo: "¿qué tengo que comprar para Carlos?" o tachar diciendo: "ya compré el cemento"._');
   } else {
@@ -3585,7 +3751,7 @@ export async function handleAddShoppingItems(sock, remoteJid, session, items, cl
   }
 }
 
-export async function handleListShoppingItems(sock, remoteJid, session, clientQuery = null, explicitBudgetId = null) {
+export async function handleListShoppingItems(sock, remoteJid, session, clientQuery = null, explicitBudgetId = null, options = {}) {
   try {
     const companyId = session?.companyId || session?.authContext?.companyId;
     if (!companyId) {
@@ -3607,7 +3773,7 @@ export async function handleListShoppingItems(sock, remoteJid, session, clientQu
 
     const items = listShoppingItems(tenantContext, 'all', clientQuery);
     if (sock?.sendMessage) {
-      const text = formatShoppingListForWhatsApp(items, clientQuery);
+      const text = formatShoppingListForWhatsApp(items, clientQuery, options);
       const sent = await sock.sendMessage(remoteJid, { text });
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
     }
@@ -6043,6 +6209,11 @@ async function startWhatsAppGateway() {
       } catch (e) {}
     }
 
+    let quotedContextPromptStr = '';
+    if (taskData?.quotedContext?.text) {
+      quotedContextPromptStr = `\n\n[MENSAJE CITADO POR EL AUTÓNOMO / CONTEXTO DE RESPUESTA A MENSAJE]:\nEl profesional ha pulsado "Responder" en WhatsApp citando expresamente este mensaje anterior:\n"""\n${taskData.quotedContext.text}\n"""\nTen en cuenta que la instrucción o comentario del profesional ("${taskData.rawUserText || ''}") aplica directamente sobre el contenido del mensaje citado.\n`;
+    }
+
     let activeBudgetPromptDesc = 'Ninguno (modo nuevo cliente)';
     if (session.activeBudgetId && session.budgets.has(session.activeBudgetId)) {
       const activeObj = session.budgets.get(session.activeBudgetId);
@@ -6077,7 +6248,7 @@ async function startWhatsAppGateway() {
     } else {
       console.log(`\n💬 Enviando texto a Gemini: "${taskData.rawUserText}"`);
       aiResult = await callGemini(
-        `${contextPrompt}\n\nINSTRUCCIONES DEL PROFESIONAL:\n${taskData.rawUserText}`,
+        `${contextPrompt}${quotedContextPromptStr}\n\nINSTRUCCIONES DEL PROFESIONAL:\n${taskData.rawUserText}`,
         GEMINI_UPDATE_PROMPT
       );
     }
@@ -8182,6 +8353,13 @@ async function startWhatsAppGateway() {
         return;
       }
 
+      // Consulta de historial de compras / materiales ya comprados
+      const boughtShoppingQuery = detectBoughtShoppingListQueryIntent(rawUserText);
+      if (boughtShoppingQuery) {
+        await handleListShoppingItems(sock, remoteJid, session, boughtShoppingQuery.clientFilter, null, { showBoughtOnly: true });
+        return;
+      }
+
       // Consulta de lista de compras / materiales (ej: "¿qué materiales tengo pendiente por comprar?", "qué tengo que comprar", "materiales")
       const shoppingQuery = detectShoppingListQueryIntent(rawUserText);
       if (shoppingQuery) {
@@ -8552,6 +8730,60 @@ async function startWhatsAppGateway() {
         return;
       }
 
+      // Comando directo para reagendar TODAS las visitas pendientes (ej: "pásamelas todas al martes", "mueve todas las visitas al miércoles")
+      const rescheduleAllMatch = rawUserText.match(/^(?:p[aá]sa(?:me)?(?:las)?|mueve(?:me)?(?:las)?|cambia(?:me)?(?:las)?|mover(?:las)?|pasar(?:las)?)\s+todas(?:\s+(?:las\s+)?(?:visitas|citas))?\s+(?:al?|para\s+el?)\s+(.+)$/i);
+      if (rescheduleAllMatch) {
+        const targetTarget = (rescheduleAllMatch[1] || '').trim();
+        const targetDate = resolveDateFromNaturalText(targetTarget);
+        if (targetDate) {
+          const tenantContext = { companyId: session.companyId, phone: session.phone };
+          let candidateApts = session?.pendingDayReview?.appointments || [];
+
+          // Si el usuario citó un mensaje con visitas o no están en memoria de sesión:
+          if ((!candidateApts || candidateApts.length === 0) && item.quotedContext?.text) {
+            const qText = item.quotedContext.text.toLowerCase();
+            const activeDb = listAppointments(tenantContext, 'all').filter(a => a.status === 'CONFIRMED');
+            candidateApts = activeDb.filter(a => {
+              const cName = (a.clientName || a.client_name || '').toLowerCase();
+              return cName && qText.includes(cName);
+            });
+          }
+
+          if (!candidateApts || candidateApts.length === 0) {
+            candidateApts = listAppointments(tenantContext, 'all').filter(a => a.status === 'CONFIRMED' && a.needsOutcomeConfirmation);
+          }
+
+          if (candidateApts && candidateApts.length > 0) {
+            const results = [];
+            for (const app of candidateApts) {
+              const res = rescheduleAppointment(tenantContext, app.id, targetDate, app.time, 'Reagendamiento en lote por WhatsApp');
+              if (res.success) {
+                results.push(res.appointment);
+              }
+            }
+            if (results.length > 0) {
+              session.pendingDayReview = null;
+              const dp = targetDate.split('-');
+              const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}` : targetDate;
+              const lines = [
+                `🗓️ *${results.length} visita(s) reagendada(s) para el ${fd}:*`,
+                '━━━━━━━━━━━━━━━━━━━━━━━━━'
+              ];
+              results.forEach((a, idx) => {
+                lines.push(`${formatListIndex(idx + 1)} *${a.time} h* — ${a.clientName}${a.clientAddress ? ` (${a.clientAddress})` : ''}`);
+              });
+              lines.push('\n✅ _Quedan todas actualizadas en tu agenda._');
+              const sentAll = await sock.sendMessage(remoteJid, { text: lines.join('\n') });
+              if (sentAll?.key?.id) {
+                botSentMessageIds.add(sentAll.key.id);
+                storeMessage(sentAll.key.id, { conversation: lines.join('\n') });
+              }
+              return;
+            }
+          }
+        }
+      }
+
       // Comando directo para cancelar cita: ej. "cancelar cita Juan", "anular visita Pedro", "cancela la visita de María", "cancélame la cita de Carlos"
       const cancelCmdMatch = rawUserText.match(/^(?:cancelar|cancela(?:me)?|anular|anula(?:me)?|borrar|eliminar|no\s+voy\s+a\s+(?:hacer|ir\s+a))\s+(?:la\s+)?(?:cita|visita)(?:\s+(?:con|de)?\s*(.+))?$/i)
         || rawUserText.match(/^(?:la\s+)?(?:cita|visita)\s+(?:con|de)?\s*(.+?)\s+(?:cancelada|anulada|la\s+cancelo|no\s+se\s+hace)$/i);
@@ -8825,7 +9057,8 @@ async function startWhatsAppGateway() {
         audioBuffer,
         audioMimeType: audioMsg?.mimetype || 'audio/ogg',
         rawUserText,
-        senderNumber
+        senderNumber,
+        quotedContext: item.quotedContext || extractQuotedMessageContext(item.msg)
       };
 
       try {
@@ -9110,6 +9343,9 @@ async function startWhatsAppGateway() {
         });
       }
 
+      // Extraer contexto de mensaje citado si el usuario responde a un mensaje del bot
+      const quotedContext = extractQuotedMessageContext(msg);
+
       const currentItem = {
         msg,
         messageContent,
@@ -9118,6 +9354,7 @@ async function startWhatsAppGateway() {
         isImage,
         isText,
         imageMsg,
+        quotedContext,
         audioMsg,
         wamId,
         allWamIds: wamId ? [wamId] : []

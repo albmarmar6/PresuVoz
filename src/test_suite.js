@@ -31,6 +31,10 @@ import {
   detectBudgetListIntent,
   detectAgendaQueryIntent,
   detectShoppingListQueryIntent,
+  detectBoughtShoppingListQueryIntent,
+  extractQuotedMessageContext,
+  resolveDateFromNaturalText,
+  formatShoppingListForWhatsApp,
   resolveRequireExplicitAuth,
   clearGatewayTimers,
   gracefulShutdown,
@@ -12977,6 +12981,72 @@ try {
   cleanupTest93(phone93B);
 }
 
+
+console.log("\n==========================================================");
+console.log("TEST 94: QUOTED MESSAGE CONTEXT & SHOPPING LIST SEPARATION (IMPROVEMENTS)");
+console.log("==========================================================");
+
+// 1. Quoted Message Context Extraction
+const mockQuotedBaileysMsg = {
+  message: {
+    extendedTextMessage: {
+      text: "Pasamelas todas al martes",
+      contextInfo: {
+        stanzaId: "3EB0TEST123456",
+        participant: "34711206264@s.whatsapp.net",
+        quotedMessage: {
+          conversation: "👋 Recordatorio de visitas pasadas:\nTienes estas 4 visitas que ya han pasado sin confirmar el resultado:\n1 (19/10) 11:00 h — Juan\n2 (19/10) 17:00 h — César"
+        }
+      }
+    }
+  }
+};
+const extractedContext = extractQuotedMessageContext(mockQuotedBaileysMsg);
+assert(extractedContext !== null, "TEST 94 (1.1): extractQuotedMessageContext extrae contexto de mensaje citado");
+assert(extractedContext?.stanzaId === "3EB0TEST123456", "TEST 94 (1.2): extrae stanzaId del mensaje citado");
+assert(extractedContext?.text.includes("Recordatorio de visitas pasadas"), "TEST 94 (1.3): extrae texto original del mensaje citado");
+
+// Mensaje sin citar retorna null
+assert(extractQuotedMessageContext({ message: { conversation: "Hola bot" } }) === null, "TEST 94 (1.4): Mensaje sin cita devuelve null");
+
+// 2. Natural Day and Relative Date Resolution
+const mockSunday = new Date('2026-10-25T12:00:00Z'); // Domingo 25 de Octubre 2026
+assert(resolveDateFromNaturalText("martes", mockSunday) === '2026-10-27', "TEST 94 (2.1): 'martes' resuelve a 2026-10-27 desde domingo 25");
+assert(resolveDateFromNaturalText("Pasamelas todas al martes", mockSunday) === '2026-10-27', "TEST 94 (2.2): 'Pasamelas todas al martes' resuelve al próximo martes");
+assert(resolveDateFromNaturalText("mañana", mockSunday) === '2026-10-26', "TEST 94 (2.3): 'mañana' resuelve al lunes 26");
+assert(resolveDateFromNaturalText("el 30/10", mockSunday) === '2026-10-30', "TEST 94 (2.4): 'el 30/10' resuelve a 2026-10-30");
+
+// 3. Shopping List Intent Separation (Pending vs Bought History)
+assert(detectBoughtShoppingListQueryIntent("Que he comprado?")?.showBoughtOnly === true, "TEST 94 (3.1): 'Que he comprado?' detecta historial de compras");
+assert(detectBoughtShoppingListQueryIntent("historial de compras")?.showBoughtOnly === true, "TEST 94 (3.2): 'historial de compras' detecta historial");
+assert(detectBoughtShoppingListQueryIntent("ver compras realizadas")?.showBoughtOnly === true, "TEST 94 (3.3): 'ver compras realizadas' detecta historial");
+assert(detectBoughtShoppingListQueryIntent("materiales comprados para Carlos")?.clientFilter?.toLowerCase() === 'carlos', "TEST 94 (3.4): Extrae cliente en consulta de compras realizadas");
+assert(detectBoughtShoppingListQueryIntent("ya compré el cemento") === null, "TEST 94 (3.5): 'ya compré el cemento' es acción de tachar, NO consulta de historial");
+
+// Comprobar que la consulta de compras pendientes NO colisiona con el historial de compras
+assert(detectShoppingListQueryIntent("Que he comprado?") === null, "TEST 94 (3.6): 'Que he comprado?' no es consulta de compras pendientes");
+assert(detectShoppingListQueryIntent("Que tengo que comprar?")?.isMatch === true, "TEST 94 (3.7): 'Que tengo que comprar?' sigue siendo consulta de compras pendientes");
+
+// 4. Shopping List WhatsApp Formatting Separation
+const mockShopItems = [
+  { id: '1', description: 'Bote de pintura azul', qty: 1, unit: 'ud', status: 'PENDING', clientName: null },
+  { id: '2', description: 'Pladur 60 m2', qty: 60, unit: 'm2', status: 'PENDING', clientName: 'José Luis' },
+  { id: '3', description: 'Bote pintura amarillo', qty: 1, unit: 'ud', status: 'BOUGHT', clientName: 'José Luis' },
+  { id: '4', description: 'Madera de pino', qty: 2, unit: 'ud', status: 'BOUGHT', clientName: null }
+];
+
+// Mensaje de compras pendientes: NO debe contener la sección de comprados en el cuerpo
+const pendingFormatted = formatShoppingListForWhatsApp(mockShopItems);
+assert(pendingFormatted.includes("Bote de pintura azul"), "TEST 94 (4.1): Lista pendiente muestra pintura azul");
+assert(pendingFormatted.includes("Pladur 60 m2"), "TEST 94 (4.2): Lista pendiente muestra pladur");
+assert(!pendingFormatted.includes("~Bote pintura amarillo~"), "TEST 94 (4.3): Lista pendiente NO ensucia el mensaje con artículos comprados");
+assert(pendingFormatted.includes("historial de compras"), "TEST 94 (4.4): Lista pendiente indica que hay comprados disponibles en el historial");
+
+// Mensaje de historial de compras: muestra exclusivamente lo comprado / tachado
+const boughtFormatted = formatShoppingListForWhatsApp(mockShopItems, null, { showBoughtOnly: true });
+assert(boughtFormatted.includes("HISTORIAL GENERAL DE COMPRAS REALIZADAS"), "TEST 94 (4.5): Encabezado de historial de compras");
+assert(boughtFormatted.includes("Bote pintura amarillo"), "TEST 94 (4.6): Historial muestra material comprado");
+assert(!boughtFormatted.includes("Pladur 60 m2"), "TEST 94 (4.7): Historial NO muestra materiales pendientes");
 
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);
