@@ -321,79 +321,116 @@ export async function runEndOfDayReviewJob(sock, userSessions = new Map(), botSe
  * 
  * Idempotencia: Los jobs registran `soonSentAt` y `expiredSentAt` en SQLite (data_json), garantizando que no se duplican.
  */
+// Caché en memoria para garantizar que jamás se envíe más de 1 recordatorio del mismo tipo al día por presupuesto
+export const sentBudgetRemindersCache = new Set();
+let lastCacheResetDate = null;
+let isRunningBudgetExpiration = false;
+
+export function clearSchedulerDedupeCache() {
+  sentBudgetRemindersCache.clear();
+  lastCacheResetDate = null;
+}
+
 export async function runBudgetExpirationReminderJob(sock, userSessions = new Map(), botSentMessageIds = new Set(), options = {}) {
   if (!sock) return;
-  const { hour, minute } = getNowInTimezone('Europe/Madrid');
+  if (isRunningBudgetExpiration) return;
+  isRunningBudgetExpiration = true;
 
-  // Ventana matinal recomendada entre 08:30 y 14:00 (salvo ignoreTimeWindow)
-  if (!options?.ignoreTimeWindow) {
-    if (hour < 8 || (hour === 8 && minute < 30) || hour >= 14) return;
-  }
-
-  // Obtener empresas con presupuestos no aceptados ni cancelados
-  let companyRows = [];
   try {
-    companyRows = db.prepare(`
-      SELECT DISTINCT company_id 
-      FROM budgets 
-      WHERE company_id IS NOT NULL 
-        AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO', 'CANCELADO', 'PERDIDO')
-    `).all();
-  } catch (err) {
-    console.error('❌ [Scheduler] Error consultando empresas para vencimientos:', err.message);
-    return;
-  }
+    const { dateStr, hour, minute } = getNowInTimezone('Europe/Madrid');
 
-  if (!companyRows || companyRows.length === 0) return;
-
-  for (const { company_id } of companyRows) {
-    if (!company_id) continue;
-    try {
-      const nearExpiring = getBudgetsNearExpiration(company_id);
-      if (!nearExpiring || nearExpiring.length === 0) continue;
-
-      const targetJid = resolveSchedulerTargetJid(company_id, userSessions);
-
-      for (const item of nearExpiring) {
-        if (item.isExpired) {
-          // Día N (alcanzado o superado el límite de validez)
-          const callPronoun = (
-            item.clientName.toLowerCase().endsWith('a') ||
-            item.clientName.toLowerCase().includes('maría') ||
-            item.clientName.toLowerCase().includes('maria') ||
-            item.clientName.toLowerCase().includes('laura') ||
-            item.clientName.toLowerCase().includes('carmen')
-          ) ? 'llamarla' : 'llamarle';
-
-          const msgText = `⏳ El presupuesto de "${item.clientName}" ha alcanzado hoy el límite de ${item.validityDays} días. Sigue sin firmar. Puedes ${callPronoun} para cerrar la obra o decirme "marca como perdido el de ${item.clientName}" si ha decidido no hacerlo.`;
-
-          const sent = await sock.sendMessage(targetJid, { text: msgText });
-          if (sent?.status === 'BLOCKED') {
-            console.warn(`🛡️ [Scheduler] Aviso de vencimiento bloqueado por cortafuegos para ${targetJid}.`);
-            continue;
-          }
-          if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-
-          recordBudgetExpirationReminder(company_id, item.id, 'EXPIRED');
-          console.log(`⏳ [Scheduler] Aviso de vencimiento de presupuesto ${item.id} (${item.clientName}) enviado al autónomo ${targetJid}`);
-        } else if (item.isSoonToExpire) {
-          // Día N-1 (1 día antes del vencimiento) — EXCLUSIVAMENTE para el autónomo
-          const msgText = `⏳ *Recordatorio de presupuesto pendiente de firma*\nEl presupuesto de *${item.clientName}* (${item.id}) vence mañana (ha alcanzado ${item.daysWaiting} de ${item.validityDays} días de validez) y sigue pendiente de firma.\n\n💡 _No se ha enviado ningún mensaje al cliente._`;
-
-          const sent = await sock.sendMessage(targetJid, { text: msgText });
-          if (sent?.status === 'BLOCKED') {
-            console.warn(`🛡️ [Scheduler] Recordatorio de víspera de vencimiento bloqueado por cortafuegos para ${targetJid}.`);
-            continue;
-          }
-          if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-
-          recordBudgetExpirationReminder(company_id, item.id, 'SOON');
-          console.log(`⏳ [Scheduler] Recordatorio víspera de vencimiento ${item.id} (${item.clientName}) enviado al autónomo ${targetJid}`);
-        }
-      }
-    } catch (compErr) {
-      console.error(`❌ [Scheduler] Error procesando vencimientos para empresa ${company_id}:`, compErr.message);
+    if (lastCacheResetDate !== dateStr) {
+      sentBudgetRemindersCache.clear();
+      lastCacheResetDate = dateStr;
     }
+
+    // Ventana matinal: de 08:30 a 08:35 (salvo ignoreTimeWindow para tests o reconciliación)
+    if (!options?.ignoreTimeWindow) {
+      if (hour !== 8 || minute < 30 || minute > 35) return;
+    }
+
+    // Obtener empresas con presupuestos no aceptados ni cancelados
+    let companyRows = [];
+    try {
+      companyRows = db.prepare(`
+        SELECT DISTINCT company_id 
+        FROM budgets 
+        WHERE company_id IS NOT NULL 
+          AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO', 'CANCELADO', 'PERDIDO', 'FACTURADO', 'COBRADO')
+      `).all();
+    } catch (err) {
+      console.error('❌ [Scheduler] Error consultando empresas para vencimientos:', err.message);
+      return;
+    }
+
+    if (!companyRows || companyRows.length === 0) return;
+
+    for (const { company_id } of companyRows) {
+      if (!company_id) continue;
+      try {
+        const nearExpiring = getBudgetsNearExpiration(company_id);
+        if (!nearExpiring || nearExpiring.length === 0) continue;
+
+        const targetJid = resolveSchedulerTargetJid(company_id, userSessions);
+
+        for (const item of nearExpiring) {
+          const reminderType = item.isExpired ? 'EXPIRED' : (item.isSoonToExpire ? 'SOON' : null);
+          if (!reminderType) continue;
+
+          // Guardia de deduplicación estricta por día, empresa, presupuesto y tipo de aviso
+          const dedupeKey = `${dateStr}::${company_id}::${item.id}::${reminderType}`;
+          if (sentBudgetRemindersCache.has(dedupeKey)) {
+            continue;
+          }
+
+          if (item.isExpired) {
+            // Día N (alcanzado o superado el límite de validez)
+            const callPronoun = (
+              item.clientName.toLowerCase().endsWith('a') ||
+              item.clientName.toLowerCase().includes('maría') ||
+              item.clientName.toLowerCase().includes('maria') ||
+              item.clientName.toLowerCase().includes('laura') ||
+              item.clientName.toLowerCase().includes('carmen')
+            ) ? 'llamarla' : 'llamarle';
+
+            const msgText = `⏳ El presupuesto de "${item.clientName}" ha alcanzado hoy el límite de ${item.validityDays} días. Sigue sin firmar. Puedes ${callPronoun} para cerrar la obra o decirme "marca como perdido el de ${item.clientName}" si ha decidido no hacerlo.`;
+
+            // Registrar en caché inmediatamente antes de enviar para evitar carreras entre reintentos
+            sentBudgetRemindersCache.add(dedupeKey);
+
+            const sent = await sock.sendMessage(targetJid, { text: msgText });
+            if (sent?.status === 'BLOCKED') {
+              console.warn(`🛡️ [Scheduler] Aviso de vencimiento bloqueado por cortafuegos para ${targetJid}.`);
+              continue;
+            }
+            if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+
+            recordBudgetExpirationReminder(company_id, item.id, 'EXPIRED');
+            console.log(`⏳ [Scheduler] Aviso de vencimiento de presupuesto ${item.id} (${item.clientName}) enviado al autónomo ${targetJid}`);
+          } else if (item.isSoonToExpire) {
+            // Día N-1 (1 día antes del vencimiento) — EXCLUSIVAMENTE para el autónomo
+            const msgText = `⏳ *Recordatorio de presupuesto pendiente de firma*\nEl presupuesto de *${item.clientName}* (${item.id}) vence mañana (ha alcanzado ${item.daysWaiting} de ${item.validityDays} días de validez) y sigue pendiente de firma.\n\n💡 _No se ha enviado ningún mensaje al cliente._`;
+
+            // Registrar en caché inmediatamente antes de enviar para evitar carreras entre reintentos
+            sentBudgetRemindersCache.add(dedupeKey);
+
+            const sent = await sock.sendMessage(targetJid, { text: msgText });
+            if (sent?.status === 'BLOCKED') {
+              console.warn(`🛡️ [Scheduler] Recordatorio de víspera de vencimiento bloqueado por cortafuegos para ${targetJid}.`);
+              continue;
+            }
+            if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+
+            recordBudgetExpirationReminder(company_id, item.id, 'SOON');
+            console.log(`⏳ [Scheduler] Recordatorio víspera de vencimiento ${item.id} (${item.clientName}) enviado al autónomo ${targetJid}`);
+          }
+        }
+      } catch (compErr) {
+        console.error(`❌ [Scheduler] Error procesando vencimientos para empresa ${company_id}:`, compErr.message);
+      }
+    }
+  } finally {
+    isRunningBudgetExpiration = false;
   }
 }
 

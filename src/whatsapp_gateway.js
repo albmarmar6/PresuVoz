@@ -46,7 +46,7 @@ import {
   generateReceiptPDF,
   generateQuarterTaxPDF
 } from './pdf_service.js';
-import { initAppointmentScheduler } from './appointment_scheduler.js';
+import { initAppointmentScheduler, clearSchedulerDedupeCache } from './appointment_scheduler.js';
 import {
   buildGestoriaPackageZip,
   sendFiscalPackageToGestoria,
@@ -757,6 +757,9 @@ export function clearGatewayTimers() {
   if (schedulerTimer) {
     clearInterval(schedulerTimer);
     schedulerTimer = null;
+  }
+  if (typeof clearSchedulerDedupeCache === 'function') {
+    clearSchedulerDedupeCache();
   }
 }
 

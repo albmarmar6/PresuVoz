@@ -3144,7 +3144,7 @@ export function getBudgetsPendingFollowUp(phoneOrCompany) {
   const companyId = tenant?.companyId;
   if (!companyId) return [];
 
-  const rows = db.prepare("SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets WHERE company_id = ? AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO', 'CANCELADO', 'PERDIDO') ORDER BY created_at ASC").all(companyId);
+  const rows = db.prepare("SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json FROM budgets WHERE company_id = ? AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO', 'CANCELADO', 'PERDIDO', 'FACTURADO', 'COBRADO') ORDER BY created_at ASC").all(companyId);
   const now = Date.now();
   return rows.map(r => {
     let parsed = null;
@@ -3184,7 +3184,7 @@ export function getBudgetsNearExpiration(phoneOrCompany) {
     SELECT id, client_name, client_phone, total_amount, status, created_at, updated_at, data_json 
     FROM budgets 
     WHERE company_id = ? 
-      AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO', 'CANCELADO', 'PERDIDO')
+      AND status NOT IN ('ACEPTADO', 'FIRMADO', 'FINALIZADO', 'CANCELADO', 'PERDIDO', 'FACTURADO', 'COBRADO')
     ORDER BY created_at ASC
   `).all(companyId);
 
@@ -3243,19 +3243,31 @@ export function recordBudgetExpirationReminder(phoneOrCompany, budgetId, reminde
   const companyId = tenant?.companyId;
   if (!companyId) return false;
 
-  const budget = getBudget(tenant, budgetId);
-  if (!budget) return false;
+  const publicId = extractPublicEntityId(budgetId);
+  const scopedId = `${companyId}::${publicId}`;
 
-  if (!budget.expirationReminders || typeof budget.expirationReminders !== 'object') {
-    budget.expirationReminders = {};
+  const row = db.prepare('SELECT id, data_json FROM budgets WHERE company_id = ? AND (id = ? OR id = ?) LIMIT 1').get(companyId, publicId, scopedId);
+  if (!row) return false;
+
+  let parsed = {};
+  try {
+    parsed = JSON.parse(row.data_json || '{}');
+  } catch (_) {
+    parsed = {};
+  }
+
+  if (!parsed.expirationReminders || typeof parsed.expirationReminders !== 'object') {
+    parsed.expirationReminders = {};
   }
   const now = new Date().toISOString();
   if (reminderType === 'SOON') {
-    budget.expirationReminders.soonSentAt = now;
+    parsed.expirationReminders.soonSentAt = now;
   } else if (reminderType === 'EXPIRED') {
-    budget.expirationReminders.expiredSentAt = now;
+    parsed.expirationReminders.expiredSentAt = now;
   }
-  saveBudget(tenant, budget);
+
+  const updatedJson = JSON.stringify(parsed);
+  db.prepare('UPDATE budgets SET data_json = ?, updated_at = ? WHERE company_id = ? AND id = ?').run(updatedJson, now, companyId, row.id);
   return true;
 }
 
