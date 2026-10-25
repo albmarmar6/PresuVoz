@@ -725,6 +725,7 @@ export function setConversationState(remoteJid, state) {
 
 // Memoria multi-presupuesto y facturas por chat conectada a SQLite
 export const userSessions = new Map();
+export const lidToPhoneCache = new Map();
 export const botSentMessageIds = new Set();
 export const provisionalSessions = new Map();
 export const activeProcessingJids = new Set();
@@ -1271,6 +1272,24 @@ export function isAuthorizedEgressRecipient(targetJid, { myNumber, myLid, allowe
   const isSelf = (cleanMyNum && targetUser === cleanMyNum) || (cleanMyLid && targetUser === cleanMyLid);
   if (isSelf) {
     return { allowed: true, reason: 'SELF_CHAT' };
+  }
+
+  // 2b. Resolución de identidad LID (si el destinatario es un JID @lid enmascarado por WhatsApp)
+  const mappedPhone = lidToPhoneCache.get(targetJid) || lidToPhoneCache.get(targetUser) || (userSessions.get(targetJid)?.phone);
+  if (mappedPhone) {
+    if (isPlatformAdmin(mappedPhone)) {
+      return { allowed: true, reason: 'PLATFORM_ADMIN_LID' };
+    }
+    const authCheck = isPhoneNumberAuthorized(mappedPhone, { allowedNumbers });
+    if (authCheck.authorized && authCheck.status !== 'REVOKED') {
+      return { allowed: true, reason: 'AUTHORIZED_LID_RECIPIENT' };
+    }
+  }
+
+  // Si targetJid tiene una sesión de usuario activa y autorizada
+  const activeSess = userSessions.get(targetJid);
+  if (activeSess && (activeSess.authContext?.companyId || isPlatformAdmin(activeSess.phone))) {
+    return { allowed: true, reason: 'ACTIVE_SESSION_RECIPIENT' };
   }
 
   // 3. Comprobar si el destinatario está revocado: BLOQUEO INMEDIATO
@@ -8969,6 +8988,11 @@ async function startWhatsAppGateway() {
       }
 
       const senderNumber = ingressCheck.senderNumber;
+      if (remoteJid?.endsWith('@lid') && senderNumber) {
+        lidToPhoneCache.set(remoteJid, senderNumber);
+        const rUser = remoteJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+        if (rUser) lidToPhoneCache.set(rUser, senderNumber);
+      }
       const logMsg = `[${new Date().toLocaleTimeString()}] 📩 Mensaje autorizado [type: ${type}, jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]\n`;
       try { (await import('fs')).appendFileSync('gateway.log', logMsg); } catch(e) {}
       console.log(`📩 Mensaje autorizado [type: ${type}, jid: ${remoteJid}, fromMe: ${isFromMe}, sender: ${senderNumber}, myNumber: ${myNumber}, myLid: ${myLid}]`);
