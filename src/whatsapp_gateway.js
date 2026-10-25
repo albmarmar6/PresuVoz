@@ -489,6 +489,11 @@ export function detectInvoiceListIntent(text) {
   if (!text || typeof text !== 'string') return null;
   const t = text.trim();
 
+  // Excluir acciones de creación / emisión de facturas
+  if (/\b(?:cre(?:ar?|a|ame|anos|ale)|haz(?:me|nos|le)?|hacer|gener(?:ar?|a|ame|anos|ale)|emit(?:ir?|e|eme)|factur(?:ar?|a|ame)|prep[aá]r(?:ar?|a|ame))\b/i.test(t)) {
+    return null;
+  }
+
   // Intención de listar facturas (pendientes o todas)
   const isInvoiceList = /\b(?:facturas?\s+pendientes?|facturas?\s+que\s+tengo\s+pendientes?|facturas?\s+sin\s+cobrar|facturas?\s+por\s+cobrar|mis\s+facturas|ver\s+facturas|listar?\s+facturas|facturas\s+cobradas|facturas\s+pagadas)\b/i.test(t);
   if (!isInvoiceList && !/^(?:facturas|mis\s+facturas|ver\s+facturas)$/i.test(t)) {
@@ -1832,8 +1837,8 @@ export function detectShoppingListQueryIntent(text) {
   if (/\b(?:ya\s+compr[eé]|comprad[oa]s?|tachad[oa]s?|tachar|borrar\s+lista|vaciar\s+lista|limpiar\s+lista)\b/i.test(t)) {
     return null;
   }
-  // Excluir si es dictado de compras con cantidad (ej: "comprar 14 m2 de pladur")
-  if (/^comprar\s+\d+/i.test(t) || /\b(?:a[ñn]adir|meter|apuntar)\s+(?:a\s+la\s+compra|\d+)/i.test(t)) {
+  // Excluir cualquier orden de apuntar / añadir / meter / poner / guardar / agregar / comprar materiales
+  if (/\b(?:apunt(?:ar?|a|ame|á|anos|ale)|anot(?:ar?|a|ame|á|anos|ale)|a[ñn]ad(?:ir?|e|eme|anos|ale)|met(?:er?|e|eme|anos|ale)|pon(?:me|nos|le)?|guard(?:ar?|a|ame|á|anos|ale)|agreg(?:ar?|a|ame|á|anos|ale)|inclu(?:ir?|ye|yeme)|comprar\s+\d+)\b/i.test(t)) {
     return null;
   }
 
@@ -1873,6 +1878,10 @@ export function detectBudgetListIntent(text) {
     return null;
   }
   if (/nuevo\s+presupuesto|presupuesto\s+nuevo|factura|recibo|cobro|pago|anticipo|cu[aá]nto\s+me\s+debe|descuento|rebaja|modificar|cambiar|a[ñn]adir|quitar|poner|hacerle|actualizar/i.test(t)) {
+    return null;
+  }
+  // Excluir acciones de creación / redacción de presupuestos
+  if (/\b(?:cre(?:ar?|a|ame|anos|ale)|haz(?:me|nos|le)?|hacer|gener(?:ar?|a|ame|anos|ale)|redact(?:ar?|a|ame|anos|ale)|prep[aá]r(?:ar?|a|ame)|elabor(?:ar?|a|ame))\b/i.test(t)) {
     return null;
   }
 

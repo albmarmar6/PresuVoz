@@ -9785,6 +9785,11 @@ assert(detectShoppingListQueryIntent("Que materiales tengo pendiente por comprar
 assert(detectShoppingListQueryIntent("Que tengo que comprar?")?.isMatch === true, "TEST 73: 'Que tengo que comprar?' detectado como lista de compras");
 assert(detectShoppingListQueryIntent("qué materiales tengo pendientes para Carlos?")?.clientFilter?.toLowerCase() === 'carlos', "TEST 73: Extrae cliente Carlos en consulta de materiales pendientes");
 assert(detectShoppingListQueryIntent("ya compré el cemento") === null, "TEST 73: Acción de compra no se confunde con listado de compras");
+assert(detectShoppingListQueryIntent("Apuntame en la lista de la compra 3 botes de pintura, uno de color azul otro de color amarillo y otro de color rojo. Tambien ventanas de aluminio de 50x30 y 3 puertas") === null, "TEST 73: 'Apuntame en la lista de la compra...' NO se confunde con consultar compras");
+assert(detectShoppingListQueryIntent("Añade a la lista de la compra 2 sacos de yeso") === null, "TEST 73: 'Añade a la lista de la compra...' NO se confunde con consultar compras");
+assert(detectShoppingListQueryIntent("Pon en la lista de compras 5 enchufes") === null, "TEST 73: 'Pon en la lista de compras...' NO se confunde con consultar compras");
+assert(detectBudgetListIntent("Hazme un presupuesto de 500 euros para Maria") === null, "TEST 73: 'Hazme un presupuesto...' NO es interceptado como listado de presupuestos");
+assert(detectInvoiceListIntent("Hazme una factura para Carlos") === null, "TEST 73: 'Hazme una factura...' NO es interceptado como listado de facturas");
 assert(detectBudgetListIntent("Que materiales tengo pendiente por comprar?") === null, "TEST 73: 'Que materiales tengo pendiente por comprar?' NO es interceptado como presupuestos");
 
 // 3. Presupuestos siguen funcionando
