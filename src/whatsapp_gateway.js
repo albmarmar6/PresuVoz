@@ -1780,8 +1780,13 @@ export function detectAgendaQueryIntent(text) {
   if (!text || typeof text !== 'string') return null;
   const t = text.trim().toLowerCase();
 
-  // Excluir si es una acción directa sobre citas (cancelar, reagendar, completar, agendar)
-  if (/\b(?:cancelar|cancela|anular|anula|borrar|eliminar|reagendar|posponer|mover|pasa|pasar|cambiar|hecha|realizada|completada|apuntar|agendar)\b/i.test(t)) {
+  // Excluir si es una acción directa sobre citas (agendar, apuntar, anotar, programar, cancelar, reagendar, etc.)
+  if (/\b(?:cancel(?:ar|a|ame|ale|en)|anul(?:ar|a|ame|ale|en)|borr(?:ar|a|ame|ale|en)|elimin(?:ar|a|ame|ale|en)|reagend(?:ar|a|ame|ale|en)|pospon(?:er|ga|me)|mov(?:er|ed|me)|pas(?:ar|a|ame|ale)|cambi(?:ar|a|ame|ale)|hech[ao]|realizad[ao]|completad[ao]|agend(?:ar|ame|á|anos|ale|a\b)|apunt(?:ar|ame|á|anos|ale|a\b)|anot(?:ar|ame|á|anos|ale|a\b)|guard(?:ar|ame|á|anos|ale|a\b)|program(?:ar|ame|á|anos|ale|a\b)|registr(?:ar|ame|á|anos|ale|a\b)|cre(?:ar|a|ame|anos|ale)|a[ñn]ad(?:ir|e|eme|anos|ale)|met(?:er|e|eme|anos|ale)|pon(?:me|nos|le)?)\b/i.test(t)) {
+    return null;
+  }
+
+  // Excluir si contiene instrucciones con horarios concretos o detalles de visitas (ej: "a las 10:00 en la calle...", "a las 11 cliente Carlos...")
+  if (/\b(?:a\s+las?\s+\d{1,2}(?::\d{2})?)\b/i.test(t) && /\b(?:cliente|calle|avda|avenida|plaza|en\s+la|con|para)\b/i.test(t)) {
     return null;
   }
 
@@ -2363,7 +2368,7 @@ export async function handleRenameClient(sock, remoteJid, session, targetQuery, 
   }
 }
 
-export async function handleScheduleAppointment(sock, remoteJid, session, appointmentInfo = {}) {
+export async function handleScheduleAppointment(sock, remoteJid, session, appointmentInfo = {}, options = {}) {
   try {
     const companyId = session?.companyId || session?.authContext?.companyId;
     if (!companyId) {
@@ -2396,7 +2401,7 @@ export async function handleScheduleAppointment(sock, remoteJid, session, appoin
       conflictWarning = `\n\n⚠️ *Aviso de horario:* Ya tenías una visita agendada a esa misma hora con *${conflicts[0].clientName}*. He registrado ambas en tu agenda.`;
     }
 
-    if (sock?.sendMessage) {
+    if (sock?.sendMessage && !options?.silent) {
       const text = formatAppointmentForWhatsApp(saved, session.company) + conflictWarning;
       const sent = await sock.sendMessage(remoteJid, { text });
       if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
@@ -6529,19 +6534,20 @@ async function startWhatsAppGateway() {
       if (appsList.length > 1) {
         // ── MÚLTIPLES CITAS: guardar todas de golpe y confirmar en bloque ────
         for (const appInfo of appsList) {
-          await handleScheduleAppointment(sock, remoteJid, session, appInfo);
+          await handleScheduleAppointment(sock, remoteJid, session, appInfo, { silent: true });
         }
         const summaryLines = [
-          `✅ *${appsList.length} VISITAS AGENDADAS*`,
+          `✅ *¡${appsList.length} VISITAS TÉCNICAS AGENDADAS!*`,
           '━━━━━━━━━━━━━━━━━━━━━━━━━'
         ];
         appsList.forEach((app, idx) => {
           const dp = (app.date || '').split('-');
           const fd = dp.length === 3 ? `${dp[2]}/${dp[1]}/${dp[0]}` : (app.date || 'Por concretar');
-          summaryLines.push(`${idx + 1}. *${app.clientName || 'Cliente'}* · ${fd} · ${app.time || '10:00'} h`);
+          const addressPart = app.clientAddress ? ` · 📍 ${app.clientAddress}` : '';
+          summaryLines.push(`${idx + 1}. *${app.clientName || 'Cliente'}* · 📅 ${fd} · ⏰ ${app.time || '10:00'} h${addressPart}`);
         });
         summaryLines.push('━━━━━━━━━━━━━━━━━━━━━━━━━');
-        summaryLines.push('Escribe *"agenda"* para verlas todas.');
+        summaryLines.push('💡 _Escribe *"agenda"* o *"visitas mañana"* para consultarlas en cualquier momento._');
         const sentSum = await sock.sendMessage(remoteJid, { text: summaryLines.join('\n') });
         if (sentSum?.key?.id) botSentMessageIds.add(sentSum.key.id);
       } else {

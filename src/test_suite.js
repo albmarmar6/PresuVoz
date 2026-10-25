@@ -9777,6 +9777,7 @@ assert(detectAgendaQueryIntent("qué citas tengo hoy?")?.filter === 'today', "TE
 assert(detectAgendaQueryIntent("visitas para mañana")?.filter === 'tomorrow', "TEST 73: 'visitas para mañana' detecta filtro tomorrow");
 assert(detectAgendaQueryIntent("tengo alguna visita pendiente?")?.isMatch === true, "TEST 73: 'tengo alguna visita pendiente?' detectado como agenda");
 assert(detectAgendaQueryIntent("cancela la visita de Juan") === null, "TEST 73: Acción de cancelar no se confunde con listado de agenda");
+assert(detectAgendaQueryIntent("Agendame las siguientes visitas para mañana. A las 10:00 en la calle Girasol, cliente Maria del Mar. A las 11:00, cliente Carlos") === null, "TEST 73: Instrucción de agendar visitas para mañana NO se confunde con listado de agenda");
 assert(detectBudgetListIntent("Que visitas tengo pendiente?") === null, "TEST 73: 'Que visitas tengo pendiente?' NO es interceptado como presupuestos");
 
 // 2. Materiales / compras no colisionan con presupuestos pendientes

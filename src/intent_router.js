@@ -509,7 +509,7 @@ export function detectIntent(text, context = {}) {
 
   // ── AGENDA SEMANAL ────────────────────────────────────────────────────────
   // "qué tengo esta semana", "visitas de esta semana", "próximas citas"
-  if (matches(n, [
+  if (!/\b(?:agend(?:ar|ame|á|anos|ale|a\b)|apunt(?:ar|ame|á|anos|ale|a\b)|anot(?:ar|ame|á|anos|ale|a\b)|guard(?:ar|ame|á|anos|ale|a\b)|program(?:ar|ame|á|anos|ale|a\b)|cancel(?:ar|a|ame)|anul(?:ar|a|ame)|borr(?:ar|a|ame)|elimin(?:ar|a|ame)|reagend(?:ar|a|ame)|pospon(?:er|ga)|mov(?:er|ed)|pas(?:ar|a|ame)|cambi(?:ar|a|ame))\b/i.test(n) && matches(n, [
     /(?:esta|la)\s+semana/,
     /proximas?\s+(?:citas|visitas)/,
     /semana\s+que\s+viene/,
