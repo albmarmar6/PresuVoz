@@ -872,7 +872,8 @@ export async function syncPendingSignaturesFromCloud(companyContextOrId = null) 
         if (!signInfo) {
           try {
             const compQuery = row.company_id ? `&companyId=${encodeURIComponent(row.company_id)}` : '';
-            const vUrl = `https://presuvoz.vercel.app/api/sign?check=${encodeURIComponent(cleanId)}${compQuery}`;
+            const baseUrl = (process.env.PUBLIC_BASE_URL || 'https://presuvoz.vercel.app').replace(/\/+$/, '');
+            const vUrl = `${baseUrl}/api/sign?check=${encodeURIComponent(cleanId)}${compQuery}`;
             const vRes = await fetch(vUrl, { signal: AbortSignal.timeout(3500) });
             if (vRes.ok) {
               const vData = await vRes.json();
