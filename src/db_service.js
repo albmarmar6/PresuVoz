@@ -124,10 +124,10 @@ export const DEFAULT_COMPANY = {
   city: null,
   workingHours: null,
   paymentTerms: null,
-  quoteValidityDays: 15,
+  quoteValidityDays: 30,
   entityType: 'autonomo',
   irpfRate: 0,
-  invoiceSeries: '2026-',
+  invoiceSeries: '2026-001',
   phone: null,
   email: null,
   iban: null,
@@ -172,7 +172,7 @@ function mapCompanyRow(row, fallbackPhone = '') {
     defaultAdvance: row.default_advance !== null && row.default_advance !== undefined ? row.default_advance : 30,
     onboardingStep: row.onboarding_step || null,
     onboardingDataJson: row.onboarding_data_json || null,
-    isConfigured: Boolean(row.name && row.cif && !row.onboarding_step)
+    isConfigured: Boolean(row.name && !row.onboarding_step && (row.cif || row.owner_name || row.trade))
   };
 }
 

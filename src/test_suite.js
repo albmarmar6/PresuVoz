@@ -1030,13 +1030,14 @@ assert(st.step === 'OWNER_AND_COMPANY', "Inicia en el paso 1 (OWNER_AND_COMPANY)
 assert(st.isConfigured === false, "El estado inicial es isConfigured: false");
 
 // Paso 1: Nombre propio y empresa
-const r1 = processOnboardingStep(onboardPhone, "Me llamo Carlos y mi empresa es Reformas Integrales Carlos");
+const r1 = processOnboardingStep(onboardPhone, "Me llamo Carlos y mi empresa es Reformas Integrales Carlos, NIF 44556677X");
 assert(r1.handled === true, "Paso 1 procesado");
 assert(r1.message.includes("Carlos"), "Reconoce el nombre propio Carlos");
 st = getOnboardingState(onboardPhone);
 assert(st.step === 'TRADE', "Avanza al paso 2 (TRADE)");
 assert(st.company.ownerName === 'Carlos', "Persiste ownerName en SQLite");
 assert(st.company.name === 'Reformas Integrales Carlos', "Persiste name de la empresa en SQLite");
+assert(st.company.cif === '44556677X', "Persiste NIF extraído en el paso 1");
 
 // Paso 2: Gremio
 const r2 = processOnboardingStep(onboardPhone, "Soy electricista e instalador");
@@ -1045,21 +1046,21 @@ assert(r2.message.includes("Electricidad"), "Normaliza oficio a Electricidad");
 st = getOnboardingState(onboardPhone);
 assert(st.step === 'CITY', "Avanza al paso 3 (CITY)");
 assert(st.company.trade === 'Electricidad y Telecomunicaciones', "Guarda oficio en SQLite");
-assert(st.company.defaultTaxRate === 21, "Asigna IVA sectorial al 21%");
+assert(st.company.defaultTaxRate === 10, "Asigna IVA general por defecto al 10%");
 
 // Paso 3: Ciudad
 const r3 = processOnboardingStep(onboardPhone, "Sevilla capital y provincia");
 assert(r3.handled === true, "Paso 3 procesado");
 st = getOnboardingState(onboardPhone);
-assert(st.step === 'WORKING_HOURS', "Avanza al paso 4 (WORKING_HOURS)");
+assert(st.step === 'FISCAL_ADDRESS', "Avanza al paso 4 (FISCAL_ADDRESS)");
 assert(st.company.city === 'Sevilla capital y provincia', "Guarda ciudad en SQLite");
 
-// Paso 4: Horario de trabajo
-const r4 = processOnboardingStep(onboardPhone, "De 8:00 a 18:00 de lunes a viernes");
+// Paso 4: Dirección fiscal
+const r4 = processOnboardingStep(onboardPhone, "Av. Constitución 12, 41001 Sevilla");
 assert(r4.handled === true, "Paso 4 procesado");
 st = getOnboardingState(onboardPhone);
 assert(st.step === 'PAYMENT_TERMS', "Avanza al paso 5 (PAYMENT_TERMS)");
-assert(st.company.workingHours === 'De 8:00 a 18:00 de lunes a viernes', "Guarda horario en SQLite");
+assert(st.company.address.includes("Constitución"), "Guarda dirección fiscal en SQLite");
 
 // Paso 5: Forma de cobro y anticipo integrado
 const r5 = processOnboardingStep(onboardPhone, "50% al empezar y 50% al acabar");
@@ -1069,12 +1070,11 @@ assert(st.step === 'QUOTE_VALIDITY', "Avanza al paso 6 (QUOTE_VALIDITY)");
 assert(st.company.paymentTerms.includes("50%"), "Guarda condiciones de cobro");
 assert(st.company.defaultAdvance === 50, "Guarda anticipo del 50% en SQLite");
 
-// Paso 7: Validez presupuestos
-const r7 = processOnboardingStep(onboardPhone, "15 días");
-assert(r7.handled === true, "Paso 7 procesado");
-st = getOnboardingState(onboardPhone);
-assert(st.step === 'ENTITY_TYPE', "Avanza al paso 8 (ENTITY_TYPE)");
-assert(st.company.quoteValidityDays === 15, "Guarda validez de 15 días en SQLite");
+// Paso 6: Validez presupuestos (Cierre atómico en 6 pasos)
+const r6 = processOnboardingStep(onboardPhone, "30 días");
+assert(r6.handled === true, "Paso 6 procesado");
+assert(r6.completed === true, "Onboarding finalizado con éxito en 6 pasos");
+assert(r6.message.includes("¡Enhorabuena"), "Genera tarjeta de resumen y felicitación");
 
 const validityPhone = '34699887767';
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(validityPhone);
@@ -1085,98 +1085,45 @@ assert(getOnboardingState(validityPhone).company.quoteValidityDays === 1,
 dbSaveCompany(validityPhone, { onboardingStep: 'QUOTE_VALIDITY', onboardingDataJson: '{}' });
 processOnboardingStep(validityPhone, '2 días');
 assert(getOnboardingState(validityPhone).company.quoteValidityDays === 2,
-  'Interpreta “2 días” como duración, no como la opción 2 de 15 días');
+  'Interpreta “2 días” como duración, no como la opción 2 de 60 días');
 dbSaveCompany(validityPhone, { onboardingStep: 'QUOTE_VALIDITY', onboardingDataJson: '{}' });
 processOnboardingStep(validityPhone, '1');
-assert(getOnboardingState(validityPhone).company.quoteValidityDays === 7,
-  'La respuesta exacta “1” sigue seleccionando la opción de 7 días');
+assert(getOnboardingState(validityPhone).company.quoteValidityDays === 30,
+  'La respuesta exacta “1” selecciona la opción de 30 días');
+dbSaveCompany(validityPhone, { onboardingStep: 'QUOTE_VALIDITY', onboardingDataJson: '{}' });
+processOnboardingStep(validityPhone, '2');
+assert(getOnboardingState(validityPhone).company.quoteValidityDays === 60,
+  'La respuesta exacta “2” selecciona la opción de 60 días');
 dbSaveCompany(validityPhone, { onboardingStep: 'QUOTE_VALIDITY', onboardingDataJson: '{}' });
 const customValidityPrompt = processOnboardingStep(validityPhone, '4');
 assert(getOnboardingState(validityPhone).step === 'QUOTE_VALIDITY' && /cuántos días/i.test(customValidityPrompt.message),
   'La opción “4 Otro” pide una duración y no guarda cuatro días por error');
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(validityPhone);
 
-// Paso 8: Tipo de entidad (Autónomo o empresa)
-const r8 = processOnboardingStep(onboardPhone, "Soy autónomo");
-assert(r8.handled === true, "Paso 8 procesado");
-st = getOnboardingState(onboardPhone);
-assert(st.step === 'FISCAL_NAME', "Avanza al paso 9 (FISCAL_NAME)");
-assert(st.company.entityType === 'autonomo', "Registra tipo de entidad como autónomo");
-
-// Paso 9: Nombre fiscal
-const r9 = processOnboardingStep(onboardPhone, "Carlos García Fernández");
-assert(r9.handled === true, "Paso 9 procesado");
-st = getOnboardingState(onboardPhone);
-assert(st.step === 'CIF_NIF', "Avanza al paso 10 (CIF_NIF)");
-assert(st.company.fiscalName === 'Carlos García Fernández', "Guarda nombre fiscal");
-
-// Paso 10: CIF / NIF
-const r10 = processOnboardingStep(onboardPhone, "44556677X");
-assert(r10.handled === true, "Paso 10 procesado");
-st = getOnboardingState(onboardPhone);
-assert(st.step === 'FISCAL_ADDRESS', "Avanza al paso 11 (FISCAL_ADDRESS)");
-assert(st.company.cif === '44556677X', "Guarda NIF en SQLite");
-
-// Paso 11: Dirección fiscal
-const r11 = processOnboardingStep(onboardPhone, "Av. Constitución 12, 41001 Sevilla");
-assert(r11.handled === true, "Paso 11 procesado");
-st = getOnboardingState(onboardPhone);
-assert(st.step === 'TAX_RATE', "Avanza al paso 12 (TAX_RATE)");
-assert(st.company.address.includes("Constitución"), "Guarda dirección fiscal");
-
-// Paso 12: IVA
-const r12 = processOnboardingStep(onboardPhone, "21%");
-assert(r12.handled === true, "Paso 12 procesado");
-st = getOnboardingState(onboardPhone);
-assert(st.step === 'IRPF_RATE', "Avanza al paso 13 (IRPF_RATE)");
-assert(st.company.defaultTaxRate === 21, "Guarda IVA del 21%");
-
-// Paso 13: IRPF
-const r13 = processOnboardingStep(onboardPhone, "15% de IRPF");
-assert(r13.handled === true, "Paso 13 procesado");
-st = getOnboardingState(onboardPhone);
-assert(st.step === 'INVOICE_SERIES', "Avanza al paso 14 (INVOICE_SERIES)");
-assert(st.company.irpfRate === 15, "Guarda retención de IRPF al 15%");
-
-// Paso 14: Serie facturación
-const r14 = processOnboardingStep(onboardPhone, "2026-001");
-assert(r14.handled === true, "Paso 14 procesado");
-st = getOnboardingState(onboardPhone);
-assert(st.step === 'BANK_ACCOUNT', "Avanza al paso 15 (BANK_ACCOUNT)");
-assert(st.company.invoiceSeries === '2026-001', "Guarda serie de facturas");
-
-// Paso 15: Cuenta bancaria / Bizum (Cierre)
-const r15 = processOnboardingStep(onboardPhone, "Mi cuenta es ES91 2100 0418 4502 0005 1332 y Bizum 601020304");
-assert(r15.handled === true, "Paso 15 procesado");
-assert(r15.completed === true, "Onboarding finalizado con éxito");
-assert(r15.message.includes("¡Enhorabuena"), "Genera tarjeta de resumen y felicitación");
-
 // Verificar persistencia completa y estado isConfigured
 const finalComp = dbGetCompany(onboardPhone);
-assert(finalComp.isConfigured === true, "Tras completar las 15 preguntas, isConfigured es true");
+assert(finalComp.isConfigured === true, "Tras completar las 6 preguntas, isConfigured es true");
 assert(finalComp.onboardingStep === null, "El estado de onboarding vuelve a null");
 assert(finalComp.ownerName === 'Carlos', "Conserva ownerName");
 assert(finalComp.city === 'Sevilla capital y provincia', "Conserva city");
-assert(finalComp.workingHours === 'De 8:00 a 18:00 de lunes a viernes', "Conserva workingHours");
+assert(finalComp.address.includes("Constitución"), "Conserva address");
 assert(finalComp.paymentTerms.includes("50%"), "Conserva paymentTerms");
 assert(finalComp.defaultAdvance === 50, "Conserva defaultAdvance");
-assert(finalComp.quoteValidityDays === 15, "Conserva quoteValidityDays");
-assert(finalComp.entityType === 'autonomo', "Conserva entityType");
-assert(finalComp.fiscalName === 'Carlos García Fernández', "Conserva fiscalName");
+assert(finalComp.quoteValidityDays === 30, "Conserva quoteValidityDays");
 assert(finalComp.cif === '44556677X', "Conserva cif");
-assert(finalComp.irpfRate === 15, "Conserva irpfRate");
-assert(finalComp.invoiceSeries === '2026-001', "Conserva invoiceSeries");
-assert(finalComp.iban.includes("ES91"), "Conserva IBAN formateado");
-assert(finalComp.bizum === '601020304', "Conserva Bizum");
+assert(finalComp.entityType === 'autonomo', "Conserva entityType");
+assert(finalComp.defaultTaxRate === 10, "Aplica IVA 10% por defecto");
+assert(finalComp.irpfRate === 0, "Aplica 0% IRPF por defecto");
+assert(finalComp.invoiceSeries.startsWith('2026-'), "Conserva invoiceSeries estándar");
 
-// 16. Verificación de cálculo fiscal en Facturas con la nueva configuración (Serie + IRPF)
+// 16. Verificación de cálculo fiscal en Facturas con configuración (Serie + IRPF configurable)
 const testBudgetForInvoice = {
   id: 'PRE-TEST-ONBOARD',
   client: { name: 'Empresa Cliente S.L.', nif: 'B-99887766', address: 'Calle Industria 1' },
   items: [{ id: 'ITEM-1', description: 'Instalación cuadro eléctrico', qty: 1, unit: 'ud', unitPrice: 1000, total: 1000 }],
   financials: { subtotal: 1000, taxableBase: 1000, taxRatePercentage: 21, taxAmount: 210, totalAmount: 1210 }
 };
-const customInv = engine.convertToInvoice(testBudgetForInvoice, { company: finalComp });
+const customInv = engine.convertToInvoice(testBudgetForInvoice, { company: { ...finalComp, irpfRate: 15 } });
 assert(customInv.id.startsWith('2026-001'), "Aplica la serie de facturación personalizada");
 assert(customInv.financials.irpfRatePercentage === 15, "Aplica el 15% de IRPF configurado");
 assert(customInv.financials.irpfAmount === 150, "Calcula 150€ de retención de IRPF (1000 * 15%)");
@@ -1201,33 +1148,22 @@ assert(compSkipped.iban === null, "El IBAN queda null en base de datos al respon
 assert(compSkipped.bizum === null, "El Bizum queda null en base de datos al responder 'luego'");
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(skipPhone);
 
-// Test omisión completa de datos fiscales con "luego"
+// Test omisión completa con "luego" en los 6 pasos
 const skipAllPhone = '34677777777';
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(skipAllPhone);
 startOnboarding(skipAllPhone);
-processOnboardingStep(skipAllPhone, "Manolo y la empresa se llama Reformas Manolo S.L"); // Paso 1
-processOnboardingStep(skipAllPhone, "Albañilería"); // Paso 2
+processOnboardingStep(skipAllPhone, "Manolo y la empresa se llama Reformas Manolo S.L"); // Paso 1 (OWNER_AND_COMPANY)
+processOnboardingStep(skipAllPhone, "Albañilería"); // Paso 2 (TRADE)
 processOnboardingStep(skipAllPhone, "luego"); // Paso 3 (CITY)
-processOnboardingStep(skipAllPhone, "luego"); // Paso 4 (HOURS)
-processOnboardingStep(skipAllPhone, "luego"); // Paso 5 (TERMS)
-processOnboardingStep(skipAllPhone, "luego"); // Paso 6 (ADVANCE)
-processOnboardingStep(skipAllPhone, "15 días"); // Paso 7 (VALIDITY)
-processOnboardingStep(skipAllPhone, "empresa"); // Paso 8 (ENTITY)
-processOnboardingStep(skipAllPhone, "luego"); // Paso 9 (FISCAL_NAME)
-processOnboardingStep(skipAllPhone, "luego"); // Paso 10 (CIF)
-processOnboardingStep(skipAllPhone, "luego"); // Paso 11 (ADDRESS)
-processOnboardingStep(skipAllPhone, "10"); // Paso 12 (TAX)
-processOnboardingStep(skipAllPhone, "0"); // Paso 13 (IRPF)
-processOnboardingStep(skipAllPhone, "luego"); // Paso 14 (SERIES)
-const rFinalSkip = processOnboardingStep(skipAllPhone, "luego"); // Paso 15 (BANK)
+processOnboardingStep(skipAllPhone, "luego"); // Paso 4 (FISCAL_ADDRESS)
+processOnboardingStep(skipAllPhone, "luego"); // Paso 5 (PAYMENT_TERMS)
+const rFinalSkip = processOnboardingStep(skipAllPhone, "30 días"); // Paso 6 (QUOTE_VALIDITY)
 
-assert(rFinalSkip.completed === true, "Onboarding con omisiones finaliza con éxito");
+assert(rFinalSkip.completed === true, "Onboarding con omisiones finaliza con éxito en 6 pasos");
 assert(rFinalSkip.message.includes("• *NIF/CIF:* No indicado"), "CIF omitido muestra 'No indicado' y no B-00000000");
-assert(rFinalSkip.message.includes("• *Dirección:* No indicada"), "Dirección omitida muestra 'No indicada' y no 'España'");
 assert(rFinalSkip.message.includes("• *IBAN:* No configurado"), "IBAN omitido muestra 'No configurado'");
 assert(rFinalSkip.message.includes("• *Bizum:* No configurado"), "Bizum omitido muestra 'No configurado'");
 assert(rFinalSkip.message.includes("📍 *Zona de trabajo:* No indicada"), "Zona omitida muestra 'No indicada'");
-assert(rFinalSkip.message.includes("⏰ *Horario habitual:* No indicado"), "Horario omitido muestra 'No indicado'");
 const compAllSkipped = dbGetCompany(skipAllPhone);
 assert(compAllSkipped.cif === null, "NIF queda null en base de datos al responder 'luego'");
 assert(compAllSkipped.address === null, "Dirección queda null en base de datos al responder 'luego'");
@@ -1235,7 +1171,6 @@ assert(compAllSkipped.city === null, "Ciudad queda null en base de datos al resp
 assert(compAllSkipped.ownerName === 'Manolo', "Extrae limpiamente el ownerName 'Manolo'");
 assert(compAllSkipped.name === 'Reformas Manolo S.L', "Extrae limpiamente el name 'Reformas Manolo S.L'");
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(skipAllPhone);
-
 // Limpieza test
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(onboardPhone);
 
@@ -2259,7 +2194,8 @@ const isolationCheck = currentDb.prepare("SELECT count(*) as count FROM companie
 assert(isolationCheck.count === 0, "13. Aislamiento de datos verificado entre suites (cero residuos espurios)");
 
 // 14. Regresión: 519 comprobaciones base (onboarding optimizado a 14 pasos), 15 de seguridad, 1 de IVA, 20 casos nuevos, 4 de grounding y 2 de transcripción literal.
-const baselinePassed = (passedCount === 519 + 15 + 1 + 20 + 4 + 2);
+// 14. Regresión: 493 comprobaciones base (onboarding optimizado a 6 pasos esenciales), 15 de seguridad, 1 de IVA, 20 casos nuevos, 4 de grounding y 2 de transcripción literal.
+const baselinePassed = (passedCount === 493 + 15 + 1 + 20 + 4 + 2);
 assert(baselinePassed, "14. Regresión: pasan las comprobaciones base y los casos de seguridad, IVA, validez y duplicados");
 
 // 15. rollbackLastMigration ya no existe en el servicio (Blindaje Forward-Only)

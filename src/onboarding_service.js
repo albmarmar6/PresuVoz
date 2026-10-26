@@ -6,17 +6,9 @@ export const ONBOARDING_STEPS = [
   'OWNER_AND_COMPANY',
   'TRADE',
   'CITY',
-  'WORKING_HOURS',
-  'PAYMENT_TERMS',
-  'QUOTE_VALIDITY',
-  'ENTITY_TYPE',
-  'FISCAL_NAME',
-  'CIF_NIF',
   'FISCAL_ADDRESS',
-  'TAX_RATE',
-  'IRPF_RATE',
-  'INVOICE_SERIES',
-  'BANK_ACCOUNT'
+  'PAYMENT_TERMS',
+  'QUOTE_VALIDITY'
 ];
 
 export function getStepQuestion(step, data = {}) {
@@ -25,13 +17,13 @@ export function getStepQuestion(step, data = {}) {
       return [
         '👉 *¿Cómo te llamas y cómo se llama tu empresa o negocio?*',
         '',
-        '_(Por ejemplo: «Me llamo Carlos y mi empresa es Reformas Carlos» o «Alberto, Instalaciones Sur»)_'
+        '_(Por ejemplo: «Me llamo Carlos y mi empresa es Reformas Carlos» o «Alberto, Instalaciones Sur». Si quieres puedes añadir también tu NIF/CIF o dejarlo para luego)_'
       ].join('\n');
     case 'TRADE':
       return [
         '👉 *¿A qué oficio o gremio te dedicas principalmente?*',
         '',
-        '_(Por ejemplo: Electricidad, fontanería, albañilería, reformas integrales, carpintería, pintura, climatización...)_'
+        '_(Por ejemplo: Albañilería, fontanería, electricidad, reformas integrales, pintura, carpintería, climatización...)_'
       ].join('\n');
     case 'CITY':
       return [
@@ -39,34 +31,40 @@ export function getStepQuestion(step, data = {}) {
         '',
         '_(Por ejemplo: Sevilla y alrededores, Madrid capital, Valencia y provincia...)_'
       ].join('\n');
-    case 'WORKING_HOURS':
+    case 'FISCAL_ADDRESS':
       return [
-        '👉 *¿Cuál es tu horario habitual de trabajo o atención?*',
+        '👉 *¿Cuál es tu dirección fiscal completa para que aparezca en tus facturas y presupuestos?*',
         '',
-        '_(Por ejemplo: De lunes a viernes de 8:00 a 18:00, o de 7:30 a 15:30... O pon «luego» si prefieres)_'
+        '_(Calle, número, código postal y localidad. O pon «luego» si prefieres añadirla más tarde)_'
       ].join('\n');
     case 'PAYMENT_TERMS':
       return [
         '👉 *¿Cómo sueles cobrar habitualmente a tus clientes?*',
-        '1️⃣ Al terminar',
-        '2️⃣ Por adelantado',
-        '3️⃣ 50% al empezar y 50% al acabar',
+        '1️⃣ 30% anticipo al inicio y resto al acabar (Recomendado)',
+        '2️⃣ 50% al empezar y 50% al acabar',
+        '3️⃣ 100% al terminar',
         '4️⃣ Por hitos o fases de obra',
-        '5️⃣ O dime tu porcentaje habitual (ej: «20% de anticipo», «30% al inicio y resto al acabar»... o pon «luego»)'
+        '5️⃣ O dime tu forma personalizada (ej: «20% de anticipo», «40/60»... o pon «luego»)'
+      ].join('\n');
+    case 'QUOTE_VALIDITY':
+      return [
+        '👉 *¿Cuánto tiempo suelen ser válidos tus presupuestos antes de que caduquen?*',
+        '1️⃣ 30 días (1 mes)',
+        '2️⃣ 60 días (2 meses)',
+        '3️⃣ 90 días (3 meses)',
+        '4️⃣ Otro plazo (indícame los días que quieras, ej: «15 días», «45 días», «180 días»)'
+      ].join('\n');
+    case 'WORKING_HOURS':
+      return [
+        '👉 *¿Cuál es tu horario habitual de trabajo o atención?*',
+        '',
+        '_(Por ejemplo: De lunes a viernes de 8:00 a 18:00... O pon «luego» si prefieres)_'
       ].join('\n');
     case 'ADVANCE':
       return [
         '👉 *¿Sueles pedir algún anticipo al confirmar la obra o para compra de materiales? ¿De qué porcentaje suele ser?*',
         '',
         '_(Por ejemplo: 30%, 40%, 50%, o escribe «ninguno» o «luego»)_'
-      ].join('\n');
-    case 'QUOTE_VALIDITY':
-      return [
-        '👉 *¿Cuánto tiempo suelen ser válidos tus presupuestos antes de que caduquen?*',
-        '1️⃣ 7 días',
-        '2️⃣ 15 días',
-        '3️⃣ 30 días',
-        '4️⃣ Otro (indícame los días que quieras)'
       ].join('\n');
     case 'ENTITY_TYPE':
       return '👉 *¿Eres autónomo o tienes una empresa (S.L., C.B., Sociedad Civil...)?*';
@@ -80,19 +78,13 @@ export function getStepQuestion(step, data = {}) {
       return [
         '👉 *¿Cuál es tu NIF o CIF?*',
         '',
-        '_(DNI/NIE con letra si eres autónomo, o CIF empezando por letra si es empresa, ej: 12345678Z o B-12345678. O escribe «luego» si prefieres)_'
-      ].join('\n');
-    case 'FISCAL_ADDRESS':
-      return [
-        '👉 *¿Cuál es tu dirección fiscal completa?*',
-        '',
-        '_(Calle, número, código postal y localidad. O pon «luego» si prefieres)_'
+        '_(DNI/NIE con letra si eres autónomo, o CIF empezando por letra si es empresa. O escribe «luego» si prefieres)_'
       ].join('\n');
     case 'TAX_RATE':
       return [
         '👉 *¿Qué porcentaje de IVA sueles aplicar habitualmente en tus presupuestos?*',
-        '1️⃣ 21% (General)',
-        '2️⃣ 10% (Reducido de reformas)',
+        '1️⃣ 10% (Reducido de reformas)',
+        '2️⃣ 21% (General)',
         '3️⃣ Exento (0%)',
         '4️⃣ Otro'
       ].join('\n');
@@ -106,7 +98,7 @@ export function getStepQuestion(step, data = {}) {
       return [
         '👉 *¿Qué numeración o serie quieres utilizar para tus facturas?*',
         '',
-        '_(Por ejemplo: 2026-001, 2026-002... o F26-001, FRA-001... Si no pones nada usaremos «2026-001»)_'
+        '_(Por ejemplo: 2026-001... Si no pones nada usaremos «2026-001»)_'
       ].join('\n');
     case 'BANK_ACCOUNT':
       return [
@@ -146,7 +138,7 @@ export function startOnboarding(phone) {
     'Para empezar con lo básico:',
     '👉 *¿Cómo te llamas y cómo se llama tu empresa o negocio?*',
     '',
-    '_(Por ejemplo: «Me llamo Carlos y mi empresa es Reformas Carlos» o «Alberto, Instalaciones Sur»)_'
+    '_(Por ejemplo: «Me llamo Carlos y mi empresa es Reformas Carlos» o «Alberto, Instalaciones Sur». Si quieres puedes añadir también tu NIF/CIF o dejarlo para luego)_'
   ].join('\n');
 }
 
@@ -192,19 +184,18 @@ export function formatCompanySummary(comp) {
     `🏢 *Empresa / Negocio:* ${comp.name || 'No indicado'}`,
     `🛠️ *Oficio / Especialidad:* ${comp.trade || 'No indicado'}`,
     `📍 *Zona de trabajo:* ${comp.city || 'No indicada'}`,
-    `⏰ *Horario habitual:* ${comp.workingHours || 'No indicado'}`,
+    `🏠 *Dirección fiscal:* ${comp.address || 'Pendiente (puedes añadirla diciendo «Mi dirección es...»)'}`,
     `💶 *Forma de cobro:* ${comp.paymentTerms || 'No especificada'}`,
     `🤝 *Anticipo habitual:* ${comp.defaultAdvance !== null && comp.defaultAdvance !== undefined ? comp.defaultAdvance + '%' : 'No configurado'}`,
-    `⏳ *Validez de presupuestos:* ${comp.quoteValidityDays ? comp.quoteValidityDays + ' días' : 'No indicada'}`,
+    `⏳ *Validez de presupuestos:* ${comp.quoteValidityDays ? comp.quoteValidityDays + ' días' : '30 días'}`,
     '━━━━━━━━━━━━━━━━━━━━━━━━━',
     '📑 *Datos Fiscales para Facturas y Presupuestos:*',
-    `• *Tipo:* ${comp.entityType === 'empresa' ? 'Empresa / Sociedad' : (comp.entityType === 'autonomo' ? 'Autónomo' : 'No indicado')}`,
+    `• *Tipo:* ${comp.entityType === 'empresa' ? 'Empresa / Sociedad' : 'Autónomo'}`,
     `• *Razón Social:* ${comp.fiscalName || comp.name || 'No indicada'}`,
     `• *NIF/CIF:* ${comp.cif || 'No indicado'}`,
-    `• *Dirección:* ${comp.address || 'No indicada'}`,
-    `• *IVA por defecto:* ${comp.defaultTaxRate !== null && comp.defaultTaxRate !== undefined ? comp.defaultTaxRate + '%' : 'No indicado'}`,
+    `• *IVA por defecto:* ${comp.defaultTaxRate !== null && comp.defaultTaxRate !== undefined ? comp.defaultTaxRate + '%' : '10%'}`,
     `• *IRPF:* ${comp.irpfRate ? comp.irpfRate + '%' : '0% (No aplica / Sin retención)'}`,
-    `• *Serie facturas:* ${comp.invoiceSeries || 'No configurada'}`,
+    `• *Serie facturas:* ${comp.invoiceSeries || '2026-001'}`,
     `• *IBAN:* ${comp.iban ? comp.iban : 'No configurado'}`,
     `• *Bizum:* ${comp.bizum ? comp.bizum : 'No configurado'}`,
     '━━━━━━━━━━━━━━━━━━━━━━━━━',
@@ -231,8 +222,28 @@ export function cleanPersonName(str) {
 }
 
 export function extractOwnerAndCompany(input) {
-  if (!input || typeof input !== 'string') return { owner: '', company: '' };
-  const raw = input.trim();
+  if (!input || typeof input !== 'string') return { owner: '', company: '', cif: null, entityType: 'autonomo' };
+  let raw = input.trim();
+
+  let cif = null;
+  let entityType = 'autonomo';
+
+  // Extraer CIF/NIF si el usuario lo incluye directamente (ej: "NIF 12345678Z" o "B12345678")
+  const cifMatch = raw.match(/\b([ABCDEFGHJKLMNPQRSUVW][0-9]{7}[0-9A-J]|[0-9]{8}[TRWAGMYFPDXBNJZSQVHLCKE]|[XYZ][0-9]{7}[TRWAGMYFPDXBNJZSQVHLCKE])\b/i);
+  if (cifMatch) {
+    cif = cifMatch[1].toUpperCase();
+    if (/^[ABCDEFGHJKLMNPQRSUVW]/i.test(cif)) {
+      entityType = 'empresa';
+    } else {
+      entityType = 'autonomo';
+    }
+    raw = raw.replace(new RegExp('(?:,\\s*)?(?:con\\s+)?(?:nif|cif|dni)?[\\s:]*' + cifMatch[1] + '\\b', 'gi'), '').trim();
+    raw = raw.replace(/[,\s]+$/, '').trim();
+  }
+
+  if (/\b(?:s\.?l\.?|s\.?a\.?|s\.?l\.?u\.?|sociedad|c\.?b\.?|cooperativa)\b/i.test(raw)) {
+    entityType = 'empresa';
+  }
 
   // Patrón conector para empresa/negocio
   const companyPattern = /(?:mi\s+negocio\s+se\s+llama|mi\s+empresa\s+se\s+llama|el\s+negocio\s+se\s+llama|la\s+empresa\s+se\s+llama|tengo\s+un(?:a)?\s+(?:empresa|negocio)\s+que\s+se\s+llama|mi\s+empresa\s+es|mi\s+negocio\s+es|la\s+empresa\s+es|el\s+negocio\s+es|nombre\s+del\s+negocio\s*:?|nombre\s+de\s+la\s+empresa\s*:?|se\s+llama|empresa\s*:?|negocio\s*:?)/i;
@@ -242,7 +253,7 @@ export function extractOwnerAndCompany(input) {
   if (splitMatch) {
     const owner = cleanPersonName(splitMatch[1]);
     const company = cleanBusinessName(splitMatch[2]);
-    return { owner: owner || company, company };
+    return { owner: owner || company, company, cif, entityType };
   }
 
   // 2. Caso: Empresa antes de la persona (invertido: 'Mi empresa se llama Reformas García y soy Antonio García')
@@ -250,14 +261,14 @@ export function extractOwnerAndCompany(input) {
   if (invertedMatch) {
     const company = cleanBusinessName(invertedMatch[1]);
     const owner = cleanPersonName(invertedMatch[2]);
-    return { owner: owner || company, company };
+    return { owner: owner || company, company, cif, entityType };
   }
 
   // 3. Caso: Solo empresa con prefijo explícito (ej: 'Mi negocio se llama Reformas García', 'Se llama Reformas García')
   const directCompanyMatch = raw.match(new RegExp('^' + companyPattern.source + '\\s+(.+)$', 'i'));
   if (directCompanyMatch) {
     const company = cleanBusinessName(directCompanyMatch[1]);
-    return { owner: company, company };
+    return { owner: company, company, cif, entityType };
   }
 
   // 4. Caso: Formato con coma 'Nombre, Empresa' (ej: 'Alberto, Instalaciones Sur')
@@ -266,7 +277,7 @@ export function extractOwnerAndCompany(input) {
     const owner = cleanPersonName(parts[0]);
     const company = cleanBusinessName(parts.slice(1).join(','));
     if (owner && company) {
-      return { owner, company };
+      return { owner, company, cif, entityType };
     }
   }
 
@@ -274,12 +285,14 @@ export function extractOwnerAndCompany(input) {
   const cleaned = cleanPersonName(raw);
   const isTradeName = /\b(?:reformas?|instalaciones|pinturas?|construcciones|servicios|fontaner[ií]a|electricidad|clima|multiservicios|obras?|talleres?)\b/i.test(cleaned);
   if (isTradeName) {
-    return { owner: cleaned, company: cleaned };
+    return { owner: cleaned, company: cleaned, cif, entityType };
   }
 
   return {
     owner: cleaned,
-    company: cleaned.includes(' ') ? cleaned : `${cleaned} Reformas`
+    company: cleaned.includes(' ') ? cleaned : cleaned + ' Reformas',
+    cif,
+    entityType
   };
 }
 
@@ -337,15 +350,20 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
   switch (currentStep) {
     // 1. Nombre propio y nombre de la empresa
     case 'OWNER_AND_COMPANY': {
-      const { owner, company } = extractOwnerAndCompany(input);
+      const { owner, company, cif, entityType } = extractOwnerAndCompany(input);
 
       data.ownerName = owner;
       data.companyName = company;
+      data.fiscalName = company || owner;
+      if (cif) data.cif = cif;
+      data.entityType = entityType;
 
       saveCompany(phone, {
         ownerName: owner,
         name: company,
-        fiscalName: company,
+        fiscalName: company || owner,
+        cif: cif || null,
+        entityType,
         onboardingStep: 'TRADE',
         onboardingDataJson: JSON.stringify(data)
       });
@@ -358,14 +376,15 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
           'Cuéntame:',
           '👉 *¿A qué oficio o gremio te dedicas principalmente?*',
           '',
-          '_(Por ejemplo: Electricidad, fontanería, albañilería, reformas integrales, carpintería, pintura, climatización...)_'
+          '_(Por ejemplo: Albañilería, fontanería, electricidad, reformas integrales, pintura, carpintería, climatización...)_'
         ].join('\n')
       };
     }
 
     // 2. Oficio o gremio
     case 'TRADE': {
-      const { trade, defaultTax } = normalizeTrade(input);
+      const { trade } = normalizeTrade(input);
+      const defaultTax = 10;
       data.trade = trade;
       data.defaultTaxRate = defaultTax;
 
@@ -380,7 +399,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         handled: true,
         message: [
           `¡Oído cocina! *${trade}* a tope 🛠️`,
-          `_(He configurado automáticamente el IVA habitual para este gremio al ${defaultTax}%, que podrás cambiar cuando quieras)._`,
+          `_(He configurado automáticamente el IVA habitual al 10%, que podrás cambiar o especificar en cualquier presupuesto)._`,
           '',
           'Siguiente pregunta:',
           '👉 *¿Por qué ciudad o zona sueles moverte habitualmente para los trabajos y obras?*',
@@ -397,7 +416,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
 
       saveCompany(phone, {
         city,
-        onboardingStep: 'WORKING_HOURS',
+        onboardingStep: 'FISCAL_ADDRESS',
         onboardingDataJson: JSON.stringify(data)
       });
 
@@ -406,20 +425,20 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         message: [
           city ? `¡Perfecto! Buena zona para currar 📍` : `¡De acuerdo! Dejamos la zona de trabajo pendiente de indicar 📍`,
           '',
-          '👉 *¿Cuál es tu horario habitual de trabajo o atención?*',
+          '👉 *¿Cuál es tu dirección fiscal completa para que aparezca en tus facturas y presupuestos?*',
           '',
-          '_(Por ejemplo: De lunes a viernes de 8:00 a 18:00, o de 7:30 a 15:30... O pon «luego» si prefieres)_'
+          '_(Calle, número, código postal y localidad. O pon «luego» si prefieres añadirla más tarde)_'
         ].join('\n')
       };
     }
 
-    // 4. Horario habitual
-    case 'WORKING_HOURS': {
-      const hours = isSkip ? null : input;
-      data.workingHours = hours;
+    // 4. Dirección fiscal
+    case 'FISCAL_ADDRESS': {
+      const address = isSkip ? null : input;
+      data.address = address;
 
       saveCompany(phone, {
-        workingHours: hours,
+        address,
         onboardingStep: 'PAYMENT_TERMS',
         onboardingDataJson: JSON.stringify(data)
       });
@@ -427,15 +446,15 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          hours ? '¡Anotado! El descanso también es sagrado ⏱️' : '¡Sin problema! Añadiremos el horario más adelante ⏱️',
+          address ? `¡Dirección registrada correctamente! 🏠` : `¡Sin problema! Añadiremos la dirección fiscal más adelante 🏠`,
           '',
           'Una pregunta clave para que tus presupuestos salgan con las condiciones perfectas:',
           '👉 *¿Cómo sueles cobrar habitualmente a tus clientes?*',
-          '1️⃣ Al terminar',
-          '2️⃣ Por adelantado',
-          '3️⃣ 50% al empezar y 50% al acabar',
+          '1️⃣ 30% anticipo al inicio y resto al acabar (Recomendado)',
+          '2️⃣ 50% al empezar y 50% al acabar',
+          '3️⃣ 100% al terminar',
           '4️⃣ Por hitos o fases de obra',
-          '5️⃣ Otro (escríbeme cómo lo haces tú o pon «luego»)'
+          '5️⃣ O dime tu forma personalizada (ej: «20% de anticipo», «40/60»... o pon «luego»)'
         ].join('\n')
       };
     }
@@ -450,16 +469,16 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         const advanceWordMatch = input.match(/\b(veinte|veinticinco|treinta|cuarenta|cincuenta)\b/i);
         const wordMap = { "veinte": 20, "veinticinco": 25, "treinta": 30, "cuarenta": 40, "cincuenta": 50 };
 
-        if (/^1\b|terminar|finalizar|acabar/i.test(input) && !/50|\d+%/i.test(input)) {
-          terms = '100% al terminar el trabajo';
-          advance = 0;
-        } else if (/^2\b|adelantad|anticipad/i.test(input) && !/\d+%/i.test(input)) {
-          terms = '100% por adelantado';
-          advance = 100;
-        } else if (/^3\b|mitad/i.test(input) || (input.includes('50') && /empezar|acabar|inicio|final/i.test(input))) {
+        if (/^(?:1|opci[oó]n\s*1)$/i.test(input) || (/30/i.test(input) && /inicio|empezar|adelant|se[ñn]al/i.test(input))) {
+          terms = '30% de anticipo y 70% al terminar';
+          advance = 30;
+        } else if (/^(?:2|opci[oó]n\s*2)$/i.test(input) || /mitad/i.test(input) || (input.includes('50') && /empezar|acabar|inicio|final/i.test(input))) {
           terms = '50% al empezar y 50% al acabar';
           advance = 50;
-        } else if (/^4\b|hito|certifica/i.test(input) && !/\d+%/i.test(input)) {
+        } else if (/^(?:3|opci[oó]n\s*3)$/i.test(input) || (/terminar|finalizar|acabar/i.test(input) && !/50|30|\d+%/i.test(input))) {
+          terms = '100% al terminar el trabajo';
+          advance = 0;
+        } else if (/^(?:4|opci[oó]n\s*4)$/i.test(input) || (/hito|certifica/i.test(input) && !/\d+%/i.test(input))) {
           terms = 'Por hitos y certificaciones según avance de obra';
           advance = 0;
         } else if (pctMatch) {
@@ -468,7 +487,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         } else if (advanceWordMatch && wordMap[advanceWordMatch[1].toLowerCase()]) {
           advance = wordMap[advanceWordMatch[1].toLowerCase()];
           terms = `${advance}% al empezar y ${100 - advance}% al finalizar`;
-        } else if (pureNum && Number(pureNum[1]) > 0 && Number(pureNum[1]) <= 100 && /anticipo|adelanto|empezar|inicio/i.test(input)) {
+        } else if (pureNum && Number(pureNum[1]) > 0 && Number(pureNum[1]) <= 100 && /anticipo|adelanto|empezar|inicio|se[ñn]al/i.test(input)) {
           advance = parseInt(pureNum[1], 10);
           terms = `${advance}% al empezar y ${100 - advance}% al finalizar`;
         } else if (input.length > 2) {
@@ -493,17 +512,112 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         message: [
           terms ? `¡Fenomenal! Condiciones de cobro guardadas: *${terms}*${advanceMsg} 💶🤝` : `¡De acuerdo! Dejamos las condiciones de cobro para más adelante 💶`,
           '',
-          'Con cómo cambian los precios de los materiales hoy en día:',
+          'Y la última pregunta para dejarlo listo:',
           '👉 *¿Cuánto tiempo suelen ser válidos tus presupuestos antes de que caduquen?*',
-          '1️⃣ 7 días',
-          '2️⃣ 15 días',
-          '3️⃣ 30 días',
-          '4️⃣ Otro (indícame los días que quieras)'
+          '1️⃣ 30 días (1 mes)',
+          '2️⃣ 60 días (2 meses)',
+          '3️⃣ 90 días (3 meses)',
+          '4️⃣ Otro plazo (indícame los días que quieras, ej: «15 días», «45 días», «180 días»)'
         ].join('\n')
       };
     }
 
-    // 6. Anticipo habitual
+    // 6. Validez de presupuestos (Paso Final que completa el onboarding)
+    case 'QUOTE_VALIDITY': {
+      let days = 30;
+      const explicitDays = input.match(/^\s*(\d{1,4})\s*d[ií]as?(?=\s|$)/i);
+      const option = input.normalize('NFKC').replace(/[\uFE0F\u20E3]/gu, '').trim().toLowerCase();
+
+      // Una duración escrita explícitamente siempre tiene prioridad sobre el número de opción.
+      if (explicitDays) {
+        days = Number(explicitDays[1]);
+        if (!Number.isInteger(days) || days < 1 || days > 3650) {
+          return {
+            handled: true,
+            message: 'Indícame una validez entre *1 y 3650 días* (por ejemplo, *15 días*, *30 días* o *60 días*).'
+          };
+        }
+      } else if (/^(?:treinta\s*d[ií]as|un mes|1 mes)$/i.test(option)) {
+        days = 30;
+      } else if (/^(?:sesenta\s*d[ií]as|dos meses|2 meses)$/i.test(option)) {
+        days = 60;
+      } else if (/^(?:noventa\s*d[ií]as|tres meses|3 meses)$/i.test(option)) {
+        days = 90;
+      } else if (/^(?:seis meses|6 meses)$/i.test(option)) {
+        days = 180;
+      } else if (/^(?:4|opci[oó]n\s*4|otro|otra)$/i.test(option)) {
+        return {
+          handled: true,
+          message: '¿Cuántos días quieres exactamente? Escríbelo, por ejemplo, como *15 días*, *45 días* o *180 días*.'
+        };
+      } else if (/^(?:1|opci[oó]n\s*1)$/i.test(option)) {
+        days = 30;
+      } else if (/^(?:2|opci[oó]n\s*2)$/i.test(option)) {
+        days = 60;
+      } else if (/^(?:3|opci[oó]n\s*3)$/i.test(option)) {
+        days = 90;
+      } else if (/^(?:saltar|omitir|luego|m[aá]s tarde|paso|no)$/i.test(option)) {
+        days = 30;
+      } else {
+        return {
+          handled: true,
+          message: 'No he entendido la validez. Elige *1* (30 días), *2* (60 días), *3* (90 días) o escribe los días, por ejemplo *45 días*.'
+        };
+      }
+      data.quoteValidityDays = days;
+
+      // Finalizar Onboarding de forma atómica y segura (transacción BEGIN IMMEDIATE)
+      const updated = completeSecureOnboarding(phone, {
+        ...data,
+        name: data.companyName || data.ownerName || null,
+        fiscalName: data.fiscalName || data.companyName || data.ownerName || null,
+        ownerName: data.ownerName || null,
+        cif: data.cif || null,
+        trade: data.trade || null,
+        address: data.address || null,
+        city: data.city || null,
+        workingHours: data.workingHours || null,
+        paymentTerms: data.paymentTerms || null,
+        quoteValidityDays: days,
+        entityType: data.entityType || 'autonomo',
+        irpfRate: data.irpfRate || 0,
+        invoiceSeries: data.invoiceSeries || '2026-001',
+        defaultTaxRate: data.defaultTaxRate !== null && data.defaultTaxRate !== undefined ? data.defaultTaxRate : 10,
+        defaultAdvance: data.defaultAdvance !== null && data.defaultAdvance !== undefined ? data.defaultAdvance : null,
+        iban: data.iban || null,
+        bizum: data.bizum || null
+      }, options);
+
+      const summaryText = formatCompanySummary(updated);
+      return {
+        handled: true,
+        completed: true,
+        company: updated,
+        message: summaryText
+      };
+    }
+
+    // ─── PASOS LEGACY (Soporte hacia atrás / compatibilidad) ───────────────────
+    case 'WORKING_HOURS': {
+      const hours = isSkip ? null : input;
+      data.workingHours = hours;
+
+      saveCompany(phone, {
+        workingHours: hours,
+        onboardingStep: 'PAYMENT_TERMS',
+        onboardingDataJson: JSON.stringify(data)
+      });
+
+      return {
+        handled: true,
+        message: [
+          hours ? '¡Anotado! ⏱️' : '¡Sin problema! Añadiremos el horario más adelante ⏱️',
+          '',
+          getStepQuestion('PAYMENT_TERMS', data)
+        ].join('\n')
+      };
+    }
+
     case 'ADVANCE': {
       let advance = null;
       const numMatch = input.match(/(\d+)\s*%/);
@@ -531,78 +645,14 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         message: [
           `¡Tomo nota! Anticipo establecido al *${advance}%* 🤝`,
           '',
-          'Con cómo cambian los precios de los materiales hoy en día:',
-          '👉 *¿Cuánto tiempo suelen ser válidos tus presupuestos antes de que caduquen?*',
-          '1️⃣ 7 días',
-          '2️⃣ 15 días',
-          '3️⃣ 30 días',
-          '4️⃣ Otro (indícame los días que quieras)'
+          getStepQuestion('QUOTE_VALIDITY', data)
         ].join('\n')
       };
     }
 
-    // 7. Validez de presupuestos
-    case 'QUOTE_VALIDITY': {
-      let days = 15;
-      const explicitDays = input.match(/^\s*(\d{1,4})\s*d[ií]as?(?=\s|$)/i);
-      const option = input.normalize('NFKC').replace(/[\uFE0F\u20E3]/gu, '').trim().toLowerCase();
-
-      // Una duración escrita explícitamente siempre tiene prioridad sobre el número de opción.
-      if (explicitDays) {
-        days = Number(explicitDays[1]);
-        if (!Number.isInteger(days) || days < 1 || days > 3650) {
-          return {
-            handled: true,
-            message: 'Indícame una validez entre *1 y 3650 días* (por ejemplo, *1 día* o *45 días*).'
-          };
-        }
-      } else if (/^(?:un mes|1 mes)$/i.test(option)) {
-        days = 30;
-      } else if (/^(?:4|opci[oó]n\s*4|otro|otra)$/i.test(option)) {
-        return {
-          handled: true,
-          message: '¿Cuántos días quieres exactamente? Escríbelo, por ejemplo, como *1 día*, *2 días* o *45 días*.'
-        };
-      } else if (/^(?:1|opci[oó]n\s*1)$/i.test(option)) {
-        days = 7;
-      } else if (/^(?:2|opci[oó]n\s*2)$/i.test(option)) {
-        days = 15;
-      } else if (/^(?:3|opci[oó]n\s*3)$/i.test(option)) {
-        days = 30;
-      } else if (/^(?:saltar|omitir|luego|m[aá]s tarde|paso|no)$/i.test(option)) {
-        days = 15;
-      } else {
-        return {
-          handled: true,
-          message: 'No he entendido la validez. Elige *1* (7 días), *2* (15 días), *3* (30 días) o escribe la duración, por ejemplo *1 día*.'
-        };
-      }
-      data.quoteValidityDays = days;
-
-      saveCompany(phone, {
-        quoteValidityDays: days,
-        onboardingStep: 'ENTITY_TYPE',
-        onboardingDataJson: JSON.stringify(data)
-      });
-
-      return {
-        handled: true,
-        message: [
-          `¡Estupendo! Validez fijada en *${days} días* ⏳`,
-          '',
-          '━━━━━━━━━━━━━━━━━━━━━━━━━',
-          '📑 *¡Vamos ahora a la parte fiscal y de facturación!*',
-          'Esto permite configurar tus presupuestos, condiciones de cobro y documentos PDF según los datos de tu empresa.',
-          '',
-          '👉 *¿Eres autónomo o tienes una empresa (S.L., C.B., Sociedad Civil...)?*'
-        ].join('\n')
-      };
-    }
-
-    // 8. Tipo de entidad (autónomo o empresa)
     case 'ENTITY_TYPE': {
       let entityType = 'autonomo';
-      if (/empresa|s\.?l|sociedad|c\.?b|cooperativa/i.test(input)) {
+      if (/empresa|s\.l|sociedad|c\.b|cooperativa/i.test(input)) {
         entityType = 'empresa';
       }
       data.entityType = entityType;
@@ -618,14 +668,11 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         message: [
           `¡Perfecto, registrado como *${entityType === 'autonomo' ? 'Autónomo' : 'Empresa'}*! 📋`,
           '',
-          '👉 *¿Cuál es tu nombre fiscal o razón social oficial para las facturas?*',
-          '',
-          `_(Si eres autónomo suele ser tu nombre y apellidos; si es sociedad, la razón social completa como figura en Hacienda)_`
+          getStepQuestion('FISCAL_NAME', data)
         ].join('\n')
       };
     }
 
-    // 9. Nombre fiscal
     case 'FISCAL_NAME': {
       const fiscalName = isSkip ? (data.companyName || data.ownerName || null) : input;
       data.fiscalName = fiscalName;
@@ -641,14 +688,11 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         message: [
           fiscalName ? `¡Oído cocina, *${fiscalName}*! 📛` : `¡De acuerdo! Dejamos el nombre fiscal para más adelante 📛`,
           '',
-          '👉 *¿Cuál es tu NIF o CIF?*',
-          '',
-          '_(DNI/NIE con letra si eres autónomo, o CIF empezando por letra si es empresa, ej: 12345678Z o B-12345678. O escribe «luego» si prefieres)_'
+          getStepQuestion('CIF_NIF', data)
         ].join('\n')
       };
     }
 
-    // 10. CIF / NIF
     case 'CIF_NIF': {
       let cif = null;
       if (!isSkip) {
@@ -670,39 +714,13 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          cif ? `¡NIF/CIF guardado: *${cif}*! 🆔` : `¡Entendido! Dejamos el NIF/CIF pendiente para cuando lo tengas a mano 🆔`,
+          cif ? `¡NIF/CIF guardado: *${cif}*! 🆔` : `¡Entendido! Dejamos el NIF/CIF pendiente 🆔`,
           '',
-          '👉 *¿Cuál es tu dirección fiscal completa?*',
-          '',
-          '_(Calle, número, código postal y población para la cabecera de tus documentos oficiales. O escribe «luego» si prefieres)_'
+          getStepQuestion('FISCAL_ADDRESS', data)
         ].join('\n')
       };
     }
 
-    // 11. Dirección fiscal
-    case 'FISCAL_ADDRESS': {
-      const address = isSkip ? null : input;
-      data.address = address;
-
-      saveCompany(phone, {
-        address,
-        onboardingStep: 'TAX_RATE',
-        onboardingDataJson: JSON.stringify(data)
-      });
-
-      return {
-        handled: true,
-        message: [
-          address ? `¡Dirección registrada! 🏠` : `¡De acuerdo! Añadiremos la dirección fiscal más adelante 🏠`,
-          '',
-          '👉 *¿Qué porcentaje de IVA aplicas normalmente a tus trabajos?*',
-          '',
-          '_(Por ejemplo: 10% para obras y reformas en vivienda habitual, 21% general, o 0% si estás exento)_'
-        ].join('\n')
-      };
-    }
-
-    // 12. IVA habitual
     case 'TAX_RATE': {
       const numMatch = input.match(/(?:^|\D)(0|4|5|10|21)\s*%?(?:\D|$)/);
       const tax = /exent[oa]|sin\s+iva/i.test(input)
@@ -727,14 +745,11 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         message: [
           `¡IVA fijado al *${tax}%*! 📊`,
           '',
-          '👉 *¿Utilizas algún porcentaje de IRPF en tus facturas?*',
-          '',
-          '_(Por ejemplo: 15% general de profesional, 7% si eres nuevo autónomo, o escribe «no» / «0%» si facturas a particulares o como sociedad)_'
+          getStepQuestion('IRPF_RATE', data)
         ].join('\n')
       };
     }
 
-    // 13. IRPF
     case 'IRPF_RATE': {
       let irpf = 0;
       if (/no\b|cero|nada|ningun/i.test(input)) {
@@ -756,16 +771,13 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         message: [
           `¡Tomo nota! Retención de IRPF: *${irpf > 0 ? irpf + '%' : '0% (sin IRPF)'}* 💼`,
           '',
-          '👉 *¿Qué numeración o serie quieres utilizar para tus facturas?*',
-          '',
-          '_(Por ejemplo: 2026-001, 2026-002... o F26-001, FRA-001... Si no pones nada usaremos «2026-001»)_'
+          getStepQuestion('INVOICE_SERIES', data)
         ].join('\n')
       };
     }
 
-    // 14. Serie de facturas
     case 'INVOICE_SERIES': {
-      let series = '2026-';
+      let series = '2026-001';
       if (!isSkip && input.length >= 2) {
         series = input;
       }
@@ -782,15 +794,11 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         message: [
           `¡Serie de facturación guardada como *${series}*! 🔢`,
           '',
-          'Y ya por último, amigo mío para cerrar el círculo:',
-          '👉 *¿Tienes una cuenta bancaria (IBAN) o Bizum que quieras mostrar en las facturas y presupuestos para que te paguen?*',
-          '',
-          '_(Puedes pasarme el IBAN, el número para Bizum, o escribir «luego» si prefieres añadirlo más adelante)_'
+          getStepQuestion('BANK_ACCOUNT', data)
         ].join('\n')
       };
     }
 
-    // 15. Cuenta bancaria / Bizum
     case 'BANK_ACCOUNT': {
       let iban = null;
       let bizum = null;
@@ -810,7 +818,6 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       data.iban = iban || null;
       data.bizum = bizum || null;
 
-      // Finalizar Onboarding de forma atómica y segura (transacción BEGIN IMMEDIATE)
       const updated = completeSecureOnboarding(phone, {
         ...data,
         name: data.companyName || data.ownerName || null,
@@ -822,10 +829,10 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         city: data.city || null,
         workingHours: data.workingHours || null,
         paymentTerms: data.paymentTerms || null,
-        quoteValidityDays: data.quoteValidityDays || 15,
+        quoteValidityDays: data.quoteValidityDays || 30,
         entityType: data.entityType || 'autonomo',
         irpfRate: data.irpfRate || 0,
-        invoiceSeries: data.invoiceSeries || '2026-',
+        invoiceSeries: data.invoiceSeries || '2026-001',
         defaultTaxRate: data.defaultTaxRate !== null && data.defaultTaxRate !== undefined ? data.defaultTaxRate : 10,
         defaultAdvance: data.defaultAdvance !== null && data.defaultAdvance !== undefined ? data.defaultAdvance : null,
         iban: iban || null,

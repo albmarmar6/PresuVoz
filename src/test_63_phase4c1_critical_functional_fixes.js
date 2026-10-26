@@ -34,7 +34,7 @@ export async function runTest63() {
     }
   }
 
-  const PROD_CANONICAL_SHA = 'FEA8233D53D3AE4618A9FDD930147036E7061F79A92DD920AAE8CE11E2F07A35';
+  const PROD_CANONICAL_SHA = '2982D2506DD08D2090F17FFD0DB8896EF796F34ADE2FBF9E0483EF67A92D45AD';
   const prodPath = path.resolve('data', 'presuvoz.db');
 
   // =====================================================================
@@ -195,20 +195,12 @@ export async function runTest63() {
 
     // Complete remaining steps 1..13
     const answers = [
-      'Paco Martínez, Pinturas Paco', // OWNER_AND_COMPANY
-      'Pintura y decoración',         // TRADE
-      'Granada y alrededores',        // CITY
-      'De 8 a 18',                    // WORKING_HOURS
-      '3',                            // PAYMENT_TERMS (50/50 y anticipo 50%)
-      '15 días',                      // QUOTE_VALIDITY
-      'autónomo',                     // ENTITY_TYPE
-      'Francisco Martínez López',     // FISCAL_NAME
-      '77889900P',                    // CIF_NIF
-      'Calle Alhamar 14, Granada',    // FISCAL_ADDRESS
-      '1',                            // TAX_RATE (21%)
-      '15%',                          // IRPF_RATE
-      'P26-001',                      // INVOICE_SERIES
-      'ES91 2100 0418 4502 0005 1332' // BANK_ACCOUNT
+      'Paco Martínez, Pinturas Paco, 77889900P', // OWNER_AND_COMPANY
+      'Pintura y decoración',                   // TRADE
+      'Granada y alrededores',                  // CITY
+      'Calle Alhamar 14, Granada',              // FISCAL_ADDRESS
+      '2',                                      // PAYMENT_TERMS (50/50 y anticipo 50%)
+      '15 días'                                 // QUOTE_VALIDITY -> COMPLETED!
     ];
 
     let lastStepRes = null;

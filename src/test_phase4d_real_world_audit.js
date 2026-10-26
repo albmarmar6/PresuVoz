@@ -446,21 +446,12 @@ export async function runRealWorldAudit() {
 
   const onboardingStepsInputs = [
     { text: 'Hola, buenas tardes, quiero empezar a usar PresuVoz', label: 'Saludo inicial' },
-    { text: 'Me llamo Antonio García y mi negocio se llama Reformas García', label: 'Nombre y empresa' },
+    { text: 'Me llamo Antonio García y mi negocio se llama Reformas García, NIF 28765432B', label: 'Nombre, empresa y NIF' },
     { text: 'Hago reformas integrales y albañilería en general', label: 'Oficio' },
     { text: 'Trabajo en Sevilla capital y pueblos de alrededor', label: 'Ciudad' },
-    { text: 'De lunes a viernes de 8 a 18, pero los viernes salgo a las 14', label: 'Horario con matiz' },
-    { text: 'Cobro un 30% de señal, 40% a mitad de obra y el resto al entregarla', label: 'Forma de cobro' },
-    { text: 'Sí, siempre pido el 30% de anticipo por adelantado', label: 'Anticipo' },
-    { text: 'Treinta días de validez', label: 'Validez' },
-    { text: 'Soy autónomo desde hace varios años', label: 'Tipo entidad' },
-    { text: 'Antonio García Pérez', label: 'Nombre fiscal' },
-    { text: '28765432B', label: 'NIF' },
     { text: 'Calle Sierpes 45, 41004 Sevilla', label: 'Dirección fiscal' },
-    { text: 'Normalmente el 21%, aunque en vivienda aplico a veces el 10%', label: 'IVA habitual' },
-    { text: 'El 15% de IRPF porque le facturo a empresas', label: 'IRPF' },
-    { text: 'RG26-001', label: 'Serie facturación' },
-    { text: 'ES76 2100 0418 4502 0005 1234', label: 'IBAN banco' }
+    { text: 'Cobro un 30% de señal al inicio y el resto al entregarla', label: 'Forma de cobro' },
+    { text: 'Treinta días de validez', label: 'Validez' }
   ];
 
   let obStepIdx = 0;
@@ -878,21 +869,12 @@ export async function runRealWorldAudit() {
   mockSock.clear();
   await gwModule.handleSecurePreOnboarding(mockSock, userJidB, userPhoneB, 'Hola');
   const obStepsB = [
-    'Construcciones Martínez',
+    'Manuel Martínez, Construcciones Martínez, 33445566C',
     'Albañilería y estructuras',
     'Málaga',
-    'De 8:00 a 18:00',
-    '50% al inicio',
-    '50%',
-    '15 días',
-    'autonomo',
-    'Manuel Martínez Ramos',
-    '33445566C',
     'Calle Larios 10, Málaga',
-    '21%',
-    '15%',
-    'CM26-001',
-    'ES88 0049 1111 2222 3333 4444'
+    '50% al empezar y 50% al acabar',
+    '15 días'
   ];
   for (const s of obStepsB) {
     await gwModule.handleSecurePreOnboarding(mockSock, userJidB, userPhoneB, s);

@@ -143,7 +143,7 @@ export function resolveAuthenticatedContext(channel, channelIdentifier) {
       defaultAdvance: companyRow.default_advance !== null && companyRow.default_advance !== undefined ? companyRow.default_advance : 30,
       onboardingStep: companyRow.onboarding_step || null,
       onboardingDataJson: companyRow.onboarding_data_json || null,
-      isConfigured: Boolean(companyRow.name && companyRow.cif && !companyRow.onboarding_step)
+      isConfigured: Boolean(companyRow.name && !companyRow.onboarding_step && (companyRow.cif || companyRow.owner_name || companyRow.trade))
     },
 
     /**

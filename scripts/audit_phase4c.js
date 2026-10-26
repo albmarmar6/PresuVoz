@@ -138,21 +138,12 @@ async function runAllAudits() {
 
     // D. Recorrido completo paso a paso (15 preguntas)
     const answers = [
-      'Carlos Gómez y mi empresa Reformas Carlos', // 1 OWNER_AND_COMPANY -> TRADE
+      'Carlos Gómez y mi empresa Reformas Carlos, B12345678', // 1 OWNER_AND_COMPANY -> TRADE
       'Electricista', // 2 TRADE -> CITY
-      'Madrid', // 3 CITY -> WORKING_HOURS
-      'De 8:00 a 18:00', // 4 WORKING_HOURS -> PAYMENT_TERMS
-      '3', // 5 PAYMENT_TERMS -> ADVANCE
-      '40%', // 6 ADVANCE -> QUOTE_VALIDITY
-      '30', // 7 QUOTE_VALIDITY -> ENTITY_TYPE
-      '1', // 8 ENTITY_TYPE -> FISCAL_NAME (autónomo)
-      'Carlos Gómez SL', // 9 FISCAL_NAME -> CIF_NIF
-      'B12345678', // 10 CIF_NIF -> FISCAL_ADDRESS
-      'Calle Gran Vía 12, Madrid', // 11 FISCAL_ADDRESS -> TAX_RATE
-      '1', // 12 TAX_RATE -> IRPF_RATE (10%)
-      '2', // 13 IRPF_RATE -> INVOICE_SERIES (15%)
-      'ELEC2026', // 14 INVOICE_SERIES -> BANK_ACCOUNT
-      'ES9121000418450200051332' // 15 BANK_ACCOUNT -> COMPLETED
+      'Madrid', // 3 CITY -> FISCAL_ADDRESS
+      'Calle Gran Vía 12, Madrid', // 4 FISCAL_ADDRESS -> PAYMENT_TERMS
+      '1', // 5 PAYMENT_TERMS -> QUOTE_VALIDITY
+      '30 días' // 6 QUOTE_VALIDITY -> COMPLETED
     ];
 
     let lastStepRes = null;
@@ -161,7 +152,7 @@ async function runAllAudits() {
     }
 
     if (lastStepRes && lastStepRes.handled && lastStepRes.status === 'COMPLETED') {
-      pass('ONBOARDING', 'O5', 'Los 15 pasos se procesan secuencialmente y finalizan en estado COMPLETED');
+      pass('ONBOARDING', 'O5', 'Los pasos de onboarding se procesan secuencialmente y finalizan en estado COMPLETED');
     } else {
       fail('ONBOARDING', 'O5', `Onboarding no completó: status=${lastStepRes?.status}, step=${lastStepRes?.step}`);
     }

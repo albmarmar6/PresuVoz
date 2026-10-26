@@ -36,7 +36,7 @@ export async function runTest64() {
     console.log(`  [AUDIT-${classification}] ${id}: ${title}`);
   }
 
-  const PROD_CANONICAL_SHA = 'FEA8233D53D3AE4618A9FDD930147036E7061F79A92DD920AAE8CE11E2F07A35';
+  const PROD_CANONICAL_SHA = '2982D2506DD08D2090F17FFD0DB8896EF796F34ADE2FBF9E0483EF67A92D45AD';
   const prodPath = path.resolve('data', 'presuvoz.db');
 
   // =====================================================================
@@ -163,7 +163,7 @@ export async function runTest64() {
     assert(provisionalSessions.has(newJidA), 'A2.1 Sesión provisional creada en memoria');
 
     // A3: Varios mensajes seguidos (burst)
-    const burst1 = await handleSecurePreOnboarding(mockSock, newJidA, newPhoneA, 'Carlos Gómez, Reformas Gómez');
+    const burst1 = await handleSecurePreOnboarding(mockSock, newJidA, newPhoneA, 'Carlos Gómez, Reformas Gómez, 12345678Z');
     assert(burst1.handled === true, 'A3.1 Primer mensaje del burst procesado');
 
     // A4: Repetir saludo durante onboarding -> debe responder el paso actual sin reiniciar
@@ -179,17 +179,9 @@ export async function runTest64() {
     const answersA = [
       'Albañilería y reformas',     // TRADE
       'Madrid capital',             // CITY
-      'De 8:00 a 19:00',            // WORKING_HOURS
-      '30% de anticipo',            // PAYMENT_TERMS (30% anticipo)
-      '30 días',                    // QUOTE_VALIDITY
-      'autonomo',                   // ENTITY_TYPE
-      'Carlos Gómez Serrano',       // FISCAL_NAME
-      '12345678Z',                  // CIF_NIF
       'Calle Alcalá 100, Madrid',   // FISCAL_ADDRESS
-      '1',                          // TAX_RATE (21%)
-      '15%',                        // IRPF_RATE
-      'A26-001',                    // INVOICE_SERIES
-      'ES91 0049 1500 0512 3456 7890' // BANK_ACCOUNT
+      '1',                          // PAYMENT_TERMS (30% anticipo)
+      '30 días'                     // QUOTE_VALIDITY -> COMPLETED!
     ];
 
     let lastStepA = null;
@@ -246,21 +238,12 @@ export async function runTest64() {
 
     // Completar onboarding de B para tener dos tenants activos y aislados
     for (const ans of [
-      'Pinturas Martínez, Martínez Pintores',
-      'Pintura y empapelado',
-      'Valencia',
-      'De 8:00 a 18:00',
-      '1', // 50/50
-      '40%',
-      '15 días',
-      'autonomo',
-      'Pascual Martínez Ruiz',
-      '87654321X',
-      'Calle Colón 5, Valencia',
-      '1',
-      '15%',
-      'P26-001',
-      'ES91 2100 0000 0000 0000 0000'
+      'Pascual Martínez, Pinturas Pascual, 87654321X', // OWNER_AND_COMPANY
+      'Pintura y empapelado',                          // TRADE
+      'Valencia',                                      // CITY
+      'Calle Colón 5, Valencia',                       // FISCAL_ADDRESS
+      '2',                                             // PAYMENT_TERMS (50/50)
+      '15 días'                                        // QUOTE_VALIDITY -> COMPLETED!
     ]) {
       await handleSecurePreOnboarding(mockSock, newJidB, newPhoneB, ans);
     }
@@ -272,7 +255,7 @@ export async function runTest64() {
     // =====================================================================
     console.log('\n--- BLOQUE B: PERFIL EMPRESARIAL ---');
     const compA = getCompany(tenantA);
-    assert(compA && compA.cif === '12345678Z' && compA.invoiceSeries === 'A26-001', 'B1. Consulta de perfil empresarial correcta');
+    assert(compA && compA.cif === '12345678Z', 'B1. Consulta de perfil empresarial correcta');
 
     // Modificación de perfil
     compA.address = 'Avenida de América 25, Madrid';

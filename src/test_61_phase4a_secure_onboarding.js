@@ -122,8 +122,8 @@ export async function runTest61() {
   // ─── BLOQUE B: PASO A PASO (15 PREGUNTAS) Y FINALIZACIÓN ATÓMICA ───────────────
   console.log('--- B. Recorrido Paso a Paso y Finalización Atómica ---');
 
-  // Paso 1: OWNER_AND_COMPANY
-  const p1 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: 'Carlos y mi empresa Reformas Carlos' });
+  // Paso 1: OWNER_AND_COMPANY (con NIF/CIF opcional incluido)
+  const p1 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: 'Carlos y mi empresa Reformas Carlos, 12345678Z' });
   assert(p1.handled === true && p1.step === 'TRADE', 'B1. Paso 1 procesado -> avanza a TRADE');
 
   // Paso 2: TRADE
@@ -132,54 +132,20 @@ export async function runTest61() {
 
   // Paso 3: CITY
   const p3 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: 'Madrid' });
-  assert(p3.handled === true && p3.step === 'WORKING_HOURS', 'B3. Paso 3 procesado -> avanza a WORKING_HOURS');
+  assert(p3.handled === true && p3.step === 'FISCAL_ADDRESS', 'B3. Paso 3 procesado -> avanza a FISCAL_ADDRESS');
 
-  // Paso 4: WORKING_HOURS
-  const p4 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: 'De lunes a viernes de 8:00 a 18:00' });
+  // Paso 4: FISCAL_ADDRESS
+  const p4 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: 'Calle Alcalá 45, 28014 Madrid' });
   assert(p4.handled === true && p4.step === 'PAYMENT_TERMS', 'B4. Paso 4 procesado -> avanza a PAYMENT_TERMS');
 
   // Paso 5: PAYMENT_TERMS con anticipo integrado
   const p5 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: '40% de anticipo y el resto al finalizar' });
   assert(p5.handled === true && p5.step === 'QUOTE_VALIDITY', 'B5. Paso 5 procesado -> avanza a QUOTE_VALIDITY');
 
-  // Paso 7: QUOTE_VALIDITY
-  const p7 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: '15 días' });
-  assert(p7.handled === true && p7.step === 'ENTITY_TYPE', 'B7. Paso 7 procesado -> avanza a ENTITY_TYPE');
-
-  // Paso 8: ENTITY_TYPE
-  const p8 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: 'autonomo' });
-  assert(p8.handled === true && p8.step === 'FISCAL_NAME', 'B8. Paso 8 procesado -> avanza a FISCAL_NAME');
-
-  // Paso 9: FISCAL_NAME
-  const p9 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: 'Carlos Martín Gómez' });
-  assert(p9.handled === true && p9.step === 'CIF_NIF', 'B9. Paso 9 procesado -> avanza a CIF_NIF');
-
-  // Paso 10: CIF_NIF
-  const p10 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: '12345678Z' });
-  assert(p10.handled === true && p10.step === 'FISCAL_ADDRESS', 'B10. Paso 10 procesado -> avanza a FISCAL_ADDRESS');
-
-  // Paso 11: FISCAL_ADDRESS
-  const p11 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: 'Calle Alcalá 45, 28014 Madrid' });
-  assert(p11.handled === true && p11.step === 'TAX_RATE', 'B11. Paso 11 procesado -> avanza a TAX_RATE');
-
-  // Paso 12: TAX_RATE
-  const p12 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: '21' });
-  assert(p12.handled === true && p12.step === 'IRPF_RATE', 'B12. Paso 12 procesado -> avanza a IRPF_RATE');
-
-  // Paso 13: IRPF_RATE
-  const p13 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: '15' });
-  assert(p13.handled === true && p13.step === 'INVOICE_SERIES', 'B13. Paso 13 procesado -> avanza a INVOICE_SERIES');
-
-  // Paso 14: INVOICE_SERIES
-  const p14 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: '2026-' });
-  assert(p14.handled === true && p14.step === 'BANK_ACCOUNT', 'B14. Paso 14 procesado -> avanza a BANK_ACCOUNT');
-
-  // Paso 15: BANK_ACCOUNT (Finalización atómica)
-  const p15 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, {
-    rawUserText: 'ES9121000418450200051332 y Bizum 650111222'
-  });
-  assert(p15.handled === true && p15.completed === true, 'B15. Paso 15 finaliza el onboarding atómicamente');
-  assert(p15.message.includes('Enhorabuena') && p15.message.includes('Carlos Martín Gómez'), 'B16. Mensaje final resume datos fiscales y confirma activación');
+  // Paso 6: QUOTE_VALIDITY (Finalización atómica)
+  const p6 = await handleSecurePreOnboarding(mockSock, jidAuto1, phoneAuto1, { rawUserText: '15 días' });
+  assert(p6.handled === true && p6.completed === true, 'B6. Paso 6 finaliza el onboarding atómicamente');
+  assert(p6.message.includes('Enhorabuena') && p6.message.includes('Carlos'), 'B7. Mensaje final resume datos fiscales y confirma activación');
 
   // ─── BLOQUE C: VERIFICACIÓN DE IDENTIDADES Y PERMISOS ──────────────────────────
   console.log('--- C. Verificación de Identidad, Entidades y UUIDs ---');
