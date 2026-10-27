@@ -255,7 +255,7 @@
 <script>
 const PRELOAD = (typeof window !== 'undefined' && window.__PRESUVOZ_PRELOAD__) ? window.__PRESUVOZ_PRELOAD__ : null;
 const SIGN_ENDPOINT = PRELOAD?.signEndpoint || (
-  (typeof window !== 'undefined' && (window.location.hostname.endsWith('presuvoz.online') || window.location.hostname.endsWith('vercel.app')))
+  (typeof window !== 'undefined' && (window.location.hostname.endsWith('presuvoz.online') || window.location.hostname.endsWith('railway.app') || window.location.hostname.endsWith('vercel.app') || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'))
     ? '/api/sign'
     : 'https://presuvoz.online/api/sign'
 );

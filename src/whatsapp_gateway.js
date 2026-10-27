@@ -152,6 +152,12 @@ import {
   processOnboardingStep
 } from './onboarding_service.js';
 import { detectIntent, resolveIntent, formatAllDebts, formatPeriodRevenue } from './intent_router.js';
+import {
+  calculateConstructionMaterials,
+  extractMaterialParameters,
+  calculateMaterialsForBudget,
+  detectInlineBudgetMaterialRequest
+} from './material_calculator_service.js';
 
 dotenv.config();
 
@@ -6255,11 +6261,11 @@ async function startWhatsAppGateway() {
 
     console.log(`🤖 Intención detectada por Gemini: action="${aiResult?.action}"`, JSON.stringify(aiResult).substring(0, 160));
 
-    // Si es un audio y tenemos transcripción de voz, comprobar si coincide con una intención determinista de consulta (ej. DEBT_BY_CLIENT, TOTAL_DEBTS)
+    // Si es un audio y tenemos transcripción de voz, comprobar si coincide con una intención determinista de consulta (ej. DEBT_BY_CLIENT, TOTAL_DEBTS, CALCULATE_MATERIALS)
     if (taskData.isAudio && recognizedUserText) {
       console.log(`🎙️ [Transcripción de audio]: "${recognizedUserText}"`);
       const knownNames = Array.from(session.budgets.values()).map(b => b.client?.name).filter(Boolean);
-      const detected = detectIntent(recognizedUserText, { knownNames });
+      const detected = detectIntent(recognizedUserText, { knownNames, session });
       if (detected && (
         detected.intent === 'DEBT_BY_CLIENT' ||
         detected.intent === 'TOTAL_DEBTS' ||
@@ -6272,16 +6278,60 @@ async function startWhatsAppGateway() {
         detected.intent === 'DAILY_REVENUE' ||
         detected.intent === 'YEARLY_STATS' ||
         detected.intent === 'REVENUE_STATS' ||
-        detected.intent === 'CANCEL_BUDGET'
+        detected.intent === 'CANCEL_BUDGET' ||
+        detected.intent === 'CALCULATE_MATERIALS' ||
+        detected.intent === 'CALCULATE_BUDGET_MATERIALS' ||
+        detected.intent === 'ADD_CALCULATION_TO_BUDGET' ||
+        detected.intent === 'SAVE_CALCULATION_TO_SHOPPING'
       )) {
         console.log(`⚡ [IntentRouter desde Audio] Intención detectada: ${detected.intent}`, detected.params);
         const resolvedReply = await resolveIntent(detected, cleanPhone, session);
         if (resolvedReply) {
           const sentIntentMsg = await sock.sendMessage(remoteJid, { text: resolvedReply });
           if (sentIntentMsg?.key?.id) botSentMessageIds.add(sentIntentMsg.key.id);
+          if (session.pendingUpdatedBudgetPdf) {
+            const updatedBudget = session.pendingUpdatedBudgetPdf;
+            session.pendingUpdatedBudgetPdf = null;
+            try {
+              const pdfBuffer = await generateBudgetPDF(updatedBudget);
+              const sentDoc = await sock.sendMessage(remoteJid, {
+                document: pdfBuffer,
+                mimetype: 'application/pdf',
+                fileName: `Presupuesto_${updatedBudget.id || 'Obra'}.pdf`,
+                caption: `📄 Presupuesto ${updatedBudget.id || 'Obra'} (con cubicaje de materiales)`
+              });
+              if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
+            } catch (_) {}
+          }
           return;
         }
       }
+    }
+
+    // 0a. Calculadora Técnica de Materiales y Mermas Multigremio (vía Gemini / Voz)
+    if (aiResult?.action === 'calculate_materials') {
+      const rawTranscript = recognizedUserText || taskData.rawUserText || '';
+      const regexExtracted = extractMaterialParameters(rawTranscript);
+      const geminiParams = aiResult.materialCalculationInfo || {};
+      const cleanGeminiParams = Object.fromEntries(
+        Object.entries(geminiParams).filter(([, v]) => v !== null && v !== undefined)
+      );
+      const mergedParams = {
+        ...(session.lastMaterialCalculation?.params || {}),
+        ...cleanGeminiParams,
+        ...regexExtracted,
+        rawText: rawTranscript
+      };
+      const calcResult = calculateConstructionMaterials({
+        tradeType: regexExtracted.tradeType || cleanGeminiParams.tradeType || session.lastMaterialCalculation?.tradeType || 'tiling',
+        params: mergedParams,
+        rawText: rawTranscript,
+        customCalculatedItems: cleanGeminiParams.customCalculatedItems
+      });
+      session.lastMaterialCalculation = calcResult;
+      const sentCalc = await sock.sendMessage(remoteJid, { text: calcResult.whatsappText });
+      if (sentCalc?.key?.id) botSentMessageIds.add(sentCalc.key.id);
+      return;
     }
 
     // Si había una acción pendiente de confirmación (ej: añadir partida inexistente) y se respondió por voz
@@ -7317,6 +7367,19 @@ async function startWhatsAppGateway() {
 
     engineResult.budget.company = session.company;
     engineResult.budget.companyId = session.companyId;
+
+    // ¿Pidió el autónomo en el mismo audio/mensaje del presupuesto calcular los materiales o incluirlos en el PDF?
+    const inlineMatReq = detectInlineBudgetMaterialRequest(recognizedUserText || taskData.rawUserText || '');
+    let inlineBudgetCalc = null;
+    if (inlineMatReq) {
+      inlineBudgetCalc = calculateMaterialsForBudget(engineResult.budget, {
+        enrichDescriptions: Boolean(inlineMatReq.includeInBudgetPdf)
+      });
+      if (inlineBudgetCalc) {
+        session.lastMaterialCalculation = inlineBudgetCalc;
+      }
+    }
+
     const generatedBudgetId = engineResult.budget.id;
     const savedBudget = saveBudget(session.authContext || session.companyId || cleanPhone, engineResult.budget);
     if (savedBudget?.id) engineResult.budget.id = savedBudget.id;
@@ -7382,9 +7445,15 @@ async function startWhatsAppGateway() {
       if (sentPdfErr?.key?.id) botSentMessageIds.add(sentPdfErr.key.id);
     }
 
+    if (inlineBudgetCalc && inlineMatReq?.sendCalculationInChat) {
+      const sentInlineCalc = await sock.sendMessage(remoteJid, { text: inlineBudgetCalc.whatsappText });
+      if (sentInlineCalc?.key?.id) botSentMessageIds.add(sentInlineCalc.key.id);
+    }
+
     const optionsLines = [
       '👉 *Opciones disponibles:*',
       '• Si quieres ver todos tus presupuestos, facturas y saldos responde *1*.',
+      '• Para *calcular los materiales y mermas* de esta obra di: *"calcúlame los materiales"*.',
       '• Para *registrar un cobro/anticipo* di: *"José Luis me ha pagado 1.500€ por Bizum"*.',
       '• Para *emitir la factura oficial* di: *"facturar"*.',
       '• Si quieres uno nuevo manda un audio o texto comentando *presupuesto nuevo*.'
@@ -8935,7 +9004,7 @@ async function startWhatsAppGateway() {
       // 3. Router de Intenciones Determinístico (Resuelve con SQLite sin pasar por Gemini)
       if (!isAudio && rawUserText) {
         const knownNames = Array.from(session.budgets.values()).map(b => b.client?.name).filter(Boolean);
-        const detected = detectIntent(rawUserText, { knownNames });
+        const detected = detectIntent(rawUserText, { knownNames, session });
         if (detected) {
           console.log(`⚡ [IntentRouter] Intención detectada: ${detected.intent}`, detected.params);
 
@@ -9012,6 +9081,20 @@ async function startWhatsAppGateway() {
           if (resolvedReply) {
             const sentIntentMsg = await sock.sendMessage(remoteJid, { text: resolvedReply });
             if (sentIntentMsg?.key?.id) botSentMessageIds.add(sentIntentMsg.key.id);
+            if (session.pendingUpdatedBudgetPdf) {
+              const updatedBudget = session.pendingUpdatedBudgetPdf;
+              session.pendingUpdatedBudgetPdf = null;
+              try {
+                const pdfBuffer = await generateBudgetPDF(updatedBudget);
+                const sentDoc = await sock.sendMessage(remoteJid, {
+                  document: pdfBuffer,
+                  mimetype: 'application/pdf',
+                  fileName: `Presupuesto_${updatedBudget.id || 'Obra'}.pdf`,
+                  caption: `📄 Presupuesto ${updatedBudget.id || 'Obra'} (con cubicaje de materiales)`
+                });
+                if (sentDoc?.key?.id) botSentMessageIds.add(sentDoc.key.id);
+              } catch (_) {}
+            }
             return;
           }
         }

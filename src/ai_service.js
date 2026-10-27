@@ -128,6 +128,7 @@ REGLAS OBLIGATORIAS:
 export function isLikelyBudgetTranscript(text = '') {
   const value = String(text || '').toLowerCase();
   if (/\b(?:agenda|cita|visita|factura|facturar|cobro|me\s+ha\s+pagado|lista\s+de\s+la\s+compra|comprar|compr[eé]|gestor[ií]a|exportar|cancelar|anular|qu[eé]\s+falta|c[oó]mo\s+va\s+la\s+obra|estado\s+de\s+la\s+obra|presupuestos?\s+(?:pendientes|firmados|aceptados))\b/i.test(value)) return false;
+  if (/\b(?:calcula(?:me|r)?|cubica(?:r|je)|cu[aá]nt[oa]s?\s+(?:azulejos?|baldosas?|piezas?|cajas?|botes?|litros?|sacos?|placas?|ladrillos?|bloques?|tiras?|rodapi[eé]s?|z[oó]calos?|metros?|tubos?|tuber[ií]as?|cables?|rollos?|focos?|downlights?|elementos?|radiadores?|tejas?|contenedores?|sacas?|material(?:es)?)|qu[eé]\s+cantidad\s+de|cu[aá]nto\s+material|necesito\s+para\s+(?:alicatar|solar|pintar|poner|colocar|instalar|hacer|levantar|impermeabilizar|aislar|demoler|picar))\b/i.test(value)) return false;
   return /\b(?:presupuesto|partida|demolici[oó]n|tabique|alicatado|solado|fontaner[ií]a|electricidad|pintura|pintar|puertas?|ventanas?|carpinter[ií]a|sanitarios?|grifer[ií]a|tuber[ií]a|instalaci[oó]n|reforma|paredes?|techos?|suelo|mueble|persiana|metros?|m[²2]|climalit|euros?|€)\b/i.test(value);
 }
 
@@ -226,6 +227,56 @@ Tu función es:
       pon 'action: "purchase_invoice"' y rellena 'purchaseInvoiceInfo': { "supplierName": "...", "supplierTaxId": "...", "invoiceNumber": "...", "issueDate": "YYYY-MM-DD", "category": "MATERIALES|COMBUSTIBLE|HERRAMIENTAS|SUBCONTRATA|VARIOS", "totalAmount": 242, "taxBase": 200, "vatRate": 21, "vatAmount": 42, "description": "..." }.
     - VACIAR O BORRAR LISTA DE COMPRAS: Solo si pide explícitamente borrar/vaciar la lista completa (ej: "vacía la lista de la compra", "borra todos los materiales de mi lista"). Decir que ha comprado todo para una obra significa marcar esos materiales como comprados, NO borrar la lista:
       pon 'action: "clear_shopping_list"'.
+    - CALCULADORA TÉCNICA DE MATERIALES, CUBICAJE Y MERMAS MULTIGREMIO:
+      Si el profesional pregunta cuánta cantidad de materiales necesita para hacer un trabajo en una vivienda o pide calcular/cubicar materiales con su merma (ej: "¿cuántos azulejos de 15x15 cm necesito para una cocina de 20 m²?", "¿cuántos botes de pintura necesito para pintar una habitación de 45 m² dando 3 manos?", "¿cuántos metros de tubería multicapa necesito para un baño si la subida del lavabo es a 0,70m y la ducha a 1,25m?", "¿cuántas placas de pladur necesito para un tabique de 18 m²?", "calcúlame cuánto rodapié, cemento cola, ladrillos, hormigón, cable eléctrico, suelo radiante, escombro..."):
+      pon 'action: "calculate_materials"' y rellena 'materialCalculationInfo' respetando al 100% TODAS las medidas, cotas, distancias, manos, rendimientos o % de merma que haya indicado el autónomo:
+      {
+        "tradeType": "tiling" | "painting" | "microcement" | "skirting" | "flooring" | "drywall_pladur" | "brickwork" | "concrete_screed" | "plaster_render" | "plumbing" | "underfloor_heating" | "electrical" | "hvac" | "waterproofing_insulation" | "roofing" | "windows_doors" | "wallpaper" | "artificial_grass" | "stairs" | "demolition" | "custom",
+        "areaM2": number | null,
+        "linearMeters": number | null,
+        "roomLengthM": number | null,
+        "roomWidthM": number | null,
+        "ceilingHeightM": number | null,
+        "pieceWidthCm": number | null,
+        "pieceLengthCm": number | null,
+        "wastePct": number | null,
+        "coats": number | null,
+        "yieldM2PerLiter": number | null,
+        "bucketSizeLiters": number | null,
+        "jointWidthMm": number | null,
+        "boxAreaM2": number | null,
+        "stripLengthM": number | null,
+        "doorsCount": number | null,
+        "windowsCount": number | null,
+        "pladurSystem": "tabique" | "trasdosado" | "techo_continuo" | "techo_registrable" | null,
+        "doubleBoard": boolean | null,
+        "studSpacingCm": number | null,
+        "brickType": "hueco_sencillo" | "hueco_doble" | "rasilla" | "perforado" | "gran_formato" | "termoarcilla" | "bloque_hormigon" | null,
+        "thicknessCm": number | null,
+        "pipeDistanceM": number | null,
+        "riserLavaboM": number | null,
+        "riserDuchaM": number | null,
+        "riserInodoroM": number | null,
+        "riserFregaderoM": number | null,
+        "lavaboCount": number | null,
+        "inodoroCount": number | null,
+        "duchaCount": number | null,
+        "bideCount": number | null,
+        "fregaderoCount": number | null,
+        "pipePitchCm": number | null,
+        "socketsCount": number | null,
+        "lightsCount": number | null,
+        "switchesCount": number | null,
+        "boxDistanceM": number | null,
+        "hvacSubtype": "split" | "radiators" | null,
+        "refrigerantLineM": number | null,
+        "frigoriasPerM2": number | null,
+        "stepsCount": number | null,
+        "stairWidthM": number | null,
+        "clientName": string | null,
+        "customCalculatedItems": [ { "description": "...", "qty": 1, "unit": "ud", "note": "..." } ]
+      }
+      NUNCA clasifiques una pregunta de "¿cuántos azulejos/botes/metros/placas/sacos necesito...?" como 'budget' ni como 'list_shopping_items'.
    - PRESUPUESTO NUEVO / NUEVA OBRA (PRIORIDAD ABSOLUTA): Si el profesional indica explícitamente que quiere crear o hacer un presupuesto nuevo o una nueva obra (ej: "presupuesto nuevo", "nuevo presupuesto", "quiero hacer un presupuesto nuevo para María del Carmen que vive en la calle Girasol", "nueva obra", "haz un nuevo presupuesto", "empezar nuevo presupuesto", "crear presupuesto"):
      SIEMPRE pon 'action: "budget"', 'isNewBudget: true' y 'targetBudgetId: null'.
      ESTO APLICA INCLUSO SI el cliente o la dirección coinciden con un presupuesto guardado en memoria (un mismo cliente puede encargar una segunda obra independiente). NUNCA vincules este mensaje a presupuestos anteriores ni arrastres partidas viejas.
@@ -275,7 +326,8 @@ Tu función es:
 
 FORMATO DE RESPUESTA (JSON estricto):
 {
-  "action": "budget", // "budget" | "show_budget" | "list_budgets" | "invoice" | "phase_invoice" | "final_invoice" | "rectification_invoice" | "query_pending_to_invoice" | "advance_invoice" | "payment" | "query_balance" | "query_revenue" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "update_appointment" | "complete_appointments" | "accept_budget" | "cancel_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates" | "purchase_invoice"
+  "action": "budget", // "budget" | "calculate_materials" | "show_budget" | "list_budgets" | "invoice" | "phase_invoice" | "final_invoice" | "rectification_invoice" | "query_pending_to_invoice" | "advance_invoice" | "payment" | "query_balance" | "query_revenue" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "update_appointment" | "complete_appointments" | "accept_budget" | "cancel_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates" | "purchase_invoice"
+  "materialCalculationInfo": null,
   "revenueQuery": null, // { "period": "month"|"quarter"|"four_month"|"week"|"today"|"year", "queryType": "collected"|"invoiced"|"all", "month": 1-12, "quarter": 1-4, "fourMonth": 1-3, "year": 2026 }
   "taskQuery": null,
   "isDone": true,

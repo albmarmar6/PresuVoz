@@ -18,6 +18,8 @@ import zlib from 'node:zlib';
 import crypto, { EventEmitter } from 'node:events';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createRequire } from 'node:module';
+import PDFDocument from 'pdfkit';
+import { Resend } from 'resend';
 
 const require = createRequire(import.meta.url);
 
@@ -500,6 +502,213 @@ function verifyPayloadProof(signedPayload, payloadProof, signingSecret) {
   return timingSafeEqual(expectedBuffer, receivedBuffer);
 }
 
+
+function normalizeCompactBudgetForPdf(raw) {
+  if (!raw) return null;
+  const items = (raw.t || raw.items || []).map((it, idx) => {
+    if (Array.isArray(it)) {
+      const desc = it[0] || '';
+      const qty = typeof it[1] === 'number' ? it[1] : 1;
+      const unit = typeof it[2] === 'string' ? it[2] : 'pa';
+      const unitPrice = Number(typeof it[2] === 'string' ? (it[3] || 0) : (it[2] || 0));
+      const total = Number(typeof it[2] === 'string' ? (it[4] ?? qty * unitPrice) : (it[3] ?? qty * unitPrice));
+      return { id: idx + 1, description: desc, qty, unit, unitPrice, total, isPricePending: unitPrice === 0 && total === 0 };
+    }
+    const desc = it.d || it.description || '';
+    const qty = Number(it.q ?? it.qty ?? 1);
+    const unit = it.u || it.unit || 'pa';
+    const unitPrice = Number(it.p ?? it.unitPrice ?? 0);
+    const total = Number(it.t ?? it.total ?? (qty * unitPrice));
+    return { id: idx + 1, description: desc, qty, unit, unitPrice, total, isPricePending: Boolean(it.pen || it.isPricePending) };
+  });
+  return {
+    id: String(raw.i || raw.id || 'PRE-2026'),
+    company: {
+      id: String(raw.c?.id || raw.company?.id || ''),
+      name: String(raw.c?.n || raw.company?.name || 'Empresa Instaladora'),
+      cif: String(raw.c?.c || raw.c?.f || raw.company?.cif || ''),
+      address: String(raw.c?.a || raw.company?.address || ''),
+      phone: String(raw.c?.p || raw.company?.phone || ''),
+      email: String(raw.c?.e || raw.company?.email || '')
+    },
+    client: {
+      name: String(raw.k?.n || raw.client?.name || 'Cliente Particular'),
+      address: String(raw.k?.a || raw.client?.address || 'Ubicación según visita'),
+      phone: String(raw.k?.p || raw.client?.phone || ''),
+      email: String(raw.k?.e || raw.client?.email || '')
+    },
+    items,
+    financials: {
+      subtotal: Number(raw.f?.b ?? raw.financials?.subtotal ?? 0),
+      taxableBase: Number(raw.f?.b ?? raw.financials?.taxableBase ?? 0),
+      taxRatePercentage: Number(raw.f?.r ?? raw.financials?.taxRatePercentage ?? 10),
+      taxAmount: Number(raw.f?.a ?? raw.f?.x ?? raw.financials?.taxAmount ?? 0),
+      totalAmount: Number(raw.f?.t ?? raw.financials?.totalAmount ?? 0),
+      advancePercentage: Number(raw.f?.ap ?? raw.financials?.advancePercentage ?? 30),
+      advanceAmount: Number(raw.f?.aa ?? raw.financials?.advanceAmount ?? 0),
+      discountPercentage: Number(raw.f?.dp ?? raw.financials?.discountPercentage ?? 0),
+      discountAmount: Number(raw.f?.da ?? raw.financials?.discountAmount ?? 0)
+    },
+    terms: raw.terms || { validityDays: 15, conditions: 'Condiciones según presupuesto.' }
+  };
+}
+
+function generateSignedBudgetPdfLocal(budget, signaturePro, signatureClient, signedAt) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({
+        size: 'A4',
+        margin: 40,
+        info: {
+          Title: `Contrato ${budget.id || 'PresuVoz'}`,
+          Author: budget.company?.name || 'PresuVoz',
+          Subject: 'Contrato de obra firmado'
+        }
+      });
+      const bufs = [];
+      doc.on('data', c => bufs.push(c));
+      doc.on('end', () => resolve(Buffer.concat(bufs)));
+      doc.on('error', e => reject(e));
+
+      const primary = '#059669';
+      const dark = '#0f172a';
+      const gray = '#64748b';
+      const border = '#e2e8f0';
+
+      doc.rect(0, 0, 595.28, 8).fill(primary);
+      doc.fontSize(16).fillColor(dark).font('Helvetica-Bold').text(budget.company?.name || 'PresuVoz Reformas', 40, 30);
+      doc.fontSize(8).fillColor(gray).font('Helvetica')
+        .text(`CIF: ${budget.company?.cif || 'Sin indicar'}`, 40, 50)
+        .text(budget.company?.address || 'Dirección no indicada', 40, 62)
+        .text(`${budget.company?.phone || ''}${budget.company?.email ? ` | ${budget.company.email}` : ''}`, 40, 74);
+
+      doc.roundedRect(350, 25, 205, 65, 4).strokeColor(border).stroke();
+      doc.fontSize(7).fillColor(primary).font('Helvetica-Bold').text('ACEPTACIÓN ELECTRÓNICA', 360, 33);
+      doc.fontSize(12).fillColor(dark).font('Helvetica-Bold').text(budget.id || 'PRE-2026', 360, 45);
+      doc.fontSize(7).fillColor(gray).font('Helvetica')
+        .text(`Fecha: ${new Date().toLocaleDateString('es-ES')}`, 360, 62)
+        .text(`Firmado: ${signedAt}`, 360, 73);
+
+      const clientY = 105;
+      doc.roundedRect(40, clientY, 515, 55, 4).fillColor('#f8fafc').fillAndStroke('#f8fafc', border);
+      doc.fontSize(8).fillColor(primary).font('Helvetica-Bold').text('DATOS DEL CLIENTE Y UBICACIÓN DE OBRA', 50, clientY + 8);
+      doc.fontSize(9).fillColor(dark).font('Helvetica-Bold').text(`Cliente: ${budget.client?.name || 'Cliente Particular'}`, 50, clientY + 22);
+      doc.fontSize(8).fillColor(gray).font('Helvetica').text(`Dirección de obra: ${budget.client?.address || 'Ubicación según visita'}`, 50, clientY + 36);
+
+      let tableY = 175;
+      doc.rect(40, tableY, 515, 20).fill(dark);
+      doc.fontSize(8).fillColor('#fff').font('Helvetica-Bold')
+        .text('#', 48, tableY + 6, { width: 20 })
+        .text('DESCRIPCIÓN DE LOS TRABAJOS', 75, tableY + 6, { width: 285 })
+        .text('CANT.', 365, tableY + 6, { width: 50, align: 'right' })
+        .text('PRECIO UD.', 420, tableY + 6, { width: 60, align: 'right' })
+        .text('TOTAL', 485, tableY + 6, { width: 60, align: 'right' });
+      tableY += 20;
+
+      (budget.items || []).forEach((item, idx) => {
+        const pending = item.isPricePending || item.total === 0;
+        const totalText = pending ? 'A valorar' : `${(item.total || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`;
+        const priceText = pending ? '-' : `${(item.unitPrice || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`;
+        if (idx % 2 === 1) doc.rect(40, tableY, 515, 24).fill('#f8fafc');
+        doc.fontSize(8).fillColor(gray).font('Helvetica').text(String(idx + 1), 48, tableY + 6, { width: 20 });
+        doc.fontSize(8).fillColor(dark).font('Helvetica').text(item.description || '', 75, tableY + 6, { width: 285 });
+        doc.fontSize(8).fillColor(gray).font('Helvetica')
+          .text(`${item.qty || 1} ${item.unit || 'pa'}`, 365, tableY + 6, { width: 50, align: 'right' })
+          .text(priceText, 420, tableY + 6, { width: 60, align: 'right' });
+        doc.fontSize(8).fillColor(pending ? '#b45309' : dark).font(pending ? 'Helvetica-Oblique' : 'Helvetica-Bold')
+          .text(totalText, 485, tableY + 6, { width: 60, align: 'right' });
+        doc.moveTo(40, tableY + 24).lineTo(555, tableY + 24).strokeColor('#f1f5f9').stroke();
+        tableY += 24;
+      });
+
+      tableY += 15;
+      const fin = budget.financials || {};
+      const totalsX = 350;
+      doc.fontSize(8).fillColor(gray).font('Helvetica');
+      doc.text('Base Imponible:', totalsX, tableY).text(`${(fin.taxableBase || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
+      tableY += 14;
+      doc.text(`IVA (${fin.taxRatePercentage ?? 10}%):`, totalsX, tableY).text(`${(fin.taxAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 485, tableY, { width: 60, align: 'right' });
+      tableY += 16;
+      doc.rect(totalsX - 10, tableY - 4, 215, 26).fill(primary);
+      doc.fontSize(9).fillColor('#fff').font('Helvetica-Bold')
+        .text('TOTAL PRESUPUESTO:', totalsX, tableY + 4)
+        .text(`${(fin.totalAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`, 475, tableY + 4, { width: 70, align: 'right' });
+
+      const signY = 700;
+      doc.rect(40, signY, 240, 70).strokeColor(border).stroke();
+      doc.fontSize(7.5).fillColor(gray).font('Helvetica')
+        .text('POR LA EMPRESA INSTALADORA', 50, signY + 8)
+        .text('Firma y Sello:', 50, signY + 55);
+
+      doc.rect(315, signY, 240, 70).strokeColor(border).stroke();
+      doc.fontSize(7.5).fillColor(gray).font('Helvetica').text('CONFORME DEL CLIENTE', 325, signY + 8);
+
+      const embedSig = (b64, x, y, w, h) => {
+        if (!b64 || !b64.startsWith('data:image')) return false;
+        const imgBuf = Buffer.from(b64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+        doc.image(imgBuf, x, y, { fit: [w, h], align: 'center', valign: 'center' });
+        return true;
+      };
+
+      if (!embedSig(signaturePro, 50, signY + 18, 210, 35)) {
+        doc.fontSize(7).fillColor(primary).font('Helvetica-Bold').text('EMITIDO POR LA EMPRESA', 50, signY + 22, { width: 220, align: 'center' });
+        doc.fontSize(6.5).fillColor(gray).font('Helvetica').text(`Por ${budget.company?.name || 'la empresa instaladora'}`, 50, signY + 34, { width: 220, align: 'center' });
+      }
+      if (!embedSig(signatureClient, 325, signY + 18, 210, 35)) {
+        doc.fontSize(7).fillColor(primary).font('Helvetica-Bold').text('ACEPTACIÓN REGISTRADA', 325, signY + 25, { width: 220, align: 'center' });
+      }
+
+      doc.fontSize(6.5).fillColor('#94a3b8').font('Helvetica')
+        .text(`Aceptación electrónica registrada el ${signedAt} | Ref: ${budget.id || 'PV'}`, 40, 785, { align: 'center', width: 515 });
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+async function sendSignedBudgetEmailLocal({ verifiedBudget, signaturePro, signatureClient, clientEmail, signedAt }) {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey || process.env.NODE_ENV === 'test') {
+    return { emailSent: false, emailId: null, emailError: null };
+  }
+  try {
+    const budget = normalizeCompactBudgetForPdf(verifiedBudget);
+    const pdfBuffer = await generateSignedBudgetPdfLocal(budget, signaturePro, signatureClient, signedAt);
+    const resend = new Resend(apiKey);
+    const recipients = [String(clientEmail).trim()];
+    if (budget.company?.email && /^[^\s@<>]{1,100}@[a-z0-9.-]{1,190}\.[a-z]{2,}$/i.test(budget.company.email) && !recipients.includes(budget.company.email)) {
+      recipients.push(budget.company.email);
+    }
+    const total = (budget.financials?.totalAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 });
+    const emailResult = await resend.emails.send({
+      from: process.env.RESEND_FROM_EMAIL || 'PresuVoz <onboarding@resend.dev>',
+      to: recipients,
+      subject: `Presupuesto Firmado ${budget.id} — ${budget.company?.name || 'PresuVoz'}`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:24px auto;padding:24px;border:1px solid #d1fae5;border-radius:16px;background:#ffffff;">
+        <h2 style="color:#059669;margin-top:0;">✅ Presupuesto Aceptado (${budget.id})</h2>
+        <p>Estimado/a <strong>${budget.client?.name || 'Cliente'}</strong>,</p>
+        <p>Adjuntamos copia en PDF del presupuesto <strong>${budget.id}</strong> (importe total: <strong>${total} €</strong>) con la firma electrónica registrada el ${signedAt}.</p>
+        <p style="font-size:12px;color:#6b7280;margin-top:24px;">Empresa emisora: ${budget.company?.name || 'PresuVoz'}</p>
+      </div>`,
+      attachments: [
+        {
+          filename: `Contrato_${budget.id}.pdf`,
+          content: pdfBuffer.toString('base64')
+        }
+      ]
+    });
+    if (emailResult?.error) {
+      return { emailSent: false, emailId: null, emailError: emailResult.error.message || 'Error enviando email' };
+    }
+    return { emailSent: Boolean(emailResult?.data?.id), emailId: emailResult?.data?.id || null, emailError: null };
+  } catch (err) {
+    console.warn('⚠️ [Sign API Local] No se pudo enviar copia por email (Resend):', err.message);
+    return { emailSent: false, emailId: null, emailError: err.message };
+  }
+}
+
 function inflateSignedBudget(signedPayload) {
   const compressed = Buffer.from(String(signedPayload), 'base64url');
   const jsonText = zlib.inflateRawSync(compressed).toString('utf-8');
@@ -670,6 +879,36 @@ export function createPresuVozHttpServer(options = {}) {
           s: entry.s,
           signEndpoint: '/api/sign',
           shortCode: entry.code
+        }).replace(/</g, '\\u003c');
+
+        const preloadScript = `<script>window.__PRESUVOZ_PRELOAD__ = ${preloadPayload};</script>\n</head>`;
+        const injectedHtml = rawHtml.includes('</head>')
+          ? rawHtml.replace('</head>', preloadScript)
+          : `<script>window.__PRESUVOZ_PRELOAD__ = ${preloadPayload};</script>\n` + rawHtml;
+
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store, max-age=0'
+        });
+        res.end(injectedHtml);
+        return;
+      }
+
+      // 4b. Portal directo de firma (GET /studio/firmar.html o GET /firmar.html) alojado en el propio servidor (Railway/Node) sin depender de Vercel
+      if ((pathname === '/studio/firmar.html' || pathname === '/firmar.html') && req.method === 'GET') {
+        if (!fs.existsSync(firmarHtmlPath)) {
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Plantilla de firma no disponible.');
+          return;
+        }
+
+        const rawHtml = fs.readFileSync(firmarHtmlPath, 'utf-8');
+        const zParam = parsedUrl.searchParams.get('z') || '';
+        const sParam = parsedUrl.searchParams.get('s') || '';
+        const preloadPayload = JSON.stringify({
+          ...(zParam ? { z: zParam } : {}),
+          ...(sParam ? { s: sParam } : {}),
+          signEndpoint: '/api/sign'
         }).replace(/</g, '\\u003c');
 
         const preloadScript = `<script>window.__PRESUVOZ_PRELOAD__ = ${preloadPayload};</script>\n</head>`;

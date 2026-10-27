@@ -56,6 +56,15 @@ import {
   parseAdminCommand
 } from './access_control_service.js';
 import { formatListIndex } from './secretary_service.js';
+import {
+  detectMaterialCalculationIntent,
+  extractMaterialParameters,
+  calculateConstructionMaterials,
+  calculateMaterialsForBudget,
+  detectInlineBudgetMaterialRequest,
+  applyMaterialCalculationToBudget
+} from './material_calculator_service.js';
+import { detectIntent as detectRouterIntent, resolveIntent as resolveRouterIntent } from './intent_router.js';
 
 export function computeFileSha256(filePath) {
   if (!fs.existsSync(filePath)) return null;
@@ -12983,6 +12992,191 @@ const boughtFormatted = formatShoppingListForWhatsApp(mockShopItems, null, { sho
 assert(boughtFormatted.includes("HISTORIAL GENERAL DE COMPRAS REALIZADAS"), "TEST 94 (4.5): Encabezado de historial de compras");
 assert(boughtFormatted.includes("Bote pintura amarillo"), "TEST 94 (4.6): Historial muestra material comprado");
 assert(!boughtFormatted.includes("Pladur 60 m2"), "TEST 94 (4.7): Historial NO muestra materiales pendientes");
+
+console.log("\n==========================================================");
+console.log("TEST 95: CALCULADORA TÉCNICA MULTIGREMIO DE MATERIALES, CUBICAJE Y MERMAS");
+console.log("==========================================================");
+
+// 1. Ejemplo real del usuario: Cocina de 20 m² con azulejos de 15x15 cm
+// 15x15 cm = 0,0225 m²/pieza -> 20 / 0,0225 = 888,88 -> 889 piezas netas
+// Con +10% merma = 22 m² -> 22 / 0,0225 = 977,77 -> 978 piezas totales (+89 piezas de margen)
+const tileQuery95 = "¿Cuántos azulejos de 15x15 cm necesito para una cocina de 20 m2?";
+const tileIntent95 = detectRouterIntent(tileQuery95);
+assert(tileIntent95?.intent === 'CALCULATE_MATERIALS', "TEST 95 (1.1): Router detecta CALCULATE_MATERIALS para consulta de azulejos 15x15 en 20 m²");
+assert(tileIntent95?.params?.tradeType === 'tiling', "TEST 95 (1.2): Clasifica correctamente el gremio 'tiling'");
+assert(isLikelyBudgetTranscript(tileQuery95) === false, "TEST 95 (1.3): isLikelyBudgetTranscript excluye consultas de cálculo de materiales para no crear presupuestos fantasma");
+
+const comp95 = createCompanyWithIdentity({
+  name: 'Reformas Multigremio 95 S.L.',
+  phone: '34699000095',
+  cif: 'B-95000095',
+  trade: 'Reformas'
+});
+const mockSession95 = {
+  companyId: comp95.companyId,
+  phone: '34699000095',
+  authContext: { companyId: comp95.companyId, phone: '34699000095' },
+  budgets: new Map()
+};
+const tileReply95 = await resolveRouterIntent(tileIntent95, '34699000095', mockSession95);
+assert(tileReply95.includes("889 piezas exactas"), "TEST 95 (1.4): Calcula exactamente 889 azulejos netos para 20 m² con pieza de 15×15 cm");
+assert(tileReply95.includes("978 azulejos/piezas"), "TEST 95 (1.5): Calcula exactamente 978 azulejos con el +10% de merma (22 m²)");
+assert(tileReply95.includes("89 piezas extra"), "TEST 95 (1.6): Detalla las 89 piezas extra de margen para cortes y roturas");
+assert(tileReply95.includes("Cemento cola") && tileReply95.includes("Mortero de juntas"), "TEST 95 (1.7): Incluye cálculo automático de sacos de cemento cola C2TE, borada y crucetas");
+assert(Boolean(mockSession95.lastMaterialCalculation), "TEST 95 (1.8): Guarda el último cálculo en session.lastMaterialCalculation para ajustes conversacionales");
+
+// 2. Ajuste conversacional en caliente (Recálculo con merma personalizada del autónomo: 15%)
+const recalcIntent95 = detectRouterIntent("Recálculamelo con un 15% de merma", { session: mockSession95 });
+assert(recalcIntent95?.intent === 'CALCULATE_MATERIALS' && recalcIntent95?.params?.isRecalculation === true, "TEST 95 (2.1): Detecta recálculo conversacional sobre el cálculo anterior");
+const recalcReply95 = await resolveRouterIntent(recalcIntent95, '34699000095', mockSession95);
+// 20 m² + 15% = 23 m² / 0,0225 = 1022,22 -> 1023 piezas
+assert(recalcReply95.includes("+15% merma") && recalcReply95.includes("1023 azulejos/piezas"), "TEST 95 (2.2): Recalcula instantáneamente a 1023 piezas al pedir 15% de merma");
+
+// 3. Pintura: habitación de 60 m² con 3 manos y rendimiento personalizado de 12 m²/L
+const paintIntent95 = detectRouterIntent("¿Cuántos botes de pintura necesito para pintar 60 m2 dando 3 manos si rinde 12 m2 por litro?");
+assert(paintIntent95?.intent === 'CALCULATE_MATERIALS' && paintIntent5Check(paintIntent95), "TEST 95 (3.1): Detecta cálculo de pintura con manos y rendimiento del pintor");
+function paintIntent5Check(intent) {
+  return intent.params.tradeType === 'painting' && intent.params.params.coats === 3 && intent.params.params.yieldM2PerLiter === 12;
+}
+const paintCalc95 = calculateConstructionMaterials(paintIntent95.params);
+// 60 m² * 3 manos = 180 m² / 12 m²/L = 15 L netos -> +5% merma = 16 L -> 1 bote de 15 L + 1 bote de 4 L
+assert(paintCalc95.whatsappText.includes("180 m²") && paintCalc95.whatsappText.includes("15 litros"), "TEST 95 (3.2): Calcula 180 m² de aplicación y 15 litros netos respetando el rendimiento del pintor");
+assert(paintCalc95.whatsappText.includes("1 bote(s) de 15 L") && paintCalc95.whatsappText.includes("Imprimación"), "TEST 95 (3.3): Desglosa combinación óptima de botes comerciales (15 L + 4 L), imprimación y cinta");
+
+// 3b. Todos los tipos de pintura en un piso: plástica, látex, acrílica, vinílica, temple (liso/gotelé), ecológica, silicato, cal, esmalte
+const latexCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuántos botes de pintura al látex necesito para 50 m2?"));
+assert(latexCalc95.whatsappText.includes("Pintura al látex") && latexCalc95.whatsappText.includes("10 m²/L"), "TEST 95 (3.4): Reconoce pintura al látex con su rendimiento e imprimación");
+
+const acrilicaCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuántos botes de pintura acrílica necesito para 50 m2?"));
+assert(acrilicaCalc95.whatsappText.includes("100% acrílica") && acrilicaCalc95.whatsappText.includes("9,5 m²/L"), "TEST 95 (3.5): Reconoce pintura acrílica con su rendimiento técnico (9,5 m²/L)");
+
+const vinilicaCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuántos litros de pintura vinílica necesito para 60 m2?"));
+assert(vinilicaCalc95.whatsappText.includes("Pintura vinílica") && vinilicaCalc95.whatsappText.includes("11,5 m²/L"), "TEST 95 (3.6): Reconoce pintura vinílica de alta extensibilidad (11,5 m²/L)");
+
+const templeCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuántos sacos de pintura al temple necesito para 80 m2?"));
+assert(templeCalc95.whatsappText.includes("TEMPLE LISO") && templeCalc95.whatsappText.includes("saco(s)/bolsa(s) de 25 kg"), "TEST 95 (3.7): Reconoce pintura al temple y la calcula en kilos y sacos de 25 kg (no en litros)");
+
+const ecoCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuántos botes de pintura ecológica necesito para 45 m2?"));
+assert(ecoCalc95.whatsappText.includes("Pintura ecológica") && ecoCalc95.whatsappText.includes("0% COV"), "TEST 95 (3.8): Reconoce pintura ecológica sin COV y recomienda imprimación ecológica 0% COV");
+
+const esmalteCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuánto esmalte al agua necesito para pintar 10 m2 de puertas y armarios?"));
+assert(esmalteCalc95.whatsappText.includes("Esmalte acrílico al agua") && esmalteCalc95.whatsappText.includes("750 ml") && esmalteCalc95.whatsappText.includes("todoterreno"), "TEST 95 (3.9): Reconoce esmalte/laca y desglosa en formatos comerciales de esmalte (4 L y 750 ml) + imprimación todoterreno");
+
+// 4. Regla de Oro en Fontanería: Prioridad 100% a las cotas verticales y distancias que diga el autónomo vs estándar
+const plumbStandard95 = calculateConstructionMaterials(
+  detectMaterialCalculationIntent("Calcula cuántos metros de tubería necesito para fontanería de un baño con 1 lavabo y 1 ducha")
+);
+assert(plumbStandard95.whatsappText.includes("*0,6 m* _(estándar)_") && plumbStandard95.whatsappText.includes("*1,1 m* _(estándar)_"),
+  "TEST 95 (4.1): Fontanería usa cotas estándar (0,60 m lavabo y 1,10 m ducha) solo cuando el autónomo no las especifica");
+
+const plumbCustomQuery95 = "Calcula cuántos metros de tubería necesito para un baño con 1 lavabo y 1 ducha a 4 metros de la general si la subida del lavabo es a 0,75 m y la subida de la ducha es a 1,25 m";
+const plumbCustomIntent95 = detectMaterialCalculationIntent(plumbCustomQuery95);
+const plumbCustomCalc95 = calculateConstructionMaterials(plumbCustomIntent95);
+assert(plumbCustomCalc95.whatsappText.includes("*4 m* _(dato tuyo)_") &&
+       plumbCustomCalc95.whatsappText.includes("*0,75 m* _(dato tuyo)_") &&
+       plumbCustomCalc95.whatsappText.includes("*1,25 m* _(dato tuyo)_"),
+  "TEST 95 (4.2): REGLA DE ORO: Fontanería aplica al 100% la distancia (4 m) y subidas personalizadas del autónomo (0,75 m lavabo y 1,25 m ducha)");
+
+// 5. Cobertura de todos los demás sectores y oficios de una vivienda
+const skirtingCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuántas tiras de rodapié de 2,40 m necesito para 30 metros lineales?"));
+assert(skirtingCalc95.tradeType === 'skirting' && skirtingCalc95.whatsappText.includes("14 tiras"), "TEST 95 (5.1): Rodapiés calcula 30 ml + 10% = 33 ml -> 14 tiras de 2,40 m + adhesivo + sellador");
+
+const flooringCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("Calcula cuánta tarima flotante necesito para un salón de 25 m2 con cajas de 2 m2"));
+assert(flooringCalc95.tradeType === 'flooring' && flooringCalc95.whatsappText.includes("14 cajas") && flooringCalc95.whatsappText.includes("Manta aislante"), "TEST 95 (5.2): Tarima / Suelo laminado calcula cajas, manta acústica, rodapié y perfiles de puerta");
+
+const pladurCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuántas placas de pladur necesito para un tabique de 18 m2 con montantes cada 40 cm?"));
+assert(pladurCalc95.tradeType === 'drywall_pladur' && pladurCalc95.whatsappText.includes("cada 40 cm") && pladurCalc95.whatsappText.includes("Lana de roca"), "TEST 95 (5.3): Pladur calcula placas (2 caras), montantes cada 40 cm, canales, lana de roca, pasta, cinta y tornillos");
+
+const techoRegCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("Calcula material para un falso techo registrable de pladur de 30 m2"));
+assert(techoRegCalc95.whatsappText.includes("FALSO TECHO REGISTRABLE") && techoRegCalc95.whatsappText.includes("Perfilería T-24"), "TEST 95 (5.4): Pladur soporta falso techo registrable 60×60 cm con perfilería T-24 y varillas");
+
+const brickCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuántos ladrillos de hueco doble necesito para levantar un tabique de 15 m2?"));
+assert(brickCalc95.tradeType === 'brickwork' && brickCalc95.whatsappText.includes("402 unidades") && brickCalc95.whatsappText.includes("Mortero"), "TEST 95 (5.5): Albañilería calcula ladrillos (hueco doble/sencillo/termoarcilla/bloque) y sacos de mortero M-5");
+
+const concreteCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("Calcula cuánto hormigón y mallazo necesito para una solera de 40 m2 de 10 cm de espesor"));
+assert(concreteCalc95.tradeType === 'concrete_screed' && concreteCalc95.whatsappText.includes("4,32 m³ de hormigón") && concreteCalc95.whatsappText.includes("Mallazo"), "TEST 95 (5.6): Solera/Hormigón calcula volumen m³ con merma, cemento/arena/gravel y mallazo con solapes");
+
+const plasterCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuántos sacos de yeso necesito para guarnecer 30 m2?"));
+assert(plasterCalc95.tradeType === 'plaster_render' && plasterCalc95.whatsappText.includes("Sacos a comprar") && plasterCalc95.whatsappText.includes("guardavivos"), "TEST 95 (5.7): Yeso/Enfoscado/Monocapa calcula kg totales, sacos y guardavivos/maestras");
+
+const ufhCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("Calcula cuántos metros de tubería necesito para suelo radiante de 60 m2 con paso de 15 cm"));
+assert(ufhCalc95.tradeType === 'underfloor_heating' && ufhCalc95.whatsappText.includes("440 ml") && ufhCalc95.whatsappText.includes("Colector"), "TEST 95 (5.8): Suelo radiante calcula 440 ml de tubería PEX, nº de circuitos, colector y panel de tetones");
+
+const elecCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("Calcula cuánto cable y tubo corrugado necesito para electricidad de una habitación de 16 m2 con 6 enchufes, 2 puntos de luz y 2 conmutadores a 5 metros de la caja con techo a 2,70 m"));
+assert(elecCalc95.tradeType === 'electrical' && elecCalc95.whatsappText.includes("Cable 2,5 mm²") && elecCalc95.whatsappText.includes("Cable 1,5 mm²") && elecCalc95.whatsappText.includes("*5 m* _(dato tuyo)_"), "TEST 95 (5.9): Electricidad (REBT) calcula cable 1,5 y 2,5 mm², tubo M20 y cajas respetando distancias y techo del electricista");
+
+const hvacCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("Calcula frigorías y línea frigorífica para instalar un split en un salón de 28 m2 a 6 metros del compresor"));
+assert(hvacCalc95.tradeType === 'hvac' && hvacCalc95.whatsappText.includes("frigorías/h") && hvacCalc95.whatsappText.includes("*6 m* _(dato tuyo)_"), "TEST 95 (5.10): Climatización calcula frigorías, kW, línea de cobre bitubo aislada, manguera, canaleta y soportes");
+
+const waterpCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuánta tela asfáltica necesito para impermeabilizar una terraza de 30 m2?"));
+assert(waterpCalc95.tradeType === 'waterproofing_insulation' && waterpCalc95.whatsappText.includes("rollos de 10 m²") && waterpCalc95.whatsappText.includes("Membrana líquida"), "TEST 95 (5.11): Impermeabilización calcula m² con solapes y subidas de mimbel en lámina asfáltica y membrana de poliuretano");
+
+const roofCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuántas tejas mixtas necesito para un tejado de 50 m2?"));
+assert(roofCalc95.tradeType === 'roofing' && roofCalc95.whatsappText.includes("594 tejas") && roofCalc95.whatsappText.includes("bajo teja"), "TEST 95 (5.12): Tejados calcula tejas con merma, lámina transpirable bajo teja, rastreles y cumbrera");
+
+const carpCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("Calcula espuma y tapajuntas para instalar 4 puertas de paso y 3 ventanas"));
+assert(carpCalc95.tradeType === 'windows_doors' && carpCalc95.whatsappText.includes("22 tiras") && carpCalc95.whatsappText.includes("Silicona neutra"), "TEST 95 (5.13): Carpintería calcula tiras de tapajuntas, botes de espuma PU, silicona neutra y tornillos turbo");
+
+const stairsCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("Calcula material para una escalera de 16 peldaños con ancho de 1,10 m"));
+assert(stairsCalc95.tradeType === 'stairs' && stairsCalc95.whatsappText.includes("18 piezas") && stairsCalc95.whatsappText.includes("Zanquines"), "TEST 95 (5.14): Escaleras calcula huellas, tabicas, zanquines y cemento cola");
+
+const demoCalc95 = calculateConstructionMaterials(detectMaterialCalculationIntent("¿Cuántos contenedores y sacas big bag necesito para picar y demoler 25 m2 de tabique de 10 cm de espesor?"));
+assert(demoCalc95.tradeType === 'demolition' && demoCalc95.whatsappText.includes("3,63 m³") && demoCalc95.whatsappText.includes("Big-Bag"), "TEST 95 (5.15): Demolición calcula volumen macizo, volumen esponjado (+45%), sacos de 25 L, Big-Bags y contenedores");
+
+// 6. Integración directa con la Lista de la Compra ("añádelo a la lista de la compra para Juan")
+const saveShopIntent95 = detectRouterIntent("Añádelo a la lista de la compra para Reforma Cocina", { session: mockSession95 });
+assert(saveShopIntent95?.intent === 'SAVE_CALCULATION_TO_SHOPPING', "TEST 95 (6.1): Detecta intención de pasar el cálculo recién hecho a la lista de la compra");
+const saveShopReply95 = await resolveRouterIntent(saveShopIntent95, '34699000095', mockSession95);
+assert(Boolean(saveShopReply95 && saveShopReply95.includes("Materiales añadidos a tu lista de la compra") && saveShopReply95.includes("Reforma Cocina")), "TEST 95 (6.2): Guarda todos los materiales principales y auxiliares calculados en la lista de la compra del autónomo");
+
+// 7. Integración directa con el Presupuesto (Calcular materiales de un presupuesto y añadirlos al PDF del presupuesto)
+const mockBudget95 = {
+  id: 'PRE2026-950',
+  client: { name: 'María Gómez' },
+  items: [
+    {
+      description: 'Alicatado de cocina de 20 m2 con azulejo de 15x15 cm',
+      qty: 20,
+      unit: 'm²',
+      unitPrice: 40,
+      totalPrice: 800
+    },
+    {
+      description: 'Aplicación de pintura vinílica en salón de 60 m2 a 2 manos',
+      qty: 60,
+      unit: 'm²',
+      unitPrice: 8,
+      totalPrice: 480
+    }
+  ],
+  financials: { totalAmount: 1408 }
+};
+dbService.saveBudget(mockSession95.authContext, mockBudget95);
+mockSession95.budgets.set(mockBudget95.id, mockBudget95);
+mockSession95.activeBudgetId = mockBudget95.id;
+
+const calcFromBudgetIntent95 = detectRouterIntent("Calcúlame los materiales del presupuesto de María Gómez", { session: mockSession95 });
+assert(calcFromBudgetIntent95?.intent === 'CALCULATE_BUDGET_MATERIALS', "TEST 95 (7.1): Detecta intención de calcular materiales de un presupuesto existente");
+const calcFromBudgetReply95 = await resolveRouterIntent(calcFromBudgetIntent95, '34699000095', mockSession95);
+assert(Boolean(calcFromBudgetReply95 && calcFromBudgetReply95.includes("978 azulejos/piezas") && calcFromBudgetReply95.includes("Pintura vinílica")),
+  "TEST 95 (7.2): Calcula de golpe todos los materiales y mermas de las partidas del presupuesto de María Gómez");
+
+const addToBudgetIntent95 = detectRouterIntent("Añádelo al presupuesto", { session: mockSession95 });
+assert(addToBudgetIntent95?.intent === 'ADD_CALCULATION_TO_BUDGET', "TEST 95 (7.3): Detecta intención de incluir el cálculo dentro del PDF del presupuesto");
+const addToBudgetReply95 = await resolveRouterIntent(addToBudgetIntent95, '34699000095', mockSession95);
+assert(Boolean(addToBudgetReply95 && addToBudgetReply95.includes("incluido en el presupuesto") && mockBudget95.items[0].description.includes("📐 Materiales estimados")),
+  "TEST 95 (7.4): Inyecta el desglose técnico de materiales y mermas en la partida del presupuesto y marca pendingUpdatedBudgetPdf");
+
+const inlineCheck95 = detectInlineBudgetMaterialRequest("Presupuesto para Juan: alicatar cocina de 20 m2 con azulejo de 15x15 por 800 euros y pon en el presupuesto cuántos azulejos tiene que comprar");
+assert(Boolean(inlineCheck95 && inlineCheck95.includeInBudgetPdf === true && inlineCheck95.sendCalculationInChat === true),
+  "TEST 95 (7.5): Detecta petición inline dentro del audio del presupuesto para incluir las cantidades de material en el PDF");
+
+testDatabaseSync.prepare("DELETE FROM budgets WHERE company_id = ?").run(comp95.companyId);
+testDatabaseSync.prepare("DELETE FROM shopping_items WHERE company_id = ? OR client_name = ?").run(comp95.companyId, 'Reforma Cocina');
+testDatabaseSync.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp95.companyId);
+testDatabaseSync.prepare("DELETE FROM memberships WHERE company_id = ?").run(comp95.companyId);
+testDatabaseSync.prepare("DELETE FROM users WHERE phone = ?").run('34699000095');
+testDatabaseSync.prepare("DELETE FROM companies WHERE id = ? OR phone = ?").run(comp95.companyId, '34699000095');
 
 if (passedCount === totalCount) {
   console.log(`✅ RESULTADO: ${passedCount}/${totalCount} PRUEBAS SUPERADAS CON ÉXITO.`);

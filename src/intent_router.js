@@ -30,8 +30,17 @@ import {
   saveCompany,
   getProjectBillingSummary,
   updateBudgetStatus,
-  getBudget
+  getBudget,
+  saveBudget,
+  addShoppingItems
 } from './db_service.js';
+
+import {
+  detectMaterialCalculationIntent,
+  calculateConstructionMaterials,
+  calculateMaterialsForBudget,
+  applyMaterialCalculationToBudget
+} from './material_calculator_service.js';
 
 import {
   getQuarterSummary,
@@ -531,6 +540,23 @@ export function detectIntent(text, context = {}) {
     return { intent: 'BUDGET_STATS', params: {} };
   }
 
+  // ── CALCULADORA DE MATERIALES Y MERMAS MULTIGREMIO ────────────────────────
+  // "cuántos azulejos de 15x15 necesito para una cocina de 20 m2", "cuántos botes de pintura...",
+  // "calcúlame los materiales del presupuesto de María", "añádelo al presupuesto", "añádelo a la lista de la compra"
+  const calcIntent = detectMaterialCalculationIntent(text, context?.session);
+  if (calcIntent) {
+    if (calcIntent.isSaveLastCalculationToShopping) {
+      return { intent: 'SAVE_CALCULATION_TO_SHOPPING', params: calcIntent };
+    }
+    if (calcIntent.isAddLastCalculationToBudget) {
+      return { intent: 'ADD_CALCULATION_TO_BUDGET', params: calcIntent };
+    }
+    if (calcIntent.isCalculateFromBudget) {
+      return { intent: 'CALCULATE_BUDGET_MATERIALS', params: calcIntent };
+    }
+    return { intent: 'CALCULATE_MATERIALS', params: calcIntent };
+  }
+
   // ── ESTADO DE OBRA POR CLIENTE (lenguaje natural) ─────────────────────────
   // "cómo va la obra de Juan", "qué tal va García", "estado de la obra de María"
   const workStatusMatch = n.match(
@@ -1013,6 +1039,187 @@ export async function resolveIntent(intentResult, phone, session) {
 
   try {
     switch (intent) {
+
+      case 'CALCULATE_MATERIALS': {
+        const calcResult = calculateConstructionMaterials({
+          tradeType: params.tradeType,
+          params: params.params || params
+        });
+        if (session) {
+          session.lastMaterialCalculation = calcResult;
+        }
+        return calcResult.whatsappText;
+      }
+
+      case 'CALCULATE_BUDGET_MATERIALS': {
+        const { targetQuery, includeInBudgetPdf } = params;
+        let targetBudget = null;
+
+        if (targetQuery) {
+          try {
+            targetBudget = getBudget(tenantContext, targetQuery.toUpperCase());
+          } catch (_) {}
+          if (!targetBudget) {
+            const candidates = findClientsByName(tenantContext, targetQuery);
+            if (candidates && candidates.length >= 1) {
+              targetBudget = getBudget(tenantContext, candidates[0].id);
+            }
+          }
+          if (!targetBudget && session?.budgets) {
+            const qNorm = norm(targetQuery);
+            for (const [id, b] of session.budgets.entries()) {
+              if (id.toLowerCase() === qNorm || norm(b.client?.name || '').includes(qNorm)) {
+                targetBudget = b;
+                break;
+              }
+            }
+          }
+        } else {
+          if (session?.activeBudgetId && session?.budgets?.has(session.activeBudgetId)) {
+            targetBudget = session.budgets.get(session.activeBudgetId);
+          } else if (session?.activeBudgetId) {
+            targetBudget = getBudget(tenantContext, session.activeBudgetId);
+          } else if (session?.budgets && session.budgets.size > 0) {
+            const allInSess = Array.from(session.budgets.values());
+            targetBudget = allInSess[allInSess.length - 1];
+          } else {
+            const recent = listBudgets(tenantContext, 1);
+            if (recent && recent.length > 0) targetBudget = getBudget(tenantContext, recent[0].id) || recent[0];
+          }
+        }
+
+        if (!targetBudget) {
+          return targetQuery
+            ? `🔍 No encontré ningún presupuesto para *"${targetQuery}"*.\n\n💡 _Indica el nombre del cliente o el código del presupuesto (ej: «calcúlame los materiales del presupuesto de María»)._`
+            : 'ℹ️ No encontré ningún presupuesto activo.\n\n💡 _Indica de qué cliente quieres calcular los materiales (ej: «calcúlame los materiales del presupuesto de María»)._';
+        }
+
+        const budgetCalc = calculateMaterialsForBudget(targetBudget, {
+          enrichDescriptions: Boolean(includeInBudgetPdf)
+        });
+
+        if (!budgetCalc) {
+          return `ℹ️ El presupuesto *${targetBudget.id}* (${targetBudget.client?.name || 'Cliente'}) no contiene partidas con mediciones técnicas (m², ml o unidades de obra) sobre las que calcular materiales automáticamente.\n\n💡 _Puedes preguntarme directamente las medidas en el chat (ej: «¿cuántos azulejos de 15x15 necesito para 20 m²?»)._`;
+        }
+
+        if (session) {
+          session.lastMaterialCalculation = budgetCalc;
+        }
+
+        if (includeInBudgetPdf) {
+          saveBudget(tenantContext, targetBudget);
+          if (session?.budgets) session.budgets.set(targetBudget.id, targetBudget);
+          if (session) session.pendingUpdatedBudgetPdf = targetBudget;
+        }
+
+        return budgetCalc.whatsappText;
+      }
+
+      case 'ADD_CALCULATION_TO_BUDGET': {
+        const lastCalc = session?.lastMaterialCalculation;
+        if (!lastCalc) {
+          return 'ℹ️ No tengo ningún cálculo de materiales reciente para añadir al presupuesto.\n\n💡 _Pídeme primero un cálculo (ej: «cuántos azulejos de 15x15 necesito para 20 m²»)._';
+        }
+
+        const targetQuery = params.targetQuery || lastCalc.budgetId || lastCalc.clientName || null;
+        let targetBudget = null;
+
+        if (targetQuery) {
+          try {
+            targetBudget = getBudget(tenantContext, String(targetQuery).toUpperCase());
+          } catch (_) {}
+          if (!targetBudget) {
+            const candidates = findClientsByName(tenantContext, targetQuery);
+            if (candidates && candidates.length >= 1) {
+              targetBudget = getBudget(tenantContext, candidates[0].id);
+            }
+          }
+          if (!targetBudget && session?.budgets) {
+            const qNorm = norm(targetQuery);
+            for (const [id, b] of session.budgets.entries()) {
+              if (id.toLowerCase() === qNorm || norm(b.client?.name || '').includes(qNorm)) {
+                targetBudget = b;
+                break;
+              }
+            }
+          }
+        }
+
+        if (!targetBudget) {
+          if (session?.activeBudgetId && session?.budgets?.has(session.activeBudgetId)) {
+            targetBudget = session.budgets.get(session.activeBudgetId);
+          } else if (session?.activeBudgetId) {
+            targetBudget = getBudget(tenantContext, session.activeBudgetId);
+          } else if (session?.budgets && session.budgets.size > 0) {
+            const allInSess = Array.from(session.budgets.values());
+            targetBudget = allInSess[allInSess.length - 1];
+          } else {
+            const recent = listBudgets(tenantContext, 1);
+            if (recent && recent.length > 0) targetBudget = getBudget(tenantContext, recent[0].id) || recent[0];
+          }
+        }
+
+        if (!targetBudget) {
+          return '🔍 No encontré ningún presupuesto activo donde añadir el cálculo.\n\n💡 _Dime para qué cliente es (ej: «añádelo al presupuesto de María»)._';
+        }
+
+        const applied = applyMaterialCalculationToBudget(targetBudget, lastCalc);
+        if (!applied.updated) {
+          return `⚠️ No se pudo añadir el desglose de materiales al presupuesto *${targetBudget.id}*.`;
+        }
+
+        saveBudget(tenantContext, targetBudget);
+        if (session?.budgets) {
+          const existingInSess = session.budgets.get(targetBudget.id);
+          if (existingInSess && existingInSess !== targetBudget) {
+            applyMaterialCalculationToBudget(existingInSess, lastCalc);
+          }
+          session.budgets.set(targetBudget.id, targetBudget);
+        }
+        if (session) session.pendingUpdatedBudgetPdf = targetBudget;
+
+        return [
+          `✅ *¡Cálculo de materiales incluido en el presupuesto ${targetBudget.id}!*`,
+          `👤 *Cliente:* ${targetBudget.client?.name || 'Cliente'}`,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          `📝 *Detalle añadido a la partida del presupuesto:*`,
+          `_${applied.noteAdded}_`,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          '📄 _El presupuesto ha quedado actualizado con las cantidades exactas de material y merma._'
+        ].join('\n');
+      }
+
+      case 'SAVE_CALCULATION_TO_SHOPPING': {
+        const lastCalc = session?.lastMaterialCalculation;
+        if (!lastCalc || !Array.isArray(lastCalc.shoppingItems) || lastCalc.shoppingItems.length === 0) {
+          return 'ℹ️ No tengo ningún cálculo de materiales reciente para guardar.\n\n💡 _Pídeme primero un cálculo (ej: «cuántos azulejos de 15x15 necesito para 20 m²»).__';
+        }
+        const targetClientName = params.clientName || lastCalc.clientName || null;
+        let resolvedBudgetId = null;
+        let finalClientName = targetClientName;
+        if (targetClientName) {
+          const matches = findClientsByName(tenantContext, targetClientName);
+          if (matches && matches.length >= 1) {
+            resolvedBudgetId = matches[0].id;
+            finalClientName = matches[0].clientName;
+          }
+        }
+        addShoppingItems(tenantContext, lastCalc.shoppingItems, {
+          budgetId: resolvedBudgetId,
+          clientName: finalClientName
+        });
+        const itemsListStr = lastCalc.shoppingItems
+          .map(it => `  • *${it.qty} ${it.unit || 'ud'}* — ${it.description}`)
+          .join('\n');
+        return [
+          `🛒 *¡Materiales añadidos a tu lista de la compra!*`,
+          finalClientName ? `👤 *Obra / Cliente:* ${finalClientName}` : `📦 *Destino:* Almacén General`,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          itemsListStr,
+          '━━━━━━━━━━━━━━━━━━━━━━━━━',
+          '💡 _Di *«ver lista de la compra»* cuando quieras consultarla en la tienda o almacén._'
+        ].join('\n');
+      }
 
       case 'CANCEL_BUDGET': {
         const { targetQuery } = params;

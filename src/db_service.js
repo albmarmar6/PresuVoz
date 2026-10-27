@@ -847,13 +847,13 @@ export async function syncPendingSignaturesFromCloud(companyContextOrId = null) 
       }
 
       rows = db.prepare(`
-        SELECT id, company_id, data_json 
+        SELECT id, company_id, company_phone, data_json 
         FROM budgets 
         WHERE company_id = ?
           AND status NOT IN ('ACEPTADO', 'FIRMADO', 'CANCELADO', 'PERDIDO')
       `).all(targetCompanyId);
     } else {
-      const stmt = db.prepare("SELECT id, company_id, data_json FROM budgets WHERE company_id IS NOT NULL AND status NOT IN ('ACEPTADO', 'FIRMADO', 'CANCELADO', 'PERDIDO')");
+      const stmt = db.prepare("SELECT id, company_id, company_phone, data_json FROM budgets WHERE company_id IS NOT NULL AND status NOT IN ('ACEPTADO', 'FIRMADO', 'CANCELADO', 'PERDIDO')");
       rows = stmt.all();
     }
 
@@ -943,7 +943,7 @@ export async function syncPendingSignaturesFromCloud(companyContextOrId = null) 
               budgetId,
               companyId: row.company_id,
               clientName: signInfo.clientName || budgetObj?.client?.name || 'Cliente',
-              companyPhone: row.company_phone,
+              companyPhone: row.company_phone || signInfo.companyPhone || budgetObj?.company?.phone,
               signedEmail: signInfo.clientEmail,
               signedAt: signInfo.signedAt
             });
