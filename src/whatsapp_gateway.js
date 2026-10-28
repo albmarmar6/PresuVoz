@@ -72,6 +72,7 @@ import {
   createPresuVozHttpServer,
   registerShortSigningLink,
   getShortSigningLink,
+  clearShortLinksAndSignaturesForTesting,
   downloadCloudMedia
 } from './cloud_api_adapter.js';
 import {
@@ -131,7 +132,8 @@ import {
   updateMessageStatus,
   isMessageAlreadyProcessed,
   getInvoicesByBudgetId,
-  getProjectBillingSummary
+  getProjectBillingSummary,
+  wipeDatabaseForFreshTesting
 } from './db_service.js';
 import {
   PERMISSION_LEVELS,
@@ -5292,6 +5294,30 @@ async function startWhatsAppGateway() {
     process.exit(1);
   }
 
+  // Limpieza única automática para iniciar las pruebas desde cero (Onboarding paso 1)
+  if (process.env.NODE_ENV !== 'test') {
+    const cleanMarkerPath = path.resolve('data', '.clean_slate_20261028.done');
+    if (!fs.existsSync(cleanMarkerPath)) {
+      try {
+        console.log('🧹 [Clean Slate] Vaciando base de datos para iniciar pruebas desde 0 (Onboarding)...');
+        wipeDatabaseForFreshTesting({ keepAuthorizedInvites: true });
+        userSessions.clear();
+        provisionalSessions.clear();
+        try { clearShortLinksAndSignaturesForTesting(); } catch (e) {}
+        try {
+          const slPath = path.resolve('data', 'signing_links.json');
+          const sbPath = path.resolve('data', 'signed_budgets.json');
+          if (fs.existsSync(slPath)) fs.unlinkSync(slPath);
+          if (fs.existsSync(sbPath)) fs.unlinkSync(sbPath);
+        } catch (e) {}
+        fs.writeFileSync(cleanMarkerPath, new Date().toISOString(), 'utf-8');
+        console.log('✅ [Clean Slate] Base de datos completamente limpia y lista desde cero.');
+      } catch (cleanErr) {
+        console.error('⚠️ Error ejecutando limpieza inicial:', cleanErr.message);
+      }
+    }
+  }
+
   const logger = pino({ level: 'silent' });
   const provider = String(process.env.WHATSAPP_PROVIDER || 'baileys').trim().toLowerCase();
 
@@ -7606,6 +7632,18 @@ async function startWhatsAppGateway() {
               userSessions.delete(sJid);
             }
           }
+        } else if (adminCmd.action === 'RESET_DB') {
+          wipeDatabaseForFreshTesting({ keepAuthorizedInvites: !adminCmd.wipeAllUsers });
+          userSessions.clear();
+          provisionalSessions.clear();
+          try { clearShortLinksAndSignaturesForTesting(); } catch (e) {}
+          try {
+            const slPath = path.resolve('data', 'signing_links.json');
+            const sbPath = path.resolve('data', 'signed_budgets.json');
+            if (fs.existsSync(slPath)) fs.unlinkSync(slPath);
+            if (fs.existsSync(sbPath)) fs.unlinkSync(sbPath);
+          } catch (e) {}
+          replyText = '🧹 *¡Base de datos vaciada por completo!*\n\nTodos los perfiles de empresa, presupuestos, facturas, pagos, citas y listas de compra han sido eliminados (0 registros).\n\n👉 _Envía cualquier mensaje (ej. «Hola») para comenzar el Onboarding desde cero._';
         } else if (adminCmd.action === 'LIST') {
           const list = listAuthorizedPhoneNumbers();
           if (list.length === 0) {

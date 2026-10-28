@@ -30,7 +30,7 @@ if (process.env.NODE_ENV !== 'test' && fs.existsSync(CANONICAL_SEED_PATH)) {
   } else {
     try {
       const stats = fs.statSync(DB_PATH);
-      if (stats.size < 50000) {
+      if (stats.size < 4096) {
         needsInit = true;
       } else {
         const probeDb = new DatabaseSync(DB_PATH);
@@ -6444,4 +6444,68 @@ export function getAuditLog(companyContextOrId, logId) {
     reason: row.reason,
     timestamp: row.timestamp
   };
+}
+
+
+/**
+ * Vacía todas las tablas de negocio, empresas, sesiones y onboarding de la base de datos activa
+ * para permitir pruebas limpias desde cero (desde el paso 1 del Onboarding).
+ * Conserva intacta la tabla schema_migrations y opcionalmente mantiene en estado 'AUTHORIZED'
+ * los números invitados previamente por el administrador (email LIKE 'auth_by:%').
+ */
+export function wipeDatabaseForFreshTesting({ targetDb = db, keepAuthorizedInvites = true } = {}) {
+  const tablesToClear = [
+    'payment_allocations',
+    'payments',
+    'invoices',
+    'invoice_sequences',
+    'budgets',
+    'appointments',
+    'shopping_items',
+    'business_tax_profiles',
+    'fiscal_periods',
+    'expense_payments',
+    'purchase_invoices',
+    'investment_assets',
+    'fiscal_incidents',
+    'audit_logs',
+    'messages',
+    'memberships',
+    'channel_identities',
+    'companies'
+  ];
+
+  targetDb.exec('PRAGMA foreign_keys = OFF;');
+  targetDb.exec('BEGIN IMMEDIATE;');
+  try {
+    for (const table of tablesToClear) {
+      try {
+        targetDb.prepare(`DELETE FROM ${table}`).run();
+      } catch (e) {}
+    }
+
+    if (keepAuthorizedInvites) {
+      try {
+        targetDb.prepare("DELETE FROM users WHERE email IS NULL OR email NOT LIKE 'auth_by:%'").run();
+        targetDb.prepare("UPDATE users SET status = 'AUTHORIZED', name = 'Usuario Invitado' WHERE email LIKE 'auth_by:%'").run();
+      } catch (e) {}
+    } else {
+      try {
+        targetDb.prepare('DELETE FROM users').run();
+      } catch (e) {}
+    }
+
+    try {
+      targetDb.prepare('DELETE FROM sqlite_sequence').run();
+    } catch (e) {}
+
+    targetDb.exec('COMMIT;');
+  } catch (err) {
+    try { targetDb.exec('ROLLBACK;'); } catch (e) {}
+    throw err;
+  } finally {
+    targetDb.exec('PRAGMA foreign_keys = ON;');
+  }
+
+  return { ok: true, timestamp: new Date().toISOString() };
 }

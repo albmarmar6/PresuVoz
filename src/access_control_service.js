@@ -337,6 +337,12 @@ export function parseAdminCommand(text) {
 
   const raw = text.trim();
 
+  // 0. Vaciar base de datos para pruebas desde cero
+  if (/^(?:!|\/)?(?:vaciar[-\s]?db|reset[-\s]?db|limpiar[-\s]?db|vaciar\s+base\s+de\s+datos)(?:\s+(todo))?$/i.test(raw)) {
+    const m = raw.match(/^(?:!|\/)?(?:vaciar[-\s]?db|reset[-\s]?db|limpiar[-\s]?db|vaciar\s+base\s+de\s+datos)(?:\s+(todo))?$/i);
+    return { isCommand: true, action: 'RESET_DB', wipeAllUsers: Boolean(m && m[1]) };
+  }
+
   // 1. Listar autorizados
   if (/^(?:!|\/)?(?:autorizados|listar\s+autorizados|ver\s+autorizados|quien\s+tiene\s+acceso)$/i.test(raw)) {
     return { isCommand: true, action: 'LIST' };
