@@ -51,3 +51,8 @@ data/logos/*
 !data/logos/.gitkeep
 
 
+
+# Video production exports
+videos/
+*.mp4
+
