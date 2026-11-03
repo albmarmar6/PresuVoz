@@ -44,6 +44,26 @@ function renderQrSvg(text) {
   }
 }
 
+const STATIC_MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.pdf': 'application/pdf',
+  '.mp4': 'video/mp4',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.txt': 'text/plain; charset=utf-8'
+};
+
 const DATA_DIR = path.resolve('data');
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -767,7 +787,18 @@ export function createPresuVozHttpServer(options = {}) {
       }
 
       // 1b. Visual QR Code for WhatsApp linking
-      if ((pathname === '/' || pathname === '/qr' || pathname === '/login') && req.method === 'GET') {
+      // 1. Landing Page principal (GET / o GET /index.html)
+      if ((pathname === '/' || pathname === '/index.html') && req.method === 'GET') {
+        const landingPath = path.resolve('index.html');
+        if (fs.existsSync(landingPath)) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          fs.createReadStream(landingPath).pipe(res);
+          return;
+        }
+      }
+
+      // 1b. Código QR visual para vinculación de WhatsApp (GET /qr, /login, /vincular)
+      if ((pathname === '/qr' || pathname === '/login' || pathname === '/vincular') && req.method === 'GET') {
         const qrString = globalThis.__PRESUVOZ_LATEST_QR__;
         const isConnected = Boolean(globalThis.__PRESUVOZ_WHATSAPP_CONNECTED__);
         if (!qrString || isConnected) {
@@ -1059,6 +1090,35 @@ export function createPresuVozHttpServer(options = {}) {
           details: savedRecord
         }));
         return;
+      }
+
+      // 5. Archivos estáticos seguros (studio/, output/, imágenes, CSS, PDFs)
+      if (req.method === 'GET') {
+        const safeBase = path.resolve('.');
+        const cleanPath = pathname.replace(/^\/+/, '');
+        const targetPath = path.resolve(safeBase, cleanPath);
+        const rel = path.relative(safeBase, targetPath);
+
+        const isSafePath = !rel.startsWith('..') && !path.isAbsolute(rel);
+        const baseName = path.basename(targetPath);
+        const isForbidden = baseName.startsWith('.') ||
+          baseName.endsWith('.db') ||
+          baseName.endsWith('.sqlite') ||
+          targetPath.includes(path.sep + 'node_modules' + path.sep) ||
+          targetPath.includes(path.sep + 'src' + path.sep) ||
+          targetPath.includes(path.sep + 'data' + path.sep) ||
+          targetPath.includes(path.sep + 'auth_info_baileys' + path.sep);
+
+        if (isSafePath && !isForbidden && fs.existsSync(targetPath)) {
+          const stat = fs.statSync(targetPath);
+          if (stat.isFile()) {
+            const ext = path.extname(targetPath).toLowerCase();
+            const contentType = STATIC_MIME_TYPES[ext] || 'application/octet-stream';
+            res.writeHead(200, { 'Content-Type': contentType });
+            fs.createReadStream(targetPath).pipe(res);
+            return;
+          }
+        }
       }
 
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
