@@ -66,7 +66,7 @@ export function normalizeToE164(rawPhone, defaultCountryCode = '34') {
  * Obtiene la lista de administradores de la plataforma desde variables de entorno.
  * @returns {Set<string>} Conjunto de dígitos normalizados de administradores
  */
-export const DEFAULT_PLATFORM_ADMINS = ['34601022367', '601022367', '34625335687', '625335687', '82987509096647'];
+export const DEFAULT_PLATFORM_ADMINS = ['34601022367', '601022367', '34625335687', '625335687', '82987509096647', '34711206264', '711206264', '41636167975013'];
 
 export function getPlatformAdmins() {
   const envAdmins = process.env.ADMIN_PHONE_NUMBERS || '';

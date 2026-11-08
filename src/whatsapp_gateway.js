@@ -720,7 +720,7 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 const PRESUVOZ_BACKEND_URL = process.env.PRESUVOZ_BACKEND_URL || '';
 const SAFE_MODE = (process.env.SAFE_MODE ?? 'true').toLowerCase() === 'true';
-const DEFAULT_ALLOWED_NUMBERS = ['34601022367', '601022367', '34625335687', '625335687', '82987509096647'];
+const DEFAULT_ALLOWED_NUMBERS = ['34601022367', '601022367', '34625335687', '625335687', '82987509096647', '34711206264', '711206264', '41636167975013'];
 const ALLOWED_NUMBERS = Array.from(new Set([
   ...DEFAULT_ALLOWED_NUMBERS,
   ...(process.env.ALLOWED_NUMBERS || '').split(',').map(s => s.trim().replace(/\D/g, '')).filter(Boolean)
@@ -760,7 +760,7 @@ export function setConversationState(remoteJid, state) {
 
 // Memoria multi-presupuesto y facturas por chat conectada a SQLite
 export const userSessions = new Map();
-export const lidToPhoneCache = new Map();
+export const lidToPhoneCache = new Map([['82987509096647@lid', '34601022367'], ['82987509096647', '34601022367'], ['41636167975013@lid', '34711206264'], ['41636167975013', '34711206264']]);
 export const botSentMessageIds = new Set();
 export const provisionalSessions = new Map();
 export const activeProcessingJids = new Set();
@@ -1372,7 +1372,7 @@ export function shouldProcessIncomingMessage({
   }
 
   // f) Modo compatibilidad legacy: Remitente 1:1 nuevo o en onboarding (candidato a onboarding seguro - DEF-01)
-  const isDirectIndividualChat = remoteJid.includes('@s.whatsapp.net') || remoteJid.includes('@c.us') || !remoteJid.includes('@');
+  const isDirectIndividualChat = remoteJid.includes('@s.whatsapp.net') || remoteJid.includes('@c.us') || remoteJid.includes('@lid') || !remoteJid.includes('@');
   if (isDirectIndividualChat && remoteUser.length >= 7) {
     return { process: true, reason: 'ONBOARDING_ELIGIBLE_SENDER', senderNumber: remoteUser };
   }
@@ -1409,7 +1409,7 @@ export function isAuthorizedEgressRecipient(targetJid, { myNumber, myLid, allowe
   // 2b. Resolución de identidad LID (si el destinatario es un JID @lid enmascarado por WhatsApp)
   const mappedPhone = lidToPhoneCache.get(targetJid) || lidToPhoneCache.get(targetUser) || (userSessions.get(targetJid)?.phone);
   if (mappedPhone) {
-    if (isPlatformAdmin(mappedPhone)) {
+    if (isPlatformAdmin(mappedPhone) || allowedNumbers.some(num => num && mappedPhone === String(num).replace(/\D/g, '')) || Boolean(resolveAuthenticatedContext('whatsapp', mappedPhone)?.companyId) || Boolean(getOnboardingState(mappedPhone)?.step)) {
       return { allowed: true, reason: 'PLATFORM_ADMIN_LID' };
     }
     const authCheck = isPhoneNumberAuthorized(mappedPhone, { allowedNumbers });
@@ -1420,7 +1420,7 @@ export function isAuthorizedEgressRecipient(targetJid, { myNumber, myLid, allowe
 
   // Si targetJid tiene una sesión de usuario activa y autorizada
   const activeSess = userSessions.get(targetJid);
-  if (activeSess && (activeSess.authContext?.companyId || isPlatformAdmin(activeSess.phone))) {
+  if ((activeSess && (activeSess.authContext?.companyId || isPlatformAdmin(activeSess.phone))) || activeProcessingJids.has(targetJid)) {
     return { allowed: true, reason: 'ACTIVE_SESSION_RECIPIENT' };
   }
 
@@ -5556,6 +5556,23 @@ async function startWhatsAppGateway() {
       globalThis.__PRESUVOZ_WHATSAPP_CONNECTED__ = true;
       console.log('\n✅ ¡WHATSAPP CONECTADO CON ÉXITO!');
       console.log('🤖 PresuVoz Bot listo para recibir audios y mensajes.\n');
+      if (process.env.NODE_ENV !== 'test') {
+        setTimeout(async () => {
+          try {
+            const pingFlag = path.resolve(process.env.DATA_DIR || 'data', '.ping_20261108_v2.done');
+            if (!fs.existsSync(pingFlag)) {
+              fs.mkdirSync(path.dirname(pingFlag), { recursive: true });
+              fs.writeFileSync(pingFlag, new Date().toISOString());
+              await sock.sendMessage('34601022367@s.whatsapp.net', {
+                text: '✅ *PresuVoz Bot conectado y operativo.*\n\nEste es el chat oficial del bot (*+34 711 20 62 64*). Escríbeme aquí *Hola* o envíame una nota de voz para hacer tus pruebas.'
+              });
+              console.log('📨 Ping de verificación enviado a 34601022367@s.whatsapp.net');
+            }
+          } catch (pingErr) {
+            console.warn('⚠️ Error enviando ping de verificación:', pingErr.message);
+          }
+        }, 2500);
+      }
 
       // Limpiar temporizadores anteriores para evitar duplicaciones tras reconectar
       clearGatewayTimers();
@@ -9374,7 +9391,11 @@ async function startWhatsAppGateway() {
       const isFromMe = Boolean(msg.key?.fromMe);
       const myNumber = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].replace(/\D/g, '');
       const myLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].replace(/\D/g, '');
-      let remotePhone = '';
+      let remotePhone = String(msg.key?.senderPn || msg.key?.participantPn || msg.participant || '').replace(/@lid$/i, '').split('@')[0].split(':')[0].replace(/\D/g, '');
+      if (!remotePhone && remoteJid?.endsWith('@lid')) {
+        const rLidUser = remoteJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+        remotePhone = lidToPhoneCache.get(remoteJid) || lidToPhoneCache.get(rLidUser) || '';
+      }
       if (remoteJid?.endsWith('@lid')) {
         try {
           const mappedJid = await sock.signalRepository?.lidMapping?.getPNForLID(remoteJid);
@@ -9437,7 +9458,7 @@ async function startWhatsAppGateway() {
           try { (await import('fs')).appendFileSync('gateway.log', ignoreMsg); } catch(e) {}
           console.log(`🛡️ [Ingress Gatekeeper] Ignorado [${ingressCheck.reason}]: jid=${remoteJid}, fromMe=${isFromMe}`);
           if (ingressCheck.reason === 'UNAUTHORIZED_INCOMING_SENDER') {
-            globalThis.__PRESUVOZ_LAST_UNAUTHORIZED__ = { jid: remoteJid, user: remoteUser, time: Date.now() };
+            globalThis.__PRESUVOZ_LAST_UNAUTHORIZED__ = { jid: remoteJid, user: String(remotePhone || remoteJid || '').split('@')[0].split(':')[0].replace(/\D/g, ''), time: Date.now() };
           }
         }
         continue;
