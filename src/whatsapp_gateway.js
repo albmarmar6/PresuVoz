@@ -1991,7 +1991,7 @@ export function detectShoppingListQueryIntent(text) {
     return null;
   }
   // Excluir cualquier orden de apuntar / añadir / meter / poner / guardar / agregar / comprar materiales
-  if (/\b(?:apunt(?:ar?|a|ame|á|anos|ale)|anot(?:ar?|a|ame|á|anos|ale)|a[ñn]ad(?:ir?|e|eme|anos|ale)|met(?:er?|e|eme|anos|ale)|pon(?:me|nos|le)?|guard(?:ar?|a|ame|á|anos|ale)|agreg(?:ar?|a|ame|á|anos|ale)|inclu(?:ir?|ye|yeme)|comprar\s+\d+)\b/i.test(t)) {
+  if (/(?:^|\s)(?:apunt|anot|a[ñn][aá]d|an[aá]d|met|pon|guard|agreg|inclu|pas(?:a|á|e|alo|alos)|comprar\s+\d+)/i.test(t)) {
     return null;
   }
 
@@ -6431,6 +6431,9 @@ async function startWhatsAppGateway() {
         customCalculatedItems: cleanGeminiParams.customCalculatedItems
       });
       session.lastMaterialCalculation = calcResult;
+      if (!Array.isArray(session.materialCalculationHistory)) session.materialCalculationHistory = [];
+      session.materialCalculationHistory.unshift(calcResult);
+      if (session.materialCalculationHistory.length > 25) session.materialCalculationHistory.pop();
       const sentCalc = await sock.sendMessage(remoteJid, { text: calcResult.whatsappText });
       if (sentCalc?.key?.id) botSentMessageIds.add(sentCalc.key.id);
       return;
@@ -7751,12 +7754,14 @@ async function startWhatsAppGateway() {
       }
 
       let session = getUserSession(remoteJid, senderNumber);
+      if (session) session.currentQuotedContext = item.quotedContext || extractQuotedMessageContext(item.msg) || null;
       if (!session || !session.authContext) {
         // Remitente no autenticado o sesión en memoria fría: verificar o ejecutar Onboarding Seguro Provisional
         const onboardingResult = await handleSecurePreOnboarding(sock, remoteJid, senderNumber, item);
         if (onboardingResult.alreadyAuthenticated) {
           // El canal ya está autenticado en SQLite: recargar sesión en memoria
           session = getUserSession(remoteJid, senderNumber);
+          if (session) session.currentQuotedContext = item.quotedContext || extractQuotedMessageContext(item.msg) || null;
         } else if (onboardingResult.handled) {
           isSuccess = true;
           if (wamId) updateMessageStatus(wamId, 'DELIVERED');

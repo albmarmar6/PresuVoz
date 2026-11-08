@@ -100,7 +100,28 @@ export function detectMaterialCalculationIntent(text = '', sessionContext = {}) 
   }
 
   // ¿Pide guardar el último cálculo directamente en la lista de la compra?
-  if (sessionContext?.lastMaterialCalculation) {
+  const activeCalc = (() => {
+    const qText = String(sessionContext?.currentQuotedContext?.text || sessionContext?.quotedContext?.text || '').trim();
+    if (qText && /C[AÁ]LCULO\s+DE\s+MATERIALES/i.test(qText)) {
+      const history = Array.isArray(sessionContext?.materialCalculationHistory) ? sessionContext.materialCalculationHistory : [];
+      const cleanStr = (s) => norm(String(s || '').replace(/[*_~`]+/g, ''));
+      const qClean = cleanStr(qText);
+      const qFirstLine = qClean.split('\n')[0].trim();
+      const found = history.find(c => {
+        if (!c?.whatsappText) return false;
+        const cClean = cleanStr(c.whatsappText);
+        return cClean === qClean || (qFirstLine.length > 10 && cClean.includes(qFirstLine) && (qClean.length < 60 || cClean.includes(qClean.slice(0, Math.min(qClean.length, 120)))));
+      });
+      if (found) return found;
+      const bodyOnly = qText.split(/💡|🛒/)[0].replace(/[*_~`]+/g, ' ');
+      const extractedFromQuote = extractMaterialParameters(bodyOnly);
+      if (extractedFromQuote.tradeType) {
+        return calculateConstructionMaterials({ tradeType: extractedFromQuote.tradeType, params: extractedFromQuote, rawText: bodyOnly });
+      }
+    }
+    return sessionContext?.lastMaterialCalculation || null;
+  })();
+  if (activeCalc) {
     const isSaveToShopping = /\b(?:anadelo|añadelo|anadelos|añadelos|guardalo|guardalos|apuntalo|apuntalos|metelo|metelos|pasalo|pasalos)\b.*\b(?:lista\s+de\s+(?:la\s+)?compra|compras|materiales)\b/i.test(n)
       || /^(?:si\s*,?\s*)?(?:anadelo|añadelo|guardalo|apuntalo)(?:\s+a\s+la\s+lista(?:\s+de\s+la\s+compra)?)?(?:\s+(?:de|para)\s+(.+))?$/i.test(n);
     if (isSaveToShopping) {
@@ -111,7 +132,8 @@ export function detectMaterialCalculationIntent(text = '', sessionContext = {}) 
       }
       return {
         isSaveLastCalculationToShopping: true,
-        clientName: clientName || sessionContext.lastMaterialCalculation.clientName || null
+        clientName: clientName || activeCalc.clientName || null,
+        targetCalculation: activeCalc
       };
     }
 
@@ -125,7 +147,8 @@ export function detectMaterialCalculationIntent(text = '', sessionContext = {}) 
       }
       return {
         isAddLastCalculationToBudget: true,
-        targetQuery: targetQuery || sessionContext.lastMaterialCalculation.clientName || null
+        targetQuery: targetQuery || activeCalc.clientName || null,
+        targetCalculation: activeCalc
       };
     }
 
@@ -140,9 +163,9 @@ export function detectMaterialCalculationIntent(text = '', sessionContext = {}) 
       if (meaningfulKeys.length > 0) {
         return {
           isRecalculation: true,
-          tradeType: overrides.tradeType || sessionContext.lastMaterialCalculation.tradeType,
+          tradeType: overrides.tradeType || activeCalc.tradeType,
           params: {
-            ...sessionContext.lastMaterialCalculation.params,
+            ...activeCalc.params,
             ...overrides
           }
         };
@@ -243,7 +266,7 @@ export function extractMaterialParameters(rawText = '') {
   }
 
   // 2. Extraer superficie en m² (ej: "20 m2", "20 metros cuadrados", "de 20m²")
-  const areaMatch = n.match(/(\d+(?:[.,]\d+)?)\s*(?:m2|m²|metros?\s+cuadrados?)\b/);
+  const areaMatch = n.match(/(\d+(?:[.,]\d+)?)\s*(?:m2\b|m²|metros?\s+cuadrados?\b)/);
   if (areaMatch) {
     params.areaM2 = parseSpanishNumber(areaMatch[1]);
   }

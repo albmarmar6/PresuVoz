@@ -13186,6 +13186,20 @@ const inlineCheck95 = detectInlineBudgetMaterialRequest("Presupuesto para Juan: 
 assert(Boolean(inlineCheck95 && inlineCheck95.includeInBudgetPdf === true && inlineCheck95.sendCalculationInChat === true),
   "TEST 95 (7.5): Detecta petición inline dentro del audio del presupuesto para incluir las cantidades de material en el PDF");
 
+assert(detectShoppingListQueryIntent("Añadelo a la lista de la compra") === null && detectShoppingListQueryIntent("Añádelo a la lista de la compra") === null,
+  "TEST 95 (7.6): detectShoppingListQueryIntent NO intercepta 'Añadelo a la lista de la compra' como una consulta vacía de compras");
+
+const calcTilingOld95 = detectRouterIntent("Calcula azulejos de 20x20 cm para 30 m2", { session: mockSession95 });
+const replyTilingOld95 = await resolveRouterIntent(calcTilingOld95, '34699000095', mockSession95);
+const calcWindowsNew95 = detectRouterIntent("Calcula material para montar 4 ventanas de 120x120 cm", { session: mockSession95 });
+await resolveRouterIntent(calcWindowsNew95, '34699000095', mockSession95);
+mockSession95.currentQuotedContext = { text: replyTilingOld95 };
+const quotedSaveIntent95 = detectRouterIntent("Añadelo a la lista de la compra", { session: mockSession95 });
+const quotedSaveReply95 = await resolveRouterIntent(quotedSaveIntent95, '34699000095', mockSession95);
+assert(Boolean(quotedSaveReply95 && quotedSaveReply95.includes("825") && quotedSaveReply95.toLowerCase().includes("cemento cola")),
+  "TEST 95 (7.7): Al citar un mensaje pasado de CÁLCULO DE MATERIALES y decir 'Añadelo a la lista de la compra', añade los materiales del cálculo citado y no del último");
+mockSession95.currentQuotedContext = null;
+
 testDatabaseSync.prepare("DELETE FROM budgets WHERE company_id = ?").run(comp95.companyId);
 testDatabaseSync.prepare("DELETE FROM shopping_items WHERE company_id = ? OR client_name = ?").run(comp95.companyId, 'Reforma Cocina');
 testDatabaseSync.prepare("DELETE FROM channel_identities WHERE company_id = ?").run(comp95.companyId);

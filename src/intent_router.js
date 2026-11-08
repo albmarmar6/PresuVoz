@@ -1047,6 +1047,9 @@ export async function resolveIntent(intentResult, phone, session) {
         });
         if (session) {
           session.lastMaterialCalculation = calcResult;
+          if (!Array.isArray(session.materialCalculationHistory)) session.materialCalculationHistory = [];
+          session.materialCalculationHistory.unshift(calcResult);
+          if (session.materialCalculationHistory.length > 25) session.materialCalculationHistory.pop();
         }
         return calcResult.whatsappText;
       }
@@ -1116,7 +1119,7 @@ export async function resolveIntent(intentResult, phone, session) {
       }
 
       case 'ADD_CALCULATION_TO_BUDGET': {
-        const lastCalc = session?.lastMaterialCalculation;
+        const lastCalc = params?.targetCalculation || session?.lastMaterialCalculation;
         if (!lastCalc) {
           return 'ℹ️ No tengo ningún cálculo de materiales reciente para añadir al presupuesto.\n\n💡 _Pídeme primero un cálculo (ej: «cuántos azulejos de 15x15 necesito para 20 m²»)._';
         }
@@ -1190,7 +1193,7 @@ export async function resolveIntent(intentResult, phone, session) {
       }
 
       case 'SAVE_CALCULATION_TO_SHOPPING': {
-        const lastCalc = session?.lastMaterialCalculation;
+        const lastCalc = params?.targetCalculation || session?.lastMaterialCalculation;
         if (!lastCalc || !Array.isArray(lastCalc.shoppingItems) || lastCalc.shoppingItems.length === 0) {
           return 'ℹ️ No tengo ningún cálculo de materiales reciente para guardar.\n\n💡 _Pídeme primero un cálculo (ej: «cuántos azulejos de 15x15 necesito para 20 m²»).__';
         }
