@@ -685,11 +685,30 @@ console.info = (...args) => {
   }
   _origInfo(...args);
 };
+if (!globalThis.__PRESUVOZ_RECENT_LOGS__) globalThis.__PRESUVOZ_RECENT_LOGS__ = [];
+function pushRecentLog(level, args) {
+  try {
+    const text = args.map(a => typeof a === 'string' ? a : (a instanceof Error ? a.message : JSON.stringify(a))).join(' ').slice(0, 300);
+    globalThis.__PRESUVOZ_RECENT_LOGS__.push(`[${new Date().toISOString()}] [${level}] ${text}`);
+    if (globalThis.__PRESUVOZ_RECENT_LOGS__.length > 60) globalThis.__PRESUVOZ_RECENT_LOGS__.shift();
+  } catch (e) {}
+}
+const _origLog = console.log;
+console.log = (...args) => {
+  pushRecentLog('LOG', args);
+  _origLog(...args);
+};
+const _origError = console.error;
+console.error = (...args) => {
+  pushRecentLog('ERR', args);
+  _origError(...args);
+};
 const _origWarn = console.warn;
 console.warn = (...args) => {
   if (typeof args[0] === 'string' && (args[0].includes('Session already') || args[0].includes('Closing open session'))) {
     return;
   }
+  pushRecentLog('WARN', args);
   _origWarn(...args);
 };
 
@@ -5473,8 +5492,32 @@ async function startWhatsAppGateway() {
 
   sock.ev.on('creds.update', saveCreds);
 
+  globalThis.__PRESUVOZ_WHATSAPP_USER__ = {
+    provider,
+    authDir: process.env.BAILEYS_AUTH_DIR || 'auth_info_baileys',
+    credsMe: state?.creds?.me || null,
+    sockUser: sock?.user || null
+  };
+
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
+    const statusCode = lastDisconnect?.error?.output?.statusCode || null;
+    if (!globalThis.__PRESUVOZ_CONN_EVENTS__) globalThis.__PRESUVOZ_CONN_EVENTS__ = [];
+    globalThis.__PRESUVOZ_CONN_EVENTS__.push({
+      time: new Date().toISOString(),
+      connection: connection || null,
+      hasQr: Boolean(qr),
+      statusCode,
+      errMsg: lastDisconnect?.error?.message || null
+    });
+    if (globalThis.__PRESUVOZ_CONN_EVENTS__.length > 20) globalThis.__PRESUVOZ_CONN_EVENTS__.shift();
+
+    globalThis.__PRESUVOZ_WHATSAPP_USER__ = {
+      provider,
+      authDir: process.env.BAILEYS_AUTH_DIR || 'auth_info_baileys',
+      credsMe: state?.creds?.me || null,
+      sockUser: sock?.user || null
+    };
 
     if (qr) {
       globalThis.__PRESUVOZ_LATEST_QR__ = qr;
@@ -5488,13 +5531,25 @@ async function startWhatsAppGateway() {
     }
 
     if (connection === 'close') {
+      globalThis.__PRESUVOZ_WHATSAPP_CONNECTED__ = false;
       clearGatewayTimers();
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log('⚠️ Conexión cerrada. ¿Reconectando?:', shouldReconnect);
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      console.log(`⚠️ Conexión cerrada (statusCode=${statusCode}). ¿Reconectando?: ${shouldReconnect}`);
       if (shouldReconnect && !isShuttingDown) {
-        startWhatsAppGateway();
+        setTimeout(() => startWhatsAppGateway(), 1500);
+      } else if (statusCode === DisconnectReason.loggedOut && !isShuttingDown) {
+        console.log('🔄 Sesión cerrada (loggedOut). Limpiando credenciales antiguas para generar nuevo QR en /qr...');
+        try {
+          const authDirToClean = process.env.BAILEYS_AUTH_DIR || 'auth_info_baileys';
+          if (fs.existsSync(authDirToClean)) {
+            for (const f of fs.readdirSync(authDirToClean)) {
+              try { fs.rmSync(path.join(authDirToClean, f), { recursive: true, force: true }); } catch (e) {}
+            }
+          }
+        } catch (e) {}
+        setTimeout(() => startWhatsAppGateway(), 2000);
       } else {
-        console.log('❌ Sesión cerrada. Elimina la carpeta auth_info_baileys para vincular de nuevo.');
+        console.log('❌ Sesión cerrada.');
       }
     } else if (connection === 'open') {
       globalThis.__PRESUVOZ_LATEST_QR__ = null;
@@ -9296,6 +9351,18 @@ async function startWhatsAppGateway() {
 
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (!globalThis.__PRESUVOZ_RAW_UPSERTS__) globalThis.__PRESUVOZ_RAW_UPSERTS__ = [];
+    for (const m of (messages || [])) {
+      globalThis.__PRESUVOZ_RAW_UPSERTS__.push({
+        time: new Date().toISOString(),
+        type,
+        remoteJid: m?.key?.remoteJid || null,
+        fromMe: Boolean(m?.key?.fromMe),
+        id: m?.key?.id || null,
+        msgKeys: m?.message ? Object.keys(m.message) : []
+      });
+      if (globalThis.__PRESUVOZ_RAW_UPSERTS__.length > 25) globalThis.__PRESUVOZ_RAW_UPSERTS__.shift();
+    }
     // 'append' incluye historial sincronizado; solo se procesa si es un mensaje enviado
     // en el chat consigo mismo. El resto del historial no es actividad nueva del bot.
     if (type !== 'notify' && type !== 'append') return;
@@ -9356,6 +9423,15 @@ async function startWhatsAppGateway() {
       });
 
       if (!ingressCheck.process) {
+        globalThis.__PRESUVOZ_LAST_IGNORED__ = {
+          time: new Date().toISOString(),
+          jid: remoteJid,
+          fromMe: isFromMe,
+          myNumber,
+          myLid,
+          remotePhone,
+          reason: ingressCheck.reason
+        };
         if (!remoteJid?.includes('@g.us') && !remoteJid?.includes('@broadcast') && !remoteJid?.includes('@newsletter')) {
           const ignoreMsg = `[${new Date().toLocaleTimeString()}] 🛡️ [Ingress Gatekeeper] Ignorado [${ingressCheck.reason}]: jid=${remoteJid}, fromMe=${isFromMe}\n`;
           try { (await import('fs')).appendFileSync('gateway.log', ignoreMsg); } catch(e) {}

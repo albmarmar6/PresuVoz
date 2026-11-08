@@ -820,10 +820,15 @@ export function createPresuVozHttpServer(options = {}) {
           service: 'presuvoz-gateway',
           timestamp: new Date().toISOString(),
           whatsappConnected: Boolean(globalThis.__PRESUVOZ_WHATSAPP_CONNECTED__),
+          hasQrPending: Boolean(globalThis.__PRESUVOZ_LATEST_QR__),
+          whatsappUser: globalThis.__PRESUVOZ_WHATSAPP_USER__ || null,
+          connEvents: globalThis.__PRESUVOZ_CONN_EVENTS__ || [],
           hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
           geminiKeyLength: (process.env.GEMINI_API_KEY || '').length,
+          rawUpserts: globalThis.__PRESUVOZ_RAW_UPSERTS__ || [],
           lastIncoming: globalThis.__PRESUVOZ_LAST_MESSAGE__ || null,
-          lastIgnored: globalThis.__PRESUVOZ_LAST_IGNORED__ || null
+          lastIgnored: globalThis.__PRESUVOZ_LAST_IGNORED__ || null,
+          recentLogs: (globalThis.__PRESUVOZ_RECENT_LOGS__ || []).slice(-35)
         }, null, 2));
         return;
       }
