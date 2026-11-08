@@ -17,17 +17,17 @@ export function getStepQuestion(step, data = {}) {
       return [
         '👉 *¿Cómo te llamas y cómo se llama tu empresa o negocio?*',
         '',
-        '_(Por ejemplo: «Me llamo Carlos y mi empresa es Reformas Carlos» o «Alberto, Instalaciones Sur». Si quieres puedes añadir también tu NIF/CIF o dejarlo para luego)_'
+        '_(Por ejemplo: «Me llamo Carlos y mi empresa es Reformas Carlos» o «Alberto, Instalaciones Sur». Si lo deseas, puedes añadir también tu NIF/CIF o indicarlo más adelante)_'
       ].join('\n');
     case 'TRADE':
       return [
-        '👉 *¿A qué oficio o gremio te dedicas principalmente?*',
+        '👉 *¿A qué oficio, gremio o especialidades te dedicas?*',
         '',
-        '_(Por ejemplo: Albañilería, fontanería, electricidad, reformas integrales, pintura, carpintería, climatización...)_'
+        '_(Por ejemplo: Albañilería, fontanería, electricidad, reformas integrales, pintura, carpintería, climatización... Puedes indicar uno o varios oficios)_'
       ].join('\n');
     case 'CITY':
       return [
-        '👉 *¿Por qué ciudad o zona sueles moverte habitualmente para los trabajos y obras?*',
+        '👉 *¿En qué ciudad o zona realizas habitualmente tus trabajos y obras?*',
         '',
         '_(Por ejemplo: Sevilla y alrededores, Madrid capital, Valencia y provincia...)_'
       ].join('\n');
@@ -35,34 +35,34 @@ export function getStepQuestion(step, data = {}) {
       return [
         '👉 *¿Cuál es tu dirección fiscal completa para que aparezca en tus facturas y presupuestos?*',
         '',
-        '_(Calle, número, código postal y localidad. O pon «luego» si prefieres añadirla más tarde)_'
+        '_(Calle, número, código postal y localidad. O escribe «luego» si prefieres añadirla más adelante)_'
       ].join('\n');
     case 'PAYMENT_TERMS':
       return [
         '👉 *¿Cómo sueles cobrar habitualmente a tus clientes?*',
-        '1️⃣ 30% anticipo al inicio y resto al acabar (Recomendado)',
-        '2️⃣ 50% al empezar y 50% al acabar',
-        '3️⃣ 100% al terminar',
+        '1️⃣ 30% de anticipo al inicio y resto al finalizar (Recomendado)',
+        '2️⃣ 50% al inicio y 50% al finalizar',
+        '3️⃣ 100% al finalizar',
         '4️⃣ Por hitos o fases de obra',
-        '5️⃣ O dime tu forma personalizada (ej: «20% de anticipo», «40/60»... o pon «luego»)'
+        '5️⃣ Forma personalizada (ej: «70% al inicio y 30% al final», «40/60»... o escribe «luego»)'
       ].join('\n');
     case 'QUOTE_VALIDITY':
       return [
-        '👉 *¿Cuánto tiempo suelen ser válidos tus presupuestos antes de que caduquen?*',
+        '👉 *¿Cuál es el plazo de validez habitual de tus presupuestos?*',
         '1️⃣ 30 días (1 mes)',
         '2️⃣ 60 días (2 meses)',
         '3️⃣ 90 días (3 meses)',
-        '4️⃣ Otro plazo (indícame los días que quieras, ej: «15 días», «45 días», «180 días»)'
+        '4️⃣ Otro plazo (indica los días, ej: «15 días», «45 días», «180 días»)'
       ].join('\n');
     case 'WORKING_HOURS':
       return [
         '👉 *¿Cuál es tu horario habitual de trabajo o atención?*',
         '',
-        '_(Por ejemplo: De lunes a viernes de 8:00 a 18:00... O pon «luego» si prefieres)_'
+        '_(Por ejemplo: De lunes a viernes de 8:00 a 18:00... O escribe «luego» si prefieres)_'
       ].join('\n');
     case 'ADVANCE':
       return [
-        '👉 *¿Sueles pedir algún anticipo al confirmar la obra o para compra de materiales? ¿De qué porcentaje suele ser?*',
+        '👉 *¿Sueles solicitar algún anticipo al confirmar la obra o para compra de materiales? ¿De qué porcentaje?*',
         '',
         '_(Por ejemplo: 30%, 40%, 50%, o escribe «ninguno» o «luego»)_'
       ].join('\n');
@@ -90,21 +90,21 @@ export function getStepQuestion(step, data = {}) {
       ].join('\n');
     case 'IRPF_RATE':
       return [
-        '👉 *¿Utilizas algún porcentaje de IRPF en tus facturas?*',
+        '👉 *¿Utilizas algún porcentaje de retención de IRPF en tus facturas?*',
         '',
-        '_(Por ejemplo: 15% general de profesional, 7% si eres nuevo autónomo, o escribe «no» / «0%» si facturas a particulares o como sociedad)_'
+        '_(Por ejemplo: 15% general de profesional, 7% nuevo autónomo, o escribe «no» / «0%» si facturas a particulares o como sociedad)_'
       ].join('\n');
     case 'INVOICE_SERIES':
       return [
-        '👉 *¿Qué numeración o serie quieres utilizar para tus facturas?*',
+        '👉 *¿Qué numeración o serie deseas utilizar para tus facturas?*',
         '',
-        '_(Por ejemplo: 2026-001... Si no pones nada usaremos «2026-001»)_'
+        '_(Por ejemplo: 2026-001... Si no indicas otra, se asignará «2026-001»)_'
       ].join('\n');
     case 'BANK_ACCOUNT':
       return [
-        '👉 *¿Tienes una cuenta bancaria (IBAN) o Bizum que quieras mostrar en las facturas y presupuestos para que te paguen?*',
+        '👉 *¿Deseas incluir una cuenta bancaria (IBAN) o Bizum en tus facturas y presupuestos?*',
         '',
-        '_(Puedes pasarme el IBAN, el número para Bizum, o escribir «luego» si prefieres añadirlo más adelante)_'
+        '_(Puedes indicar el IBAN, el número para Bizum, o escribir «luego» para añadirlo más adelante)_'
       ].join('\n');
     default:
       return '';
@@ -133,52 +133,78 @@ export function startOnboarding(phone) {
   });
 
   return [
-    '👋 *¡Hola! Qué alegría saludarte.* Vamos a dejar tu asistente inteligente configurado en un periquete, como charlando tranquilamente entre colegas con un café ☕.',
+    '👋 *Bienvenido a PresuVoz.* Vamos a configurar los datos de tu perfil profesional en unos breves pasos para generar tus presupuestos y facturas.',
     '',
-    'Para empezar con lo básico:',
+    'Para empezar:',
     '👉 *¿Cómo te llamas y cómo se llama tu empresa o negocio?*',
     '',
-    '_(Por ejemplo: «Me llamo Carlos y mi empresa es Reformas Carlos» o «Alberto, Instalaciones Sur». Si quieres puedes añadir también tu NIF/CIF o dejarlo para luego)_'
+    '_(Por ejemplo: «Me llamo Carlos y mi empresa es Reformas Carlos» o «Alberto, Instalaciones Sur». Si lo deseas, puedes añadir también tu NIF/CIF o indicarlo más adelante)_'
   ].join('\n');
 }
 
 export function normalizeTrade(text) {
   const raw = String(text || '').trim().toLowerCase();
-  let normalizedTrade = 'Reformas y Construcción';
-  let defaultTax = 10;
+  const catalog = [
+    { key: 'electricidad', regex: /electri|telecomunica/i, full: 'Electricidad y Telecomunicaciones', short: 'Electricidad', tax: 21 },
+    { key: 'fontaneria', regex: /fontan|plomer|saneamiento/i, full: 'Fontanería y Saneamiento', short: 'Fontanería', tax: 21 },
+    { key: 'albanileria', regex: /alba[ñn]il/i, full: 'Albañilería y Reformas', short: 'Albañilería', tax: 10 },
+    { key: 'reformas', regex: /\b(?:reformas?(?:\s+integrales)?|construcci[oó]n|obras?)\b/i, full: 'Albañilería y Reformas', short: /integral/i.test(raw) ? 'Reformas Integrales' : 'Reformas', tax: 10 },
+    { key: 'carpinteria', regex: /carpinter|madera/i, full: 'Carpintería y Madera', short: 'Carpintería', tax: 21 },
+    { key: 'climatizacion', regex: /clima|aire\s*acondicionado|calefac/i, full: 'Climatización y Calefacción', short: 'Climatización', tax: 21 },
+    { key: 'pintura', regex: /pint/i, full: 'Pintura y Revestimientos', short: 'Pintura', tax: 21 },
+    { key: 'cerrajeria', regex: /cerraj|met[aá]lic/i, full: 'Cerrajería y C. Metálica', short: 'Cerrajería', tax: 21 },
+    { key: 'pladur', regex: /pladur|yeso|escayola|tabiquer[ií]a/i, full: 'Pladur y Falsos Techos', short: 'Pladur', tax: 10 },
+    { key: 'solados', regex: /solad|alicatad|azulej|paviment|tarima|parquet/i, full: 'Solados, Alicatados y Pavimentos', short: 'Solados y Alicatados', tax: 10 },
+    { key: 'impermeabilizacion', regex: /impermeabiliz|tejad|cubierta/i, full: 'Cubiertas e Impermeabilizaciones', short: 'Impermeabilización y Cubiertas', tax: 10 }
+  ];
 
-  if (/electri/i.test(raw)) {
-    normalizedTrade = 'Electricidad y Telecomunicaciones';
-    defaultTax = 21;
-  } else if (/fontan|plomer/i.test(raw)) {
-    normalizedTrade = 'Fontanería y Saneamiento';
-    defaultTax = 21;
-  } else if (/albañil|obra|construc|reforma/i.test(raw)) {
-    normalizedTrade = 'Albañilería y Reformas';
-    defaultTax = 10;
-  } else if (/carpinter/i.test(raw)) {
-    normalizedTrade = 'Carpintería y Madera';
-    defaultTax = 21;
-  } else if (/clima|aire|calefac/i.test(raw)) {
-    normalizedTrade = 'Climatización y Calefacción';
-    defaultTax = 21;
-  } else if (/pint/i.test(raw)) {
-    normalizedTrade = 'Pintura y Revestimientos';
-    defaultTax = 21;
-  } else if (/cerraj/i.test(raw)) {
-    normalizedTrade = 'Cerrajería y C. Metálica';
-    defaultTax = 21;
-  } else if (raw.length > 2) {
-    normalizedTrade = raw.charAt(0).toUpperCase() + raw.slice(1);
-    defaultTax = 21;
+  const matched = [];
+  for (const entry of catalog) {
+    const m = raw.match(entry.regex);
+    if (m) {
+      matched.push({ ...entry, index: m.index ?? 0 });
+    }
   }
 
-  return { trade: normalizedTrade, defaultTax };
+  if (matched.length === 1) {
+    return { trade: matched[0].full, defaultTax: matched[0].tax };
+  }
+
+  if (matched.length > 1) {
+    matched.sort((a, b) => a.index - b.index);
+    const isOnlyAlbanileriaAndGenericReformas =
+      matched.length === 2 &&
+      matched.some(m => m.key === 'albanileria') &&
+      matched.some(m => m.key === 'reformas') &&
+      !/integral/i.test(raw);
+
+    if (isOnlyAlbanileriaAndGenericReformas) {
+      return { trade: 'Albañilería y Reformas', defaultTax: 10 };
+    }
+
+    const shorts = [...new Set(matched.map(m => m.short))];
+    const combined = shorts.length === 1
+      ? matched[0].full
+      : (shorts.length === 2
+          ? `${shorts[0]} y ${shorts[1]}`
+          : `${shorts.slice(0, -1).join(', ')} y ${shorts[shorts.length - 1]}`);
+    const defaultTax = matched.some(m => m.tax === 10) ? 10 : 21;
+    return { trade: combined, defaultTax };
+  }
+
+  if (raw.length > 2) {
+    return {
+      trade: raw.charAt(0).toUpperCase() + raw.slice(1),
+      defaultTax: 21
+    };
+  }
+
+  return { trade: 'Reformas y Construcción', defaultTax: 10 };
 }
 
 export function formatCompanySummary(comp) {
   return [
-    '🎉 *¡Enhorabuena, amigo! Ya lo tenemos todo configurado.* 🚀',
+    '✅ *¡Enhorabuena! Tu perfil profesional ya está configurado.*',
     '━━━━━━━━━━━━━━━━━━━━━━━━━',
     `👤 *Profesional:* ${comp.ownerName || 'No indicado'}`,
     `🏢 *Empresa / Negocio:* ${comp.name || 'No indicado'}`,
@@ -199,8 +225,8 @@ export function formatCompanySummary(comp) {
     `• *IBAN:* ${comp.iban ? comp.iban : 'No configurado'}`,
     `• *Bizum:* ${comp.bizum ? comp.bizum : 'No configurado'}`,
     '━━━━━━━━━━━━━━━━━━━━━━━━━',
-    '💪 *¡A partir de ahora la IA trabaja contigo codo con codo!*',
-    '🎙️ Puedes dictarme una obra en una nota de voz o escribir *"presupuesto para María de una reforma de baño"* y te lo preparo en segundos con tus datos oficiales.'
+    '🤖 *Tu asistente PresuVoz ya está operativo.*',
+    '🎙️ A partir de ahora puedes enviar una nota de voz o escribir un mensaje de texto (por ejemplo: *"presupuesto para María de una reforma de baño"*) y generaremos el presupuesto en PDF con tus datos oficiales.'
   ].join('\n');
 }
 
@@ -315,7 +341,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
     });
     return {
       handled: true,
-      message: '🛑 *Asistente de registro pausado.* Podrás completarlo cuando quieras escribiendo *"empezar"* o *"configurar de nuevo"*.'
+      message: '🛑 *Asistente de configuración pausado.* Podrás retomarlo cuando quieras escribiendo *"empezar"* o *"configurar perfil"*.'
     };
   }
 
@@ -336,7 +362,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
     return {
       handled: true,
       message: [
-        '👋 ¡Hola de nuevo! Seguimos justo donde lo dejamos con la configuración:',
+        '👋 Continuamos con la configuración de tu perfil profesional:',
         '',
         getStepQuestion(currentStep, data)
       ].join('\n')
@@ -371,12 +397,11 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          `¡Qué buen nombre, *${owner}*! Menudo equipazo vamos a hacer juntos 💪`,
+          `✅ Perfecto, *${owner}*. Datos iniciales registrados correctamente.`,
           '',
-          'Cuéntame:',
-          '👉 *¿A qué oficio o gremio te dedicas principalmente?*',
+          '👉 *¿A qué oficio, gremio o especialidades te dedicas?*',
           '',
-          '_(Por ejemplo: Albañilería, fontanería, electricidad, reformas integrales, pintura, carpintería, climatización...)_'
+          '_(Por ejemplo: Albañilería, fontanería, electricidad, reformas integrales, pintura, carpintería, climatización... Puedes indicar uno o varios oficios)_'
         ].join('\n')
       };
     }
@@ -398,11 +423,11 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          `¡Oído cocina! *${trade}* a tope 🛠️`,
-          `_(He configurado automáticamente el IVA habitual al 10%, que podrás cambiar o especificar en cualquier presupuesto)._`,
+          `✅ *Oficio registrado:* *${trade}* 🛠️`,
+          `_(Se ha configurado el IVA habitual al 10%, que podrás modificar o especificar en cualquier presupuesto)._`,
           '',
-          'Siguiente pregunta:',
-          '👉 *¿Por qué ciudad o zona sueles moverte habitualmente para los trabajos y obras?*',
+          'Siguiente paso:',
+          '👉 *¿En qué ciudad o zona realizas habitualmente tus trabajos y obras?*',
           '',
           '_(Por ejemplo: Sevilla y alrededores, Madrid capital, Valencia y provincia...)_'
         ].join('\n')
@@ -423,11 +448,11 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          city ? `¡Perfecto! Buena zona para currar 📍` : `¡De acuerdo! Dejamos la zona de trabajo pendiente de indicar 📍`,
+          city ? `✅ *Zona de trabajo registrada:* *${city}* 📍` : `De acuerdo, dejamos la zona de trabajo pendiente de indicar 📍`,
           '',
           '👉 *¿Cuál es tu dirección fiscal completa para que aparezca en tus facturas y presupuestos?*',
           '',
-          '_(Calle, número, código postal y localidad. O pon «luego» si prefieres añadirla más tarde)_'
+          '_(Calle, número, código postal y localidad. O escribe «luego» si prefieres añadirla más adelante)_'
         ].join('\n')
       };
     }
@@ -446,15 +471,15 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          address ? `¡Dirección registrada correctamente! 🏠` : `¡Sin problema! Añadiremos la dirección fiscal más adelante 🏠`,
+          address ? `✅ *Dirección fiscal registrada correctamente.* 🏠` : `De acuerdo, añadiremos la dirección fiscal más adelante 🏠`,
           '',
-          'Una pregunta clave para que tus presupuestos salgan con las condiciones perfectas:',
+          'A continuación, configuremos las condiciones de pago habituales para tus presupuestos:',
           '👉 *¿Cómo sueles cobrar habitualmente a tus clientes?*',
-          '1️⃣ 30% anticipo al inicio y resto al acabar (Recomendado)',
-          '2️⃣ 50% al empezar y 50% al acabar',
-          '3️⃣ 100% al terminar',
+          '1️⃣ 30% de anticipo al inicio y resto al finalizar (Recomendado)',
+          '2️⃣ 50% al inicio y 50% al finalizar',
+          '3️⃣ 100% al finalizar',
           '4️⃣ Por hitos o fases de obra',
-          '5️⃣ O dime tu forma personalizada (ej: «20% de anticipo», «40/60»... o pon «luego»)'
+          '5️⃣ Forma personalizada (ej: «70% al inicio y 30% al final», «40/60»... o escribe «luego»)'
         ].join('\n')
       };
     }
@@ -464,32 +489,60 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       let terms = null;
       let advance = 0;
       if (!isSkip) {
-        const pctMatch = input.match(/(\d{1,2})\s*%/);
+        const wordMap = {
+          diez: 10, quince: 15, veinte: 20, veinticinco: 25, treinta: 30,
+          cuarenta: 40, cincuenta: 50, sesenta: 60, setenta: 70, ochenta: 80, noventa: 90
+        };
+        const startPctBefore = input.match(/(\d{1,3})\s*%?\s*(?:de\s+)?(?:anticipo|adelanto|se[ñn]al|al\s+inicio|al\s+empezar|al\s+comenzar|al\s+aceptar|al\s+principio|inicial)\b/i);
+        const startPctAfter = input.match(/\b(?:anticipo|adelanto|se[ñn]al|al\s+inicio|al\s+empezar|al\s+comenzar|al\s+aceptar|al\s+principio|inicial)\s*(?:de(?:l)?\s*)?(\d{1,3})\s*%?/i);
+        const slashPair = input.match(/\b(\d{1,2})\s*\/\s*(\d{1,2})\b/);
+        const twoPcts = [...input.matchAll(/(\d{1,3})\s*%/g)].map(m => parseInt(m[1], 10));
+        const pctMatch = input.match(/(\d{1,3})\s*%/);
         const pureNum = input.match(/\b(\d{1,2})\b/);
-        const advanceWordMatch = input.match(/\b(veinte|veinticinco|treinta|cuarenta|cincuenta)\b/i);
-        const wordMap = { "veinte": 20, "veinticinco": 25, "treinta": 30, "cuarenta": 40, "cincuenta": 50 };
+        const advanceWordMatch = input.match(/\b(diez|quince|veinte|veinticinco|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa)\b/i);
 
-        if (/^(?:1|opci[oó]n\s*1)$/i.test(input) || (/30/i.test(input) && /inicio|empezar|adelant|se[ñn]al/i.test(input))) {
+        if (/^(?:1|opci[oó]n\s*1)$/i.test(input)) {
           terms = '30% de anticipo y 70% al terminar';
           advance = 30;
-        } else if (/^(?:2|opci[oó]n\s*2)$/i.test(input) || /mitad/i.test(input) || (input.includes('50') && /empezar|acabar|inicio|final/i.test(input))) {
+        } else if (/^(?:2|opci[oó]n\s*2)$/i.test(input) || /\bmitad\b/i.test(input)) {
           terms = '50% al empezar y 50% al acabar';
           advance = 50;
-        } else if (/^(?:3|opci[oó]n\s*3)$/i.test(input) || (/terminar|finalizar|acabar/i.test(input) && !/50|30|\d+%/i.test(input))) {
+        } else if (/^(?:3|opci[oó]n\s*3)$/i.test(input) || (/100\s*%?\s*(?:al\s+)?(?:terminar|final|finalizar|acabar)/i.test(input)) || (/terminar|finalizar|acabar/i.test(input) && !/\d/.test(input))) {
           terms = '100% al terminar el trabajo';
           advance = 0;
-        } else if (/^(?:4|opci[oó]n\s*4)$/i.test(input) || (/hito|certifica/i.test(input) && !/\d+%/i.test(input))) {
+        } else if (/^(?:4|opci[oó]n\s*4)$/i.test(input) || (/hito|certifica|fases?\s+de\s+obra/i.test(input) && !/\d+%/i.test(input))) {
           terms = 'Por hitos y certificaciones según avance de obra';
           advance = 0;
+        } else if (startPctBefore || startPctAfter) {
+          const parsedAdv = parseInt((startPctBefore || startPctAfter)[1], 10);
+          if (parsedAdv > 0 && parsedAdv < 100) {
+            advance = parsedAdv;
+            terms = parsedAdv === 50
+              ? '50% al empezar y 50% al acabar'
+              : `${parsedAdv}% de anticipo y ${100 - parsedAdv}% al terminar`;
+          } else if (parsedAdv === 100) {
+            advance = 100;
+            terms = '100% por adelantado al inicio';
+          }
+        } else if (slashPair && (parseInt(slashPair[1], 10) + parseInt(slashPair[2], 10) === 100)) {
+          advance = parseInt(slashPair[1], 10);
+          terms = advance === 50
+            ? '50% al empezar y 50% al acabar'
+            : `${advance}% de anticipo y ${100 - advance}% al terminar`;
+        } else if (twoPcts.length === 2 && (twoPcts[0] + twoPcts[1] === 100)) {
+          advance = twoPcts[0];
+          terms = advance === 50
+            ? '50% al empezar y 50% al acabar'
+            : `${advance}% de anticipo y ${100 - advance}% al terminar`;
         } else if (pctMatch) {
           advance = parseInt(pctMatch[1], 10);
-          terms = input.length > 4 ? input : `${advance}% al empezar y ${100 - advance}% al finalizar`;
+          terms = input.length > 4 ? input : `${advance}% de anticipo y ${100 - advance}% al terminar`;
         } else if (advanceWordMatch && wordMap[advanceWordMatch[1].toLowerCase()]) {
           advance = wordMap[advanceWordMatch[1].toLowerCase()];
-          terms = `${advance}% al empezar y ${100 - advance}% al finalizar`;
+          terms = `${advance}% de anticipo y ${100 - advance}% al terminar`;
         } else if (pureNum && Number(pureNum[1]) > 0 && Number(pureNum[1]) <= 100 && /anticipo|adelanto|empezar|inicio|se[ñn]al/i.test(input)) {
           advance = parseInt(pureNum[1], 10);
-          terms = `${advance}% al empezar y ${100 - advance}% al finalizar`;
+          terms = `${advance}% de anticipo y ${100 - advance}% al terminar`;
         } else if (input.length > 2) {
           terms = input;
           advance = 0;
@@ -510,14 +563,14 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          terms ? `¡Fenomenal! Condiciones de cobro guardadas: *${terms}*${advanceMsg} 💶🤝` : `¡De acuerdo! Dejamos las condiciones de cobro para más adelante 💶`,
+          terms ? `✅ *Condiciones de cobro registradas:* *${terms}*${advanceMsg} 💶` : `De acuerdo, dejamos las condiciones de cobro para más adelante 💶`,
           '',
-          'Y la última pregunta para dejarlo listo:',
-          '👉 *¿Cuánto tiempo suelen ser válidos tus presupuestos antes de que caduquen?*',
+          'Por último:',
+          '👉 *¿Cuál es el plazo de validez habitual de tus presupuestos?*',
           '1️⃣ 30 días (1 mes)',
           '2️⃣ 60 días (2 meses)',
           '3️⃣ 90 días (3 meses)',
-          '4️⃣ Otro plazo (indícame los días que quieras, ej: «15 días», «45 días», «180 días»)'
+          '4️⃣ Otro plazo (indica los días, ej: «15 días», «45 días», «180 días»)'
         ].join('\n')
       };
     }
@@ -534,7 +587,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
         if (!Number.isInteger(days) || days < 1 || days > 3650) {
           return {
             handled: true,
-            message: 'Indícame una validez entre *1 y 3650 días* (por ejemplo, *15 días*, *30 días* o *60 días*).'
+            message: 'Indica una validez entre *1 y 3650 días* (por ejemplo, *15 días*, *30 días* o *60 días*).'
           };
         }
       } else if (/^(?:treinta\s*d[ií]as|un mes|1 mes)$/i.test(option)) {
@@ -548,7 +601,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       } else if (/^(?:4|opci[oó]n\s*4|otro|otra)$/i.test(option)) {
         return {
           handled: true,
-          message: '¿Cuántos días quieres exactamente? Escríbelo, por ejemplo, como *15 días*, *45 días* o *180 días*.'
+          message: '¿Cuántos días deseas configurar exactamente? Escríbelo, por ejemplo, como *15 días*, *45 días* o *180 días*.'
         };
       } else if (/^(?:1|opci[oó]n\s*1)$/i.test(option)) {
         days = 30;
@@ -561,7 +614,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       } else {
         return {
           handled: true,
-          message: 'No he entendido la validez. Elige *1* (30 días), *2* (60 días), *3* (90 días) o escribe los días, por ejemplo *45 días*.'
+          message: 'No he podido identificar el plazo de validez. Selecciona *1* (30 días), *2* (60 días), *3* (90 días) o escribe los días directamente, por ejemplo *45 días*.'
         };
       }
       data.quoteValidityDays = days;
@@ -611,7 +664,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          hours ? '¡Anotado! ⏱️' : '¡Sin problema! Añadiremos el horario más adelante ⏱️',
+          hours ? '✅ *Horario registrado.* ⏱️' : 'De acuerdo, añadiremos el horario más adelante ⏱️',
           '',
           getStepQuestion('PAYMENT_TERMS', data)
         ].join('\n')
@@ -643,7 +696,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          `¡Tomo nota! Anticipo establecido al *${advance}%* 🤝`,
+          `✅ Anticipo establecido al *${advance}%* 🤝`,
           '',
           getStepQuestion('QUOTE_VALIDITY', data)
         ].join('\n')
@@ -666,7 +719,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          `¡Perfecto, registrado como *${entityType === 'autonomo' ? 'Autónomo' : 'Empresa'}*! 📋`,
+          `✅ Registrado como *${entityType === 'autonomo' ? 'Autónomo' : 'Empresa'}*. 📋`,
           '',
           getStepQuestion('FISCAL_NAME', data)
         ].join('\n')
@@ -686,7 +739,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          fiscalName ? `¡Oído cocina, *${fiscalName}*! 📛` : `¡De acuerdo! Dejamos el nombre fiscal para más adelante 📛`,
+          fiscalName ? `✅ *Razón social registrada:* *${fiscalName}* 📛` : `De acuerdo, dejamos el nombre fiscal para más adelante 📛`,
           '',
           getStepQuestion('CIF_NIF', data)
         ].join('\n')
@@ -714,7 +767,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          cif ? `¡NIF/CIF guardado: *${cif}*! 🆔` : `¡Entendido! Dejamos el NIF/CIF pendiente 🆔`,
+          cif ? `✅ *NIF/CIF registrado:* *${cif}* 🆔` : `De acuerdo, dejamos el NIF/CIF pendiente 🆔`,
           '',
           getStepQuestion('FISCAL_ADDRESS', data)
         ].join('\n')
@@ -729,7 +782,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       if (tax === null || ![0, 4, 5, 10, 21].includes(tax)) {
         return {
           handled: true,
-          message: 'No he reconocido ese tipo. Indícame 21%, 10%, 5%, 4% o exento (0%) para guardar el IVA habitual.'
+          message: 'No he reconocido ese tipo. Indica 21%, 10%, 5%, 4% o exento (0%) para guardar el IVA habitual.'
         };
       }
       data.defaultTaxRate = tax;
@@ -743,7 +796,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          `¡IVA fijado al *${tax}%*! 📊`,
+          `✅ *IVA habitual configurado al ${tax}%.* 📊`,
           '',
           getStepQuestion('IRPF_RATE', data)
         ].join('\n')
@@ -769,7 +822,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          `¡Tomo nota! Retención de IRPF: *${irpf > 0 ? irpf + '%' : '0% (sin IRPF)'}* 💼`,
+          `✅ *Retención de IRPF:* *${irpf > 0 ? irpf + '%' : '0% (sin IRPF)'}* 💼`,
           '',
           getStepQuestion('INVOICE_SERIES', data)
         ].join('\n')
@@ -792,7 +845,7 @@ export function processOnboardingStep(phone, rawInput, options = {}) {
       return {
         handled: true,
         message: [
-          `¡Serie de facturación guardada como *${series}*! 🔢`,
+          `✅ *Serie de facturación registrada:* *${series}* 🔢`,
           '',
           getStepQuestion('BANK_ACCOUNT', data)
         ].join('\n')

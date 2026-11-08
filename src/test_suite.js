@@ -1033,7 +1033,7 @@ cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(onboardPhone);
 
 // 1. Iniciar onboarding
 const welcomePrompt = startOnboarding(onboardPhone);
-assert(welcomePrompt.includes('☕'), "El mensaje de bienvenida es cotidiano y amigable");
+assert(welcomePrompt.includes('Bienvenido a PresuVoz'), "El mensaje de bienvenida tiene tono profesional y formal");
 let st = getOnboardingState(onboardPhone);
 assert(st.step === 'OWNER_AND_COMPANY', "Inicia en el paso 1 (OWNER_AND_COMPANY)");
 assert(st.isConfigured === false, "El estado inicial es isConfigured: false");
@@ -1179,6 +1179,21 @@ assert(compAllSkipped.address === null, "Dirección queda null en base de datos 
 assert(compAllSkipped.city === null, "Ciudad queda null en base de datos al responder 'luego'");
 assert(compAllSkipped.ownerName === 'Manolo', "Extrae limpiamente el ownerName 'Manolo'");
 assert(compAllSkipped.name === 'Reformas Manolo S.L', "Extrae limpiamente el name 'Reformas Manolo S.L'");
+const multiTradePhone = '34677777778';
+cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(multiTradePhone);
+startOnboarding(multiTradePhone);
+processOnboardingStep(multiTradePhone, "Me llamo Alberto y mi empresa se llama Reformas Alberto");
+const rMultiTrade = processOnboardingStep(multiTradePhone, "Albañilería y electricidad");
+assert(rMultiTrade.message.includes("Albañilería y Electricidad"), "Onboarding reconoce múltiples oficios combinados ('Albañilería y Electricidad')");
+assert(getOnboardingState(multiTradePhone).company.trade === "Albañilería y Electricidad", "Persiste múltiples oficios en SQLite");
+processOnboardingStep(multiTradePhone, "Sevilla");
+processOnboardingStep(multiTradePhone, "Calle Orfebre Domínguez Vázquez, 41008, Sevilla");
+const rCustomAdv = processOnboardingStep(multiTradePhone, "70% al inicio y 30% al final");
+assert(rCustomAdv.message.includes("70% de anticipo y 30% al terminar"), "Onboarding interpreta '70% al inicio y 30% al final' como 70% de anticipo y 30% al terminar");
+assert(getOnboardingState(multiTradePhone).company.defaultAdvance === 70, "Guarda defaultAdvance = 70 cuando el usuario dice '70% al inicio y 30% al final'");
+const rMultiFinal = processOnboardingStep(multiTradePhone, "3");
+assert(rMultiFinal.completed === true && !rMultiFinal.message.includes("amigo"), "Onboarding finaliza sin lenguaje coloquial ('amigo')");
+cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(multiTradePhone);
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(skipAllPhone);
 // Limpieza test
 cleanDb.prepare('DELETE FROM companies WHERE phone = ?').run(onboardPhone);
@@ -2204,7 +2219,7 @@ assert(isolationCheck.count === 0, "13. Aislamiento de datos verificado entre su
 
 // 14. Regresión: 519 comprobaciones base (onboarding optimizado a 14 pasos), 15 de seguridad, 1 de IVA, 20 casos nuevos, 4 de grounding y 2 de transcripción literal.
 // 14. Regresión: 493 comprobaciones base (onboarding optimizado a 6 pasos esenciales), 15 de seguridad, 1 de IVA, 20 casos nuevos, 4 de grounding y 2 de transcripción literal.
-const baselinePassed = (passedCount === 493 + 15 + 1 + 20 + 4 + 2);
+const baselinePassed = (passedCount === 493 + 15 + 1 + 20 + 4 + 2 + 5);
 assert(baselinePassed, "14. Regresión: pasan las comprobaciones base y los casos de seguridad, IVA, validez y duplicados");
 
 // 15. rollbackLastMigration ya no existe en el servicio (Blindaje Forward-Only)

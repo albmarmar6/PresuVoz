@@ -151,7 +151,8 @@ import {
 import {
   getOnboardingState,
   startOnboarding,
-  processOnboardingStep
+  processOnboardingStep,
+  normalizeTrade
 } from './onboarding_service.js';
 import { detectIntent, resolveIntent, formatAllDebts, formatPeriodRevenue } from './intent_router.js';
 import {
@@ -8367,7 +8368,7 @@ async function startWhatsAppGateway() {
       }
 
       // 2. Comando directo para configurar oficio o especialidad
-      const tradeDirectMatch = rawUserText.match(/^(?:soy|mi oficio es|mi gremio es|somos|oficio|gremio|cambiar oficio a|cambiar gremio a)\s+([a-záéíóúñ\s/]+)$/i);
+      const tradeDirectMatch = rawUserText.match(/^(?:soy|mi oficio es|mi gremio es|somos|oficio|gremio|cambiar oficio a|cambiar gremio a)\s+([a-záéíóúñ\s/,]+)$/i);
       if (tradeDirectMatch) {
         const rawTrade = tradeDirectMatch[1].trim().toLowerCase();
         let normalizedTrade = 'Reformas y Construcción';
@@ -8398,13 +8399,14 @@ async function startWhatsAppGateway() {
           normalizedTrade = rawTrade.charAt(0).toUpperCase() + rawTrade.slice(1);
         }
 
-        const updated = saveCompany(senderNumber, { trade: normalizedTrade, defaultTaxRate: defaultTax });
+        const { trade: multiNormalizedTrade, defaultTax: multiDefaultTax } = normalizeTrade(rawTrade);
+        const updated = saveCompany(senderNumber, { trade: multiNormalizedTrade, defaultTaxRate: multiDefaultTax });
         session.company = updated;
 
         const sentTrade = await sock.sendMessage(remoteJid, {
-          text: `🛠️ *¡Oficio configurado con éxito: ${normalizedTrade}!* 🎉\n━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-            `• A partir de ahora, la IA adaptará las mediciones, capítulos y terminología técnica oficial a tu sector (*${normalizedTrade}*).\n` +
-            `• Tipo de IVA por defecto: *${defaultTax}%* (modificable en cualquier presupuesto).\n\n` +
+          text: `🛠️ *Oficio configurado con éxito: ${updated.trade}* ✅\n━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `• A partir de ahora, la IA adaptará las mediciones, capítulos y terminología técnica oficial a tu especialidad (*${updated.trade}*).\n` +
+            `• Tipo de IVA por defecto: *${updated.defaultTaxRate}%* (modificable en cualquier presupuesto).\n\n` +
             `💡 _Para completar tus datos fiscales (Nombre, CIF, IBAN) di: "Configurar empresa Nombre..., CIF..." o consúltalos con "mi empresa"._`
         });
         if (sentTrade?.key?.id) botSentMessageIds.add(sentTrade.key.id);
