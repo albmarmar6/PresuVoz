@@ -701,10 +701,11 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 const PRESUVOZ_BACKEND_URL = process.env.PRESUVOZ_BACKEND_URL || '';
 const SAFE_MODE = (process.env.SAFE_MODE ?? 'true').toLowerCase() === 'true';
-const ALLOWED_NUMBERS = (process.env.ALLOWED_NUMBERS || '')
-  .split(',')
-  .map(s => s.trim().replace(/\D/g, ''))
-  .filter(Boolean);
+const DEFAULT_ALLOWED_NUMBERS = ['34601022367', '34625335687'];
+const ALLOWED_NUMBERS = Array.from(new Set([
+  ...DEFAULT_ALLOWED_NUMBERS,
+  ...(process.env.ALLOWED_NUMBERS || '').split(',').map(s => s.trim().replace(/\D/g, '')).filter(Boolean)
+]));
 
 // Fallback de menor coste para ráfagas de saturación del modelo principal.
 const GEMINI_MODELS = [...new Set([
@@ -7674,11 +7675,14 @@ async function startWhatsAppGateway() {
         return;
       }
 
-      const session = getUserSession(remoteJid, senderNumber);
+      let session = getUserSession(remoteJid, senderNumber);
       if (!session || !session.authContext) {
-        // Remitente no autenticado: ejecutar flujo de Onboarding Seguro Provisional
+        // Remitente no autenticado o sesión en memoria fría: verificar o ejecutar Onboarding Seguro Provisional
         const onboardingResult = await handleSecurePreOnboarding(sock, remoteJid, senderNumber, item);
-        if (onboardingResult.handled) {
+        if (onboardingResult.alreadyAuthenticated) {
+          // El canal ya está autenticado en SQLite: recargar sesión en memoria
+          session = getUserSession(remoteJid, senderNumber);
+        } else if (onboardingResult.handled) {
           isSuccess = true;
           if (wamId) updateMessageStatus(wamId, 'DELIVERED');
           if (allWamIds) {
@@ -7687,13 +7691,15 @@ async function startWhatsAppGateway() {
           return;
         }
 
-        console.warn(`⛔ [Auth] Mensaje rechazado de ${senderNumber} (${remoteJid}): Canal no autenticado y fuera de onboarding.`);
-        if (wamId) updateMessageStatus(wamId, 'REJECTED');
-        if (allWamIds) {
-          allWamIds.forEach(id => updateMessageStatus(id, 'REJECTED'));
+        if (!session || !session.authContext) {
+          console.warn(`⛔ [Auth] Mensaje rechazado de ${senderNumber} (${remoteJid}): Canal no autenticado y fuera de onboarding.`);
+          if (wamId) updateMessageStatus(wamId, 'REJECTED');
+          if (allWamIds) {
+            allWamIds.forEach(id => updateMessageStatus(id, 'REJECTED'));
+          }
+          setConversationState(remoteJid, 'IDLE');
+          return;
         }
-        setConversationState(remoteJid, 'IDLE');
-        return;
       }
 
       // Si recibimos una imagen para logotipo de empresa o factura de gasto/ticket
@@ -9344,7 +9350,7 @@ async function startWhatsAppGateway() {
         myLid,
         remotePhone,
         allowedNumbers: ALLOWED_NUMBERS,
-        requireExplicitAuth: (process.env.REQUIRE_EXPLICIT_AUTH !== 'false')
+        requireExplicitAuth: (process.env.REQUIRE_EXPLICIT_AUTH === 'true')
       });
 
       if (!ingressCheck.process) {
