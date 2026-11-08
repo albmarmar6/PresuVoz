@@ -9,15 +9,17 @@
  */
 
 export const GEMINI_MODELS = [...new Set([
-  process.env.GEMINI_MODEL || 'gemini-3.8-flash',
-  'gemini-3.1-flash-lite',
+  process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
   'gemini-3.5-flash-lite',
+  'gemini-flash-lite-latest',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-3.8-flash',
   'gemini-flash-lite-latest',
   'gemini-3.7-flash',
   'gemini-3.6-flash',
   'gemini-flash-latest'
 ])];
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -466,7 +468,7 @@ export async function callGeminiAPI(userPrompt, systemInstruction, apiKey) {
           'x-goog-api-key': apiKey
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(30000)
+        signal: AbortSignal.timeout(12000)
       });
 
       if (!response.ok) {

@@ -815,7 +815,16 @@ export function createPresuVozHttpServer(options = {}) {
       // 1. Healthcheck
       if (pathname === '/health' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: true, service: 'presuvoz-gateway', timestamp: new Date().toISOString() }));
+        res.end(JSON.stringify({
+          ok: true,
+          service: 'presuvoz-gateway',
+          timestamp: new Date().toISOString(),
+          whatsappConnected: Boolean(globalThis.__PRESUVOZ_WHATSAPP_CONNECTED__),
+          hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
+          geminiKeyLength: (process.env.GEMINI_API_KEY || '').length,
+          lastIncoming: globalThis.__PRESUVOZ_LAST_MESSAGE__ || null,
+          lastIgnored: globalThis.__PRESUVOZ_LAST_IGNORED__ || null
+        }, null, 2));
         return;
       }
 

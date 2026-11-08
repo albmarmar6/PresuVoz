@@ -701,7 +701,7 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 const PRESUVOZ_BACKEND_URL = process.env.PRESUVOZ_BACKEND_URL || '';
 const SAFE_MODE = (process.env.SAFE_MODE ?? 'true').toLowerCase() === 'true';
-const DEFAULT_ALLOWED_NUMBERS = ['34601022367', '34625335687'];
+const DEFAULT_ALLOWED_NUMBERS = ['34601022367', '601022367', '34625335687', '625335687', '82987509096647'];
 const ALLOWED_NUMBERS = Array.from(new Set([
   ...DEFAULT_ALLOWED_NUMBERS,
   ...(process.env.ALLOWED_NUMBERS || '').split(',').map(s => s.trim().replace(/\D/g, '')).filter(Boolean)
@@ -709,9 +709,11 @@ const ALLOWED_NUMBERS = Array.from(new Set([
 
 // Fallback de menor coste para ráfagas de saturación del modelo principal.
 const GEMINI_MODELS = [...new Set([
-  process.env.GEMINI_MODEL || 'gemini-3.8-flash',
-  'gemini-3.1-flash-lite',
+  process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
   'gemini-3.5-flash-lite',
+  'gemini-flash-lite-latest',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-3.8-flash',
   'gemini-flash-lite-latest',
   'gemini-3.7-flash',
   'gemini-3.6-flash',
@@ -1581,7 +1583,7 @@ async function callGemini(payload, systemInstruction = GEMINI_SYSTEM_PROMPT) {
             maxOutputTokens: 2048
           }
         }),
-        signal: AbortSignal.timeout((payload && payload.audioBuffer) ? 60000 : 35000)
+        signal: AbortSignal.timeout((payload && payload.audioBuffer) ? 40000 : 12000)
       });
 
       const data = await response.json().catch(() => ({}));
@@ -9365,6 +9367,13 @@ async function startWhatsAppGateway() {
         continue;
       }
 
+      globalThis.__PRESUVOZ_LAST_MESSAGE__ = {
+        time: new Date().toISOString(),
+        remoteJid,
+        fromMe: isFromMe,
+        remotePhone: remotePhone || null,
+        text: (msg.message?.conversation || msg.message?.extendedTextMessage?.text || (msg.message?.audioMessage ? 'AUDIO' : 'OTHER') || '').slice(0, 100)
+      };
       const senderNumber = ingressCheck.senderNumber;
       if (remoteJid?.endsWith('@lid') && senderNumber) {
         lidToPhoneCache.set(remoteJid, senderNumber);
