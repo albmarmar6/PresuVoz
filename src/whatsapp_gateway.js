@@ -8783,7 +8783,7 @@ async function startWhatsAppGateway() {
       }
 
       // Comando directo para Factura de Hito o Anticipo: "factura hito 2000€ Jose Luis", "hazme una factura hito de 2000€ para Jose Luis", "factura de anticipo Juan", etc.
-      const milestoneOrAdvanceMatch = rawUserText.match(/(?:(?:prep[aá]ra(?:me)?|haz(?:me)?|emitir?|emite|saca(?:me)?|generar?|gener[aá](?:me)?)\s+(?:una\s+)?factura\s+(?:de\s+)?(hito|anticipo|adelanto)\b|^(?:factura(?:r)?\s+(?:de\s+)?(hito|anticipo|adelanto))\b)(?:\s+(?:de\s+)?(\d+(?:[.,]\d+)?)\s*(%|€|euros?|\$)?)?(?:\s*(\+\s*iva|m[aá]s\s+iva|base))?(?:\s+(?:para|de|del\s+cliente|del\s+presupuesto\s+de|a)?\s*(.+))?/i);
+      const milestoneOrAdvanceMatch = rawUserText.match(/(?:(?:prep[aá]ra(?:me)?|haz(?:me)?|emitir?|emite|saca(?:me)?|generar?|gener[aá](?:me)?)\s+(?:una\s+)?factura\s+(?:de\s+)?(hito|anticipo|adelanto)\b|^(?:factura(?:r)?\s+(?:el\s+|de\s+|del\s+)?(hito|anticipo|adelanto))\b)(?:\s+(?:de\s+)?(\d+(?:[.,]\d+)?)\s*(%|€|euros?|\$)?)?(?:\s*(\+\s*iva|m[aá]s\s+iva|base))?(?:\s+(?:para|de|del\s+cliente|del\s+presupuesto\s+de|a)?\s*(.+))?/i);
       if (milestoneOrAdvanceMatch) {
         const matchedType = (milestoneOrAdvanceMatch[1] || milestoneOrAdvanceMatch[2]).toLowerCase();
         const isHito = matchedType === 'hito';

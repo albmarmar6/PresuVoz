@@ -1089,6 +1089,24 @@ export function createPresuVozHttpServer(options = {}) {
           signedAt: timestamp
         }, companyId);
 
+        let emailDelivery = { emailSent: false, emailId: null, emailError: null };
+        try {
+          emailDelivery = await sendSignedBudgetEmailLocal({
+            verifiedBudget,
+            signaturePro: null,
+            signatureClient: activeSignature,
+            clientEmail: String(clientEmail).trim(),
+            signedAt: timestamp
+          });
+          if (emailDelivery?.emailSent) {
+            savedRecord.emailSent = true;
+            savedRecord.emailId = emailDelivery.emailId;
+            saveLocalSignedBudget(budgetId, savedRecord, companyId);
+          }
+        } catch (mailErr) {
+          console.warn('⚠️ [Sign API Local] Error enviando email de presupuesto firmado:', mailErr.message);
+        }
+
         if (typeof onBudgetSigned === 'function') {
           try {
             await onBudgetSigned(savedRecord);
