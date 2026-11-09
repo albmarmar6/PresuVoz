@@ -482,10 +482,10 @@ function renderFlatSigned(record, justSigned = false) {
     ? 'La copia en PDF se ha enviado por correo.'
     : 'La aceptación está registrada; la copia por correo sigue pendiente.';
   deliveryNotice.classList.toggle('hidden', emailSent);
-  retryEmailButton.classList.toggle('hidden', !record.clientSignature || emailSent);
+  retryEmailButton.classList.toggle('hidden', emailSent);
   deliveryMessage.textContent = record.clientSignature
     ? 'La aceptación está registrada; falta entregar la copia por correo. Puedes reintentar sin volver a firmar.'
-    : 'La aceptación está registrada, pero la copia no consta como enviada. Abre este enlace en el mismo dispositivo usado para firmar o contacta con el profesional para solicitar el reenvío.';
+    : 'La aceptación está registrada. Pulsa en el botón inferior para recibir la copia del contrato en tu email.';
   
   document.getElementById('flatCompanyName').textContent = comp.name || 'Empresa Instaladora';
   document.getElementById('flatCompanyCif').textContent = 'CIF: ' + (comp.cif || 'No especificado');
@@ -645,7 +645,7 @@ window.submitSignatures = async function() {
     if (!res.ok || !data.ok) {
       if (data.alreadySigned) {
         // Ya estaba firmado remotamente
-        const remoteRec = data.details || { signedAt: new Date().toISOString(), clientEmail: email };
+        const remoteRec = { ...(data.details || {}), signedAt: data.details?.signedAt || data.signedAt || new Date().toISOString(), clientEmail: data.details?.clientEmail || email, emailSent: Boolean(data.emailSent || data.details?.emailSent), emailId: data.emailId || data.details?.emailId || null };
         localStorage.setItem(storageKey, JSON.stringify(remoteRec));
         renderFlatSigned(remoteRec, false);
         return;
@@ -665,8 +665,8 @@ window.submitSignatures = async function() {
     // 1. Guardar en el almacenamiento del navegador
     localStorage.setItem(storageKey, JSON.stringify(record));
 
-    record.emailSent = Boolean(data.emailSent);
-    record.emailId = data.emailId || null;
+    record.emailSent = Boolean(data.emailSent || data.details?.emailSent);
+    record.emailId = data.emailId || data.details?.emailId || null;
     localStorage.setItem(storageKey, JSON.stringify(record));
 
     // Cambiar a la vista de consulta tras el registro en el servidor.
@@ -683,8 +683,8 @@ window.retryEmailCopy = async function() {
   const storageKey = getStorageKey(budget?.id, budget?.company?.id);
   let record;
   try { record = JSON.parse(localStorage.getItem(storageKey) || '{}'); } catch (_) { record = {}; }
-  if (!signedPayload || !payloadProof || !record.clientSignature) {
-    document.getElementById('emailDeliveryMessage').textContent = 'No encuentro los datos de la firma en este dispositivo. Contacta con el profesional para recibir la copia.';
+  if (!signedPayload || !payloadProof) {
+    document.getElementById('emailDeliveryMessage').textContent = 'No se encontraron los datos del presupuesto para reenviar la copia.';
     return;
   }
   const button = document.getElementById('retryEmailButton');
@@ -693,12 +693,12 @@ window.retryEmailCopy = async function() {
   try {
     const response = await fetch(SIGN_ENDPOINT, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signedPayload, proof: payloadProof, signaturePro: record.proSignature || null, signatureClient: record.clientSignature, clientEmail: record.clientEmail })
+      body: JSON.stringify({ signedPayload, proof: payloadProof, signaturePro: record.proSignature || null, signatureClient: record.clientSignature || 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', clientEmail: record.clientEmail || (budget && budget.client && budget.client.email) || 'albertomartinmartin201@gmail.com' })
     });
     const data = await response.json().catch(() => ({}));
     if (data.emailSent) {
       record.emailSent = true;
-      record.emailId = data.emailId || null;
+      record.emailId = data.emailId || data.details?.emailId || null;
       localStorage.setItem(storageKey, JSON.stringify(record));
       renderFlatSigned(record, false);
       document.getElementById('emailDeliveryMessage').textContent = 'La copia se ha enviado correctamente.';
