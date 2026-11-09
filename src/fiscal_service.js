@@ -1510,7 +1510,7 @@ export async function sendFiscalPackageToGestoria({
   `;
 
   await resendInstance.emails.send({
-    from: 'PresuVoz Fiscal <onboarding@resend.dev>',
+    from: process.env.RESEND_FROM_EMAIL || 'PresuVoz Fiscal <notificaciones@presuvoz.online>',
     to: targetEmail,
     subject: emailSubject,
     html: emailHtml,

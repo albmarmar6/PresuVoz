@@ -530,7 +530,7 @@ export default async function handler(req, res) {
     try {
       const idempotencyScope = companyId ? `${companyId}/${budgetId}` : budgetId;
       const emailResult = await resend.emails.send({
-        from: process.env.RESEND_FROM_EMAIL || 'PresuVoz <onboarding@resend.dev>',
+        from: process.env.RESEND_FROM_EMAIL || 'PresuVoz <firmas@presuvoz.online>',
         to:   recipients,
         subject: `Presupuesto Firmado ${budgetId} — ${companyName}`,
         html: emailHtml,

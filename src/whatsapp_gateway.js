@@ -5862,7 +5862,7 @@ async function startWhatsAppGateway() {
           try {
             console.log(`📧 Enviando trimestre por email a la gestoría (${session.company.gestoriaEmail})...`);
             await resend.emails.send({
-              from: 'PresuVoz <onboarding@resend.dev>',
+              from: process.env.RESEND_FROM_EMAIL || 'PresuVoz <notificaciones@presuvoz.online>',
               to: session.company.gestoriaEmail,
               subject: `Cierre Fiscal y Facturas ${quarterData.quarterLabel} — ${session.company.name}`,
               html: `

@@ -705,7 +705,7 @@ async function sendSignedBudgetEmailLocal({ verifiedBudget, signaturePro, signat
     let emailResult;
     try {
       emailResult = await resend.emails.send({
-        from: process.env.RESEND_FROM_EMAIL || 'PresuVoz <onboarding@resend.dev>',
+        from: process.env.RESEND_FROM_EMAIL || 'PresuVoz <firmas@presuvoz.online>',
         to: recipients,
         subject: `Presupuesto Firmado ${budget.id} — ${budget.company?.name || 'PresuVoz'}`,
         html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:24px auto;padding:24px;border:1px solid #d1fae5;border-radius:16px;background:#ffffff;">
@@ -725,7 +725,7 @@ async function sendSignedBudgetEmailLocal({ verifiedBudget, signaturePro, signat
       if (recipients.length > 1) {
         console.warn('⚠️ [Sign API Local] Falló envío múltiple Resend, reintentando solo a clientEmail:', sendErr.message);
         emailResult = await resend.emails.send({
-          from: process.env.RESEND_FROM_EMAIL || 'PresuVoz <onboarding@resend.dev>',
+          from: process.env.RESEND_FROM_EMAIL || 'PresuVoz <firmas@presuvoz.online>',
           to: [String(clientEmail).trim()],
           subject: `Presupuesto Firmado ${budget.id} — ${budget.company?.name || 'PresuVoz'}`,
           html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:24px auto;padding:24px;border:1px solid #d1fae5;border-radius:16px;background:#ffffff;">
@@ -749,7 +749,7 @@ async function sendSignedBudgetEmailLocal({ verifiedBudget, signaturePro, signat
       if (recipients.length > 1) {
         console.warn('⚠️ [Sign API Local] Error en envío múltiple, reintentando solo a clientEmail:', emailResult.error.message);
         emailResult = await resend.emails.send({
-          from: process.env.RESEND_FROM_EMAIL || 'PresuVoz <onboarding@resend.dev>',
+          from: process.env.RESEND_FROM_EMAIL || 'PresuVoz <firmas@presuvoz.online>',
           to: [String(clientEmail).trim()],
           subject: `Presupuesto Firmado ${budget.id} — ${budget.company?.name || 'PresuVoz'}`,
           html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:24px auto;padding:24px;border:1px solid #d1fae5;border-radius:16px;background:#ffffff;">
