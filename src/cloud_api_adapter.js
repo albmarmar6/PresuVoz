@@ -845,6 +845,16 @@ export function createPresuVozHttpServer(options = {}) {
         }
       }
 
+      // 1c. Sección de Demostración y Vídeos (/demo, /demo/, /demo.html)
+      if ((pathname === '/demo' || pathname === '/demo/' || pathname === '/demo.html') && req.method === 'GET') {
+        const demoPath = path.resolve('demo.html');
+        if (fs.existsSync(demoPath)) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          fs.createReadStream(demoPath).pipe(res);
+          return;
+        }
+      }
+
       // 1b. Código QR visual para vinculación de WhatsApp (GET /qr, /login, /vincular)
       if ((pathname === '/qr' || pathname === '/login' || pathname === '/vincular') && req.method === 'GET') {
         const qrString = globalThis.__PRESUVOZ_LATEST_QR__;
@@ -1243,7 +1253,29 @@ export function createPresuVozHttpServer(options = {}) {
           if (stat.isFile()) {
             const ext = path.extname(targetPath).toLowerCase();
             const contentType = STATIC_MIME_TYPES[ext] || 'application/octet-stream';
-            res.writeHead(200, { 'Content-Type': contentType });
+
+            // Soporte Range para vídeos (.mp4, .webm) y audios (iOS Safari / Android Chrome)
+            const range = req.headers.range;
+            if (range && (ext === '.mp4' || ext === '.webm' || ext === '.ogg' || ext === '.mp3' || ext === '.wav')) {
+              const parts = range.replace(/bytes=/, '').split('-');
+              const start = parseInt(parts[0], 10);
+              const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+              const chunksize = (end - start) + 1;
+              res.writeHead(206, {
+                'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+                'Accept-Ranges': 'bytes',
+                'Content-Length': chunksize,
+                'Content-Type': contentType
+              });
+              fs.createReadStream(targetPath, { start, end }).pipe(res);
+              return;
+            }
+
+            res.writeHead(200, {
+              'Content-Type': contentType,
+              'Content-Length': stat.size,
+              'Accept-Ranges': 'bytes'
+            });
             fs.createReadStream(targetPath).pipe(res);
             return;
           }

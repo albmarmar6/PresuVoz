@@ -55,4 +55,5 @@ data/logos/*
 # Video production exports
 videos/
 *.mp4
+!presuvoz_demo_e2e_editada.mp4
 
