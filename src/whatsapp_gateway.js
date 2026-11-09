@@ -1802,7 +1802,7 @@ export function generateSigningUrl(budget, company, cleanPhone) {
       c: company?.cif || budget.company?.cif || 'B-41987654',
       f: company?.cif || budget.company?.cif || 'B-41987654',
       p: company?.phone || cleanPhone,
-      e: company?.email || 'presupuestos@presuvoz.app',
+      e: company?.email || '',
       a: company?.address || budget.company?.address || 'Pol. Ind. El Pino, Nave 4 - Sevilla'
     },
     k: {

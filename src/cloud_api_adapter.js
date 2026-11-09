@@ -698,7 +698,7 @@ async function sendSignedBudgetEmailLocal({ verifiedBudget, signaturePro, signat
     const pdfBuffer = await generateSignedBudgetPdfLocal(budget, signaturePro, signatureClient, signedAt);
     const resend = new Resend(apiKey);
     const recipients = [String(clientEmail).trim()];
-    if (budget.company?.email && /^[^\s@<>]{1,100}@[a-z0-9.-]{1,190}\.[a-z]{2,}$/i.test(budget.company.email) && !recipients.includes(budget.company.email)) {
+    if (budget.company?.email && !/@(?:presuvoz\.app|carpinteriamanolo\.es|reformas\.es)$/i.test(budget.company.email) && /^[^\s@<>]{1,100}@[a-z0-9.-]{1,190}\.[a-z]{2,}$/i.test(budget.company.email) && !recipients.includes(budget.company.email)) {
       recipients.push(budget.company.email);
     }
     const total = (budget.financials?.totalAmount || 0).toLocaleString('es-ES', { minimumFractionDigits: 2 });
