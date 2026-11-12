@@ -100,10 +100,10 @@
         "image": "https://presuvoz.online/presuvoz_logo_oficial.jpg",
         "description": "Asistente inteligente de presupuestos, mermas de obra, facturación y firma digital por voz en WhatsApp para empresas de reformas y autónomos.",
         "offers": {
-          "@type": "AggregateOffer",
+          "@type": "Offer",
+          "price": "0",
           "priceCurrency": "EUR",
-          "lowPrice": "39.00",
-          "highPrice": "59.00"
+          "description": "Fase piloto gratuita para profesionales y autónomos de reformas"
         },
         "author": {
           "@type": "Person",
@@ -135,6 +135,14 @@
             "acceptedAnswer": {
               "@type": "Answer",
               "text": "Sí. PresuVoz desglosa automáticamente metros cuadrados, mermas de corte (+10%), sacos de cemento cola C2TE, piezas de azulejo, montantes y canales de pladur cada 40 cm, tornillería, pasta y botes de pintura."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "¿Cuánto cuesta probar PresuVoz?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "PresuVoz se encuentra en fase de acceso piloto gratuito para profesionales de reformas y autónomos en España. Puedes probarlo sin coste, sin tarjeta de crédito y sin contratos ni permanencias."
             }
           }
         ]
@@ -169,7 +177,7 @@
         <a href="#tiempo-vs-competencia" class="hover:text-white transition-colors">20s vs Competencia</a>
         <a href="#funcionalidades" class="hover:text-white transition-colors">Funcionalidades</a>
         <a href="#calculadora" class="hover:text-white transition-colors">Calculadora Ahorro</a>
-        <a href="#precios" class="hover:text-white transition-colors">Precios</a>
+        <a href="#acceso-piloto" class="hover:text-white transition-colors">Acceso Piloto</a>
         <a href="#faq" class="hover:text-white transition-colors">FAQ</a>
       </div>
 
@@ -538,118 +546,108 @@
               <span id="hoursSaved" class="text-xl font-bold text-emerald-400 tabular-nums">16 h</span>
             </div>
             <div class="flex justify-between items-baseline border-b border-slate-800 pb-4">
-              <span class="text-sm text-slate-400">Coste de PresuVoz al mes</span>
-              <span class="text-xl font-bold text-white tabular-nums">39 €</span>
+              <span class="text-sm text-slate-400">Acceso Programa Piloto</span>
+              <span class="text-base font-bold text-emerald-400 uppercase tracking-wider">100% Gratis</span>
             </div>
             <div class="flex justify-between items-baseline pt-1">
-              <span class="text-sm font-semibold text-white">Retorno de la inversión</span>
-              <span id="roi" class="text-xl font-bold text-emerald-400 tabular-nums">+1,284%</span>
+              <span class="text-sm font-semibold text-white">Valor de tu tiempo recuperado</span>
+              <span id="roi" class="text-xl font-bold text-emerald-400 tabular-nums">+459 €/mes</span>
             </div>
           </div>
 
           <a href="https://wa.me/34601022367?text=Hola%20Alberto%2C%20quiero%20probar%20PresuVoz%20gratis" 
              target="_blank" 
              class="block mt-8 bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold text-center py-3.5 rounded-xl text-sm transition-colors shadow-lg shadow-emerald-500/20">
-            Empezar prueba gratuita de 15 días
+            Pedir acceso gratuito por WhatsApp
           </a>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- PRECIOS -->
-  <section id="precios" class="py-24 border-t border-slate-800/60 px-4 sm:px-6">
-    <div class="max-w-6xl mx-auto">
-      <div class="max-w-lg mb-16">
-        <p class="text-xs uppercase font-bold text-emerald-400 tracking-widest mb-3">Precios transparentes</p>
-        <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight leading-tight">
-          Sin permanencias. Cancelas cuando quieras.
-        </h2>
-      </div>
+  <!-- PROGRAMA PILOTO / ACCESO GRATUITO -->
+  <section id="acceso-piloto" class="py-24 border-t border-slate-800/60 px-4 sm:px-6 relative overflow-hidden">
+    <div class="max-w-5xl mx-auto">
+      <div class="p-8 sm:p-12 md:p-14 rounded-3xl bg-gradient-to-b from-slate-900/90 to-slate-950/95 border-2 border-emerald-500/30 shadow-2xl shadow-emerald-950/40 relative">
+        <div class="flex flex-col lg:flex-row items-center justify-between gap-10">
+          <div class="space-y-6 max-w-xl">
+            <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold tracking-wide uppercase">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              Programa Piloto para Profesionales
+            </div>
+            
+            <h2 class="text-3xl sm:text-4xl font-extrabold text-white tracking-tight leading-tight">
+              Pruébalo en tu próxima obra sin coste ni compromiso
+            </h2>
+            
+            <p class="text-base text-slate-300 leading-relaxed">
+              Estamos activando el asistente a un grupo seleccionado de profesionales de reformas y autónomos. Sin cuotas fijas, sin tarjetas de crédito y sin instalar ninguna aplicación extraña.
+            </p>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+              <div class="flex items-start gap-3">
+                <div class="w-6 h-6 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center shrink-0 mt-0.5">
+                  <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+                </div>
+                <div>
+                  <p class="text-sm font-bold text-white">Directo en tu WhatsApp</p>
+                  <p class="text-xs text-slate-400">Funciona en la app que ya tienes en el móvil</p>
+                </div>
+              </div>
 
-        <!-- Plan Autónomo -->
-        <div class="bg-slate-900/50 border border-slate-800 rounded-3xl p-8 flex flex-col card-hover">
-          <div class="mb-6">
-            <h3 class="text-lg font-bold text-white mb-1">Plan Autónomo</h3>
-            <p class="text-xs text-slate-500">Para profesionales independientes y reformas</p>
+              <div class="flex items-start gap-3">
+                <div class="w-6 h-6 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center shrink-0 mt-0.5">
+                  <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+                </div>
+                <div>
+                  <p class="text-sm font-bold text-white">Configuración en 2 minutos</p>
+                  <p class="text-xs text-slate-400">Tu logo, datos y partidas listos al instante</p>
+                </div>
+              </div>
+
+              <div class="flex items-start gap-3">
+                <div class="w-6 h-6 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center shrink-0 mt-0.5">
+                  <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+                </div>
+                <div>
+                  <p class="text-sm font-bold text-white">Todas las funciones incluidas</p>
+                  <p class="text-xs text-slate-400">Presupuestos por voz, firma digital, mermas y facturas</p>
+                </div>
+              </div>
+
+              <div class="flex items-start gap-3">
+                <div class="w-6 h-6 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center shrink-0 mt-0.5">
+                  <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+                </div>
+                <div>
+                  <p class="text-sm font-bold text-white">Soporte directo con Alberto</p>
+                  <p class="text-xs text-slate-400">Te acompañamos paso a paso para que no pierdas tiempo</p>
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="mb-7">
-            <span class="text-4xl sm:text-5xl font-black text-white">39 €</span>
-            <span class="text-sm text-slate-500 ml-1">/ mes</span>
-            <p class="text-xs text-slate-600 mt-1">IVA no incluido • 15 días de prueba gratis</p>
+
+          <!-- Tarjeta de Acción / Lead WhatsApp -->
+          <div class="w-full lg:w-80 bg-slate-950/90 border border-slate-800 rounded-2xl p-6 sm:p-7 flex flex-col items-center text-center shadow-xl shrink-0">
+            <div class="w-16 h-16 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mb-4 text-emerald-400">
+              <svg class="w-8 h-8 fill-current" viewBox="0 0 24 24">
+                <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-6.305 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z"/>
+              </svg>
+            </div>
+            <p class="text-xs uppercase tracking-widest text-emerald-400 font-bold mb-1">Acceso Inmediato</p>
+            <p class="text-lg font-extrabold text-white mb-2">Pide tu prueba gratis</p>
+            <p class="text-xs text-slate-400 mb-6 leading-relaxed">
+              Escríbenos por WhatsApp y te lo activamos en tu propio número en menos de 5 minutos.
+            </p>
+            <a href="https://wa.me/34601022367?text=Hola%20Alberto%2C%20quiero%20probar%20PresuVoz%20gratis%20en%20mis%20reformas" 
+               target="_blank"
+               class="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold py-3.5 px-4 rounded-xl text-sm transition-all shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/40 flex items-center justify-center gap-2">
+              <span>Pedir acceso en WhatsApp</span>
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
+            </a>
+            <p class="text-[11px] text-slate-500 mt-3">Sin permanencia • 100% sin compromiso</p>
           </div>
-          <ul class="space-y-3.5 text-sm text-slate-300 mb-8 flex-1">
-            <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Hasta 35 presupuestos completos al mes
-            </li>
-            <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Asistente en WhatsApp disponible 24/7
-            </li>
-            <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Enlace de aceptación y firma digital del cliente
-            </li>
-            <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Cálculo de mermas y lista de compra para almacén
-            </li>
-            <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Agenda de visitas y enlaces a Google Maps
-            </li>
-          </ul>
-          <a href="https://wa.me/34601022367?text=Hola%2C%20quiero%20probar%20PresuVoz%20Plan%20Aut%C3%B3nomo" target="_blank" class="w-full text-center bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold py-3.5 rounded-xl text-sm transition-colors cursor-pointer">
-            Empezar prueba de 15 días gratis
-          </a>
         </div>
-
-        <!-- Plan Pro -->
-        <div class="plan-recommended border-2 border-emerald-500/40 rounded-3xl p-8 flex flex-col relative card-hover">
-          <div class="absolute -top-3 left-8">
-            <span class="bg-emerald-500 text-black font-extrabold text-[10px] uppercase px-3 py-1 rounded-full tracking-widest shadow-md shadow-emerald-500/30">
-              Más elegido por empresas
-            </span>
-          </div>
-          <div class="mb-6 mt-2">
-            <h3 class="text-lg font-bold text-white mb-1">Plan Pro / Cuadrilla</h3>
-            <p class="text-xs text-slate-400">Para empresas con varios operarios o encargados</p>
-          </div>
-          <div class="mb-7">
-            <span class="text-4xl sm:text-5xl font-black text-white">59 €</span>
-            <span class="text-sm text-slate-500 ml-1">/ mes</span>
-            <p class="text-xs text-slate-600 mt-1">IVA no incluido • Sin permanencia</p>
-          </div>
-          <ul class="space-y-3.5 text-sm text-slate-200 mb-8 flex-1">
-            <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Presupuestos ILIMITADOS
-            </li>
-            <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Hasta 5 números de WhatsApp de tu equipo conectados
-            </li>
-            <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Facturas oficiales y control de anticipos
-            </li>
-            <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Seguimiento automático de presupuestos sin firmar
-            </li>
-            <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Soporte prioritario directo por WhatsApp
-            </li>
-          </ul>
-          <a href="https://wa.me/34601022367?text=Hola%2C%20quiero%20probar%20PresuVoz%20Plan%20Pro" target="_blank" class="w-full text-center bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold py-3.5 rounded-xl text-sm transition-colors shadow-lg shadow-emerald-500/20 cursor-pointer">
-            Activar Plan Pro — 15 días gratis
-          </a>
-        </div>
-
       </div>
     </div>
   </section>
@@ -706,6 +704,16 @@
           </div>
         </div>
 
+        <div class="faq-item bg-slate-900/40 border border-slate-800 rounded-2xl overflow-hidden">
+          <button class="w-full text-left p-6 flex justify-between items-center gap-4 cursor-pointer" onclick="toggleFaq(this)">
+            <span class="text-base font-semibold text-white">¿Cuánto cuesta probar PresuVoz?</span>
+            <svg class="faq-arrow w-4 h-4 text-slate-500 shrink-0 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <div class="faq-body hidden px-6 pb-6 text-sm text-slate-400 leading-relaxed border-t border-slate-800/50 pt-4">
+            Actualmente estamos en fase de <strong>acceso piloto para profesionales de reformas y autónomos</strong>. Puedes probarlo 100% gratis en tus próximas visitas de obra reales sin tarjeta de crédito, sin contratos y sin permanencias. Te lo dejamos configurado en tu WhatsApp en 2 minutos para que compruebes cuánto tiempo ahorras por las noches.
+          </div>
+        </div>
+
       </div>
     </div>
   </section>
@@ -753,7 +761,7 @@
           <a href="/demo" class="block text-emerald-400 font-semibold hover:text-emerald-300 transition-colors">Vídeo Demo (1m)</a>
           <a href="#funcionalidades" class="block hover:text-slate-300 transition-colors">Funcionalidades</a>
           <a href="#tiempo-vs-competencia" class="block hover:text-slate-300 transition-colors">20s vs Competencia</a>
-          <a href="#precios" class="block hover:text-slate-300 transition-colors">Precios</a>
+          <a href="#acceso-piloto" class="block hover:text-slate-300 transition-colors">Acceso Piloto</a>
         </div>
         <div class="space-y-2">
           <p class="font-bold text-slate-400 mb-3">Soporte y Legal</p>
@@ -790,13 +798,11 @@
       const totalHours = q * h;
       const cost = totalHours * r;
       const hoursSavedVal = Math.round(totalHours * 0.85);
-      const presuvozCost = 39;
-      const netSavings = (hoursSavedVal * r) - presuvozCost;
-      const roiVal = Math.round((netSavings / presuvozCost) * 100);
+      const moneySavedVal = Math.round(hoursSavedVal * r);
 
       document.getElementById('costResult').textContent = cost.toLocaleString('es-ES') + ' €';
       document.getElementById('hoursSaved').textContent = hoursSavedVal + ' h';
-      document.getElementById('roi').textContent = '+' + roiVal.toLocaleString('es-ES') + '%';
+      document.getElementById('roi').textContent = '+' + moneySavedVal.toLocaleString('es-ES') + ' €/mes';
     }
 
     if (quotesInput && hoursInput && rateInput) {
