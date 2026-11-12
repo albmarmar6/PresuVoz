@@ -3,9 +3,39 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PresuVoz — Presupuestos y Gestión de Obra por Voz en WhatsApp</title>
-  <meta name="description" content="PresuVoz: Software de asistencia documental y presupuestos de obra por voz en WhatsApp para autónomos, fontaneros, electricistas y empresas de reformas en España.">
+  
+  <!-- SEO Primary Meta Tags -->
+  <title>PresuVoz — Presupuestos de Reformas por Voz en WhatsApp en 20 Segundos</title>
+  <meta name="title" content="PresuVoz — Presupuestos de Reformas por Voz en WhatsApp en 20 Segundos">
+  <meta name="description" content="El primer asistente por WhatsApp para albañiles, fontaneros, carpinteros y empresas de reformas en España. Genera presupuestos en PDF, mermas de obra, firma digital y facturas con solo enviar notas de voz.">
+  <meta name="keywords" content="presupuestos por voz, software presupuestos reformas, presupuestos albañileria whatsapp, presupuestos fontaneria voz, programa presupuestos obras autonomos, firma digital presupuestos movil, calculo mermas pladur materiales, facturacion reformas whatsapp">
+  <meta name="author" content="Alberto Martín Martín - PresuVoz">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://presuvoz.online/">
+  <meta name="theme-color" content="#080c10">
+
+  <!-- Favicon & Icons -->
+  <link rel="icon" type="image/png" href="/favicon.png">
+  <link rel="apple-touch-icon" href="/logo_web_nav.png">
+
+  <!-- Open Graph / Facebook / WhatsApp Preview -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://presuvoz.online/">
+  <meta property="og:title" content="PresuVoz — De Nota de Voz a Presupuesto Firmado en 20s">
+  <meta property="og:description" content="No pierdas obras por tardar en enviar presupuestos. Habla desde la furgoneta y ten el PDF con tu logo, cálculo de materiales y firma digital de tu cliente al instante en WhatsApp.">
+  <meta property="og:image" content="https://presuvoz.online/og_image.jpg">
+  <meta property="og:locale" content="es_ES">
+
+  <!-- Twitter Meta Tags -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:url" content="https://presuvoz.online/">
+  <meta name="twitter:title" content="PresuVoz — Presupuestos por Voz en WhatsApp">
+  <meta name="twitter:description" content="Genera presupuestos, calcula mermas y consigue la firma digital de tus clientes en WhatsApp en 20 segundos.">
+  <meta name="twitter:image" content="https://presuvoz.online/og_image.jpg">
+
+  <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
+  
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
     * { font-family: 'Inter', sans-serif; }
@@ -17,16 +47,16 @@
     }
 
     .hero-gradient {
-      background: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(16,185,129,0.08) 0%, transparent 60%);
+      background: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(16,185,129,0.12) 0%, transparent 65%);
     }
 
     .card-hover {
-      transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+      transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
     }
     .card-hover:hover {
-      transform: translateY(-2px);
-      border-color: rgba(16,185,129,0.3);
-      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      transform: translateY(-3px);
+      border-color: rgba(16,185,129,0.4);
+      box-shadow: 0 12px 35px rgba(0,0,0,0.4);
     }
 
     input[type=range] {
@@ -48,146 +78,414 @@
     }
 
     .plan-recommended {
-      background: linear-gradient(135deg, rgba(16,185,129,0.06) 0%, rgba(16,185,129,0.02) 100%);
+      background: linear-gradient(135deg, rgba(16,185,129,0.08) 0%, rgba(16,185,129,0.02) 100%);
     }
 
-    .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .feature-glow {
+      box-shadow: 0 0 30px -10px rgba(16, 185, 129, 0.15);
+    }
   </style>
+
+  <!-- Schema.org JSON-LD Structured Data for Google SEO -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareApplication",
+        "name": "PresuVoz",
+        "operatingSystem": "WhatsApp, Web, Android, iOS",
+        "applicationCategory": "BusinessApplication",
+        "url": "https://presuvoz.online",
+        "image": "https://presuvoz.online/presuvoz_logo_oficial.jpg",
+        "description": "Asistente inteligente de presupuestos, mermas de obra, facturación y firma digital por voz en WhatsApp para empresas de reformas y autónomos.",
+        "offers": {
+          "@type": "AggregateOffer",
+          "priceCurrency": "EUR",
+          "lowPrice": "39.00",
+          "highPrice": "59.00"
+        },
+        "author": {
+          "@type": "Person",
+          "name": "Alberto Martín Martín"
+        }
+      },
+      {
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "¿Por qué enviar el presupuesto rápido me ayuda a cerrar más reformas?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "El 68% de los clientes contratan al primer profesional que les envía el presupuesto detallado. Si tardas 2 días en llegar al ordenador, tu cliente ya habrá firmado con otra empresa de la competencia. Con PresuVoz lo entregas en 20 segundos antes de salir de la visita."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "¿Mi cliente tiene que instalarse alguna aplicación para firmar?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. Tu cliente recibe un enlace corto en su móvil, lee el presupuesto en su navegador y firma deslizando el dedo sobre la pantalla con validez legal. Ambos recibís copia en PDF de inmediato."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "¿Calcula también los materiales y mermas de albañilería o pladur?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Sí. PresuVoz desglosa automáticamente metros cuadrados, mermas de corte (+10%), sacos de cemento cola C2TE, piezas de azulejo, montantes y canales de pladur cada 40 cm, tornillería, pasta y botes de pintura."
+            }
+          }
+        ]
+      }
+    ]
+  }
+  </script>
 </head>
-<body class="bg-[#080c10] text-slate-200 antialiased">
+<body class="bg-[#080c10] text-slate-200 antialiased selection:bg-emerald-500 selection:text-black">
 
-  <!-- Navigation -->
-  <nav class="nav-blur bg-[#080c10]/80 border-b border-slate-800/60 fixed top-0 w-full z-50">
-    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
-      <div class="flex items-center gap-2.5">
-        <div class="w-7 h-7 rounded-md bg-emerald-500 flex items-center justify-center">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round">
-            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-          </svg>
+  <!-- Navigation Bar con Logo Oficial -->
+  <nav class="nav-blur bg-[#080c10]/85 border-b border-slate-800/80 fixed top-0 w-full z-50">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+      
+      <!-- Brand Logo Oficial -->
+      <a href="/" class="flex items-center gap-3 group">
+        <div class="w-10 h-10 rounded-xl overflow-hidden border border-emerald-500/40 shadow-lg shadow-emerald-500/20 group-hover:scale-105 transition-transform flex-shrink-0 bg-slate-900">
+          <img src="/logo_web_nav.png" alt="PresuVoz Logo Oficial" class="w-full h-full object-cover">
         </div>
-        <span class="font-bold text-sm text-white tracking-tight">PresuVoz</span>
-      </div>
+        <div class="flex flex-col">
+          <span class="font-black text-base text-white tracking-tight leading-none">PresuVoz</span>
+          <span class="text-[10px] text-emerald-400 font-bold tracking-wider uppercase mt-0.5">Gestión por WhatsApp</span>
+        </div>
+      </a>
 
-      <div class="hidden md:flex items-center gap-7 text-[13px] text-slate-400 font-medium">
-        <a href="/demo" class="text-emerald-400 hover:text-emerald-300 transition-colors flex items-center gap-1.5 font-semibold"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Vídeo Demo (1m)</a>
-        <a href="#como-funciona" class="hover:text-white transition-colors">Cómo funciona</a>
-        <a href="#calculadora" class="hover:text-white transition-colors">Calculadora</a>
+      <!-- Desktop Links -->
+      <div class="hidden lg:flex items-center gap-6 text-[13px] text-slate-400 font-medium">
+        <a href="/demo" class="text-emerald-400 hover:text-emerald-300 transition-colors flex items-center gap-1.5 font-bold">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          Vídeo Demo (63s)
+        </a>
+        <a href="#tiempo-vs-competencia" class="hover:text-white transition-colors">20s vs Competencia</a>
+        <a href="#funcionalidades" class="hover:text-white transition-colors">Funcionalidades</a>
+        <a href="#calculadora" class="hover:text-white transition-colors">Calculadora Ahorro</a>
         <a href="#precios" class="hover:text-white transition-colors">Precios</a>
         <a href="#faq" class="hover:text-white transition-colors">FAQ</a>
-        <a href="#contacto" class="hover:text-white transition-colors">Contacto</a>
       </div>
 
+      <!-- Action Buttons -->
       <div class="flex items-center gap-3">
-        <a href="studio/whatsapp.html" class="text-[13px] font-medium text-slate-400 hover:text-white transition-colors hidden sm:block">Simulador Demo</a>
-        <a href="#precios" class="bg-emerald-500 hover:bg-emerald-400 text-black font-semibold px-4 py-1.5 rounded-lg text-[13px] transition-colors">
-          Empezar gratis
+        <a href="/demo" class="text-xs font-semibold text-slate-300 hover:text-white transition-colors hidden sm:block">
+          Ver Vídeo
+        </a>
+        <a href="https://wa.me/34601022367?text=Hola%20Alberto%2C%20quiero%20probar%20PresuVoz%20gratis" 
+           target="_blank"
+           class="bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold px-4 py-2 rounded-xl text-xs sm:text-sm transition-all shadow-md shadow-emerald-500/20 hover:shadow-emerald-500/40">
+          Probar gratis
         </a>
       </div>
     </div>
   </nav>
 
-  <!-- Hero -->
-  <section class="hero-gradient pt-32 pb-24 px-6 max-w-6xl mx-auto">
-    <div class="max-w-3xl">
-      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-slate-400 text-xs font-medium mb-8">
-        <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-        Diseñado para fontaneros, electricistas y empresas de reformas en España
+  <!-- Hero Section -->
+  <section class="hero-gradient pt-32 pb-20 px-4 sm:px-6 max-w-6xl mx-auto">
+    <div class="max-w-4xl mx-auto text-center lg:text-left grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+      
+      <div class="lg:col-span-8">
+        <!-- Eyebrow Tag -->
+        <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900 border border-slate-800 text-slate-300 text-xs font-semibold mb-6 shadow-sm">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span>⚡ El 68% de clientes contratan al primer profesional que les envía el presupuesto</span>
+        </div>
+
+        <h1 class="text-4xl sm:text-6xl font-black text-white tracking-tight leading-[1.08] mb-6">
+          Del audio de WhatsApp <br>
+          al presupuesto firmado <br>
+          <span class="text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400">
+            en menos de 20 segundos.
+          </span>
+        </h1>
+
+        <p class="text-slate-400 text-base sm:text-lg leading-relaxed max-w-2xl mb-8">
+          No regales tus noches ni tus fines de semana al ordenador. <strong>Hablas desde la furgoneta o la propia obra</strong> y PresuVoz genera el PDF legal con tu logo, calcula las mermas de material y le envía el enlace a tu cliente para que <strong>te firme con el dedo en el móvil al instante</strong>.
+        </p>
+
+        <!-- CTAs -->
+        <div class="flex flex-col sm:flex-row gap-3.5 justify-center lg:justify-start">
+          <a href="https://wa.me/34601022367?text=Hola%20Alberto%2C%20quiero%20probar%20PresuVoz%20gratis%20en%20mi%20WhatsApp" 
+             target="_blank"
+             class="bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold px-7 py-4 rounded-xl text-sm sm:text-base transition-all shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 inline-flex items-center justify-center gap-2.5">
+            <svg class="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-6.305 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-.868-2.031-.967-.272-.099-.47-.149-.669.149-.198.297-.768.967-.941 1.165-.173.198-.347.223-.644.074-.297-.149-1.255-.462-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.297-.347.446-.521.151-.172.2-.296.3-.495.099-.198.05-.372-.025-.521-.075-.148-.669-1.611-.916-2.206-.242-.579-.487-.501-.669-.51l-.57-.01c-.198 0-.52.074-.792.372s-1.04 1.016-1.04 2.479 1.065 2.876 1.213 3.074c.149.198 2.095 3.2 5.076 4.487.709.306 1.263.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.695.248-1.29.173-1.414z"/></svg>
+            <span>Probar GRATIS en WhatsApp</span>
+          </a>
+          
+          <a href="/demo" 
+             class="bg-slate-900 hover:bg-slate-800 border border-emerald-500/30 hover:border-emerald-500/60 text-slate-200 font-bold px-6 py-4 rounded-xl text-sm sm:text-base transition-all inline-flex items-center justify-center gap-2">
+            <span class="text-emerald-400">▶</span> Ver Vídeo Demo (63s)
+          </a>
+        </div>
+
+        <div class="flex items-center justify-center lg:justify-start gap-5 text-xs text-slate-500 mt-5">
+          <span>✅ Sin instalar aplicaciones</span>
+          <span>•</span>
+          <span>⚡ Listo en 1 minuto</span>
+          <span>•</span>
+          <span>🛡️ Copia legal de firma</span>
+        </div>
       </div>
 
-      <h1 class="text-5xl sm:text-6xl font-black text-white tracking-tight leading-[1.08] mb-6">
-        Del audio de WhatsApp<br>al presupuesto firmado<br>
-        <span class="text-emerald-400">en menos de 20 segundos.</span>
-      </h1>
-
-      <p class="text-slate-400 text-lg leading-relaxed max-w-xl mb-10">
-        Hablas desde la furgoneta. PresuVoz prepara el presupuesto en PDF con los datos de tu empresa, gestiona tu agenda de visitas y permite a tu cliente aceptar y firmar digitalmente desde su móvil.
-      </p>
-
-      <div class="flex flex-col sm:flex-row gap-3">
-        <a href="#precios" class="bg-emerald-500 hover:bg-emerald-400 text-black font-bold px-7 py-3.5 rounded-xl text-sm transition-colors inline-flex items-center justify-center gap-2">
-          Empezar prueba gratuita
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 12h14M12 5l7 7-7 7"/>
-          </svg>
-        </a>
-        <a href="/demo" class="bg-slate-900 hover:bg-slate-800 border border-emerald-500/30 hover:border-emerald-500/60 text-slate-200 font-semibold px-7 py-3.5 rounded-xl text-sm transition-all inline-flex items-center justify-center gap-2">
-          <span class="text-emerald-400 font-bold">▶</span> Ver Vídeo Demo (60s)
-        </a>
+      <!-- Tarjeta Visual del Logo / Mockup -->
+      <div class="lg:col-span-4 flex justify-center">
+        <div class="relative w-72 sm:w-80 p-6 rounded-3xl bg-slate-900/80 border border-slate-800 feature-glow backdrop-blur-xl">
+          <div class="w-20 h-20 mx-auto rounded-2xl overflow-hidden border-2 border-emerald-500/50 shadow-xl shadow-emerald-500/30 mb-4 bg-slate-950">
+            <img src="/logo_web_nav.png" alt="PresuVoz Logo" class="w-full h-full object-cover">
+          </div>
+          <div class="text-center mb-4">
+            <h3 class="text-white font-bold text-lg">PresuVoz Bot</h3>
+            <p class="text-xs text-emerald-400 font-medium">● En línea en tu WhatsApp</p>
+          </div>
+          
+          <div class="space-y-2.5 text-xs">
+            <div class="p-3 rounded-xl bg-slate-800/80 border border-slate-700/60 text-slate-300">
+              🎙️ <em>"Reforma de baño, 18 m² de alicatado, plato resina y mampara..."</em>
+            </div>
+            <div class="p-3 rounded-xl bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 flex items-center justify-between">
+              <span>📄 Presupuesto_Baño.pdf (IVA incl.)</span>
+              <span class="font-bold text-white">4.850 €</span>
+            </div>
+            <div class="p-2.5 rounded-xl bg-slate-800/50 text-slate-400 text-center text-[11px]">
+              ✍️ Enlace de firma digital enviado al cliente
+            </div>
+          </div>
+        </div>
       </div>
+
     </div>
 
     <!-- Metrics strip -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-20 pt-8 border-t border-slate-800/60">
-      <div>
-        <p class="text-2xl font-bold text-white">Presupuestos</p>
-        <p class="text-xs text-slate-500 mt-0.5">Preparados por voz en WhatsApp</p>
+      <div class="bg-slate-900/40 p-4 rounded-xl border border-slate-800/60">
+        <p class="text-3xl font-black text-emerald-400">20 seg</p>
+        <p class="text-xs text-slate-400 mt-1 font-medium">Tiempo de creación de presupuesto</p>
       </div>
-      <div>
-        <p class="text-2xl font-bold text-white">Agenda</p>
-        <p class="text-xs text-slate-500 mt-0.5">Citas y recordatorios en el chat</p>
+      <div class="bg-slate-900/40 p-4 rounded-xl border border-slate-800/60">
+        <p class="text-3xl font-black text-white">+68%</p>
+        <p class="text-xs text-slate-400 mt-1 font-medium">Más obras cerradas entregando primero</p>
       </div>
-      <div>
-        <p class="text-2xl font-bold text-white">Documentación</p>
-        <p class="text-xs text-slate-500 mt-0.5">PDFs de presupuestos, recibos y facturas</p>
+      <div class="bg-slate-900/40 p-4 rounded-xl border border-slate-800/60">
+        <p class="text-3xl font-black text-white">100%</p>
+        <p class="text-xs text-slate-400 mt-1 font-medium">En WhatsApp, sin abrir el ordenador</p>
       </div>
-      <div>
-        <p class="text-2xl font-bold text-white">Sin apps</p>
-        <p class="text-xs text-slate-500 mt-0.5">Funciona directamente en WhatsApp</p>
+      <div class="bg-slate-900/40 p-4 rounded-xl border border-slate-800/60">
+        <p class="text-3xl font-black text-emerald-400">0 €</p>
+        <p class="text-xs text-slate-400 mt-1 font-medium">Prueba inicial sin compromiso</p>
       </div>
     </div>
   </section>
 
-  <!-- How it works -->
-  <section id="como-funciona" class="py-24 border-t border-slate-800/60 px-6">
+  <!-- SECCIÓN COMPARATIVA: 20 SEGUNDOS vs LA COMPETENCIA (Inspirada en el dolor del sector) -->
+  <section id="tiempo-vs-competencia" class="py-24 border-t border-slate-800/60 px-4 sm:px-6 bg-[#060a0f]">
     <div class="max-w-6xl mx-auto">
-      <div class="max-w-lg mb-16">
-        <p class="text-xs uppercase font-semibold text-emerald-500 tracking-widest mb-3">Flujo de trabajo</p>
-        <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight leading-tight">
-          Tres pasos. Sin curva de aprendizaje.
+      <div class="max-w-2xl mx-auto text-center mb-16">
+        <p class="text-xs uppercase font-bold text-emerald-400 tracking-widest mb-3">La cruda realidad del autónomo</p>
+        <h2 class="text-3xl sm:text-5xl font-black text-white tracking-tight leading-tight mb-4">
+          ¿Cuánto dinero estás perdiendo por enviar presupuestos tarde?
         </h2>
+        <p class="text-slate-400 text-sm sm:text-base">
+          Los clientes piden 3 presupuestos a la vez. Cuando tardas 2 o 3 días en llegar a casa, encender el ordenador y pasarlo a limpio, <span class="text-white font-semibold">el cliente ya ha firmado con otro</span>.
+        </p>
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div class="bg-slate-900/50 border border-slate-800 rounded-2xl p-7 card-hover">
-          <div class="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center mb-6">
-            <span class="text-xs font-bold text-slate-300">01</span>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
+        
+        <!-- Método Tradicional (Lento y Doloroso) -->
+        <div class="p-8 rounded-3xl bg-red-950/15 border border-red-500/20 relative">
+          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-500/10 text-red-400 text-xs font-bold mb-6">
+            ❌ EL MÉTODO TRADICIONAL (O EXCEL)
           </div>
-          <h3 class="text-base font-semibold text-white mb-3">Envía un audio por WhatsApp</h3>
-          <p class="text-sm text-slate-400 leading-relaxed">
-            Terminas de ver la obra y grabas una nota de voz desde la furgoneta. Dices el nombre del cliente, las partidas y los precios. En voz normal, sin plantillas ni formatos.
-          </p>
+
+          <h3 class="text-xl font-bold text-white mb-4">Pierdes la obra por lentitud</h3>
+          <ul class="space-y-4 text-sm text-slate-300 mb-8">
+            <li class="flex items-start gap-3">
+              <span class="text-red-400 font-bold mt-0.5">✕</span>
+              <span><strong>45 minutos midiendo</strong> y tomando notas en papeles que luego se pierden o arrugan.</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-red-400 font-bold mt-0.5">✕</span>
+              <span>Llegas reventado a casa a las 20:00 y te tocan <strong>2 horas de ordenador</strong> pasando presupuestos.</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-red-400 font-bold mt-0.5">✕</span>
+              <span>Lo envías 2 días después. <strong>El cliente ya ha contratado a la competencia</strong> que fue más rápida.</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-red-400 font-bold mt-0.5">✕</span>
+              <span>Sin firma digital: tienes que imprimir o perseguir al cliente para que acepte.</span>
+            </li>
+          </ul>
+
+          <div class="pt-4 border-t border-red-500/20 text-xs text-red-300 font-semibold">
+            ⏱️ Tiempo medio invertido: 2 a 3 horas por cliente
+          </div>
         </div>
 
-        <div class="bg-slate-900/50 border border-slate-800 rounded-2xl p-7 card-hover">
-          <div class="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center mb-6">
-            <span class="text-xs font-bold text-slate-300">02</span>
+        <!-- Método PresuVoz (Rápido y Resolutivo) -->
+        <div class="p-8 rounded-3xl bg-emerald-950/20 border-2 border-emerald-500/40 relative shadow-2xl shadow-emerald-500/10">
+          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-400 text-xs font-bold mb-6">
+            ✅ CON PRESUVOZ EN WHATSAPP
           </div>
-          <h3 class="text-base font-semibold text-white mb-3">PresuVoz redacta el documento</h3>
-          <p class="text-sm text-slate-400 leading-relaxed">
-            La IA extrae las partidas y los importes. PresuVoz aplica el tipo de IVA configurado para tu negocio y te entrega al instante el documento PDF listo para reenviar.
-          </p>
+
+          <h3 class="text-xl font-bold text-white mb-4">Cierras la obra en caliente</h3>
+          <ul class="space-y-4 text-sm text-slate-200 mb-8">
+            <li class="flex items-start gap-3">
+              <span class="text-emerald-400 font-bold mt-0.5">✓</span>
+              <span><strong>Audio de 30 segundos</strong> al salir por la puerta del cliente o al sentarte en la furgoneta.</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-emerald-400 font-bold mt-0.5">✓</span>
+              <span><strong>PDF profesional con tu logo</strong>, partidas, cálculos y desglose de IVA entregado en 5 segundos.</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-emerald-400 font-bold mt-0.5">✓</span>
+              <span><strong>Firma digital en vivo:</strong> Tu cliente firma con el dedo desde su propio móvil antes de que pida otro presupuesto.</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <span class="text-emerald-400 font-bold mt-0.5">✓</span>
+              <span><strong>Mermas y lista de la compra calculadas</strong> para ir al almacén a tiro fijo sin equivocarte.</span>
+            </li>
+          </ul>
+
+          <div class="pt-4 border-t border-emerald-500/30 text-xs text-emerald-300 font-extrabold">
+            ⚡ Tiempo medio invertido: 20 segundos de reloj
+          </div>
         </div>
 
-        <div class="bg-slate-900/50 border border-slate-800 rounded-2xl p-7 card-hover">
-          <div class="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center mb-6">
-            <span class="text-xs font-bold text-slate-300">03</span>
-          </div>
-          <h3 class="text-base font-semibold text-white mb-3">El cliente firma desde su móvil</h3>
-          <p class="text-sm text-slate-400 leading-relaxed">
-            Tu cliente abre el enlace corto de firma y registra su aceptación digital. Recibes una notificación instantánea en tu WhatsApp y copia en PDF por correo electrónico.
-          </p>
-        </div>
       </div>
     </div>
   </section>
 
-  <!-- ROI Calculator -->
-  <section id="calculadora" class="py-24 border-t border-slate-800/60 px-6">
+  <!-- TODAS LAS FUNCIONALIDADES (VISUALES Y DESTACADAS) -->
+  <section id="funcionalidades" class="py-24 border-t border-slate-800/60 px-4 sm:px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="max-w-3xl mb-16">
+        <p class="text-xs uppercase font-bold text-emerald-400 tracking-widest mb-3">La navaja suiza de tu negocio</p>
+        <h2 class="text-3xl sm:text-5xl font-black text-white tracking-tight leading-tight">
+          Todo lo que necesitas para tu empresa, directamente en WhatsApp.
+        </h2>
+        <p class="text-slate-400 text-sm sm:text-base mt-3">
+          PresuVoz no es solo un generador de presupuestos. Es el asistente integral que gestiona tus obras, compras y clientes sin tocar un teclado.
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+
+        <!-- Funcionalidad 1: Presupuestos por Voz -->
+        <div class="p-7 rounded-3xl bg-slate-900/60 border border-slate-800 card-hover flex flex-col justify-between">
+          <div>
+            <div class="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-2xl mb-6">
+              🎙️
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">Presupuestos por Nota de Voz</h3>
+            <p class="text-sm text-slate-400 leading-relaxed mb-4">
+              Habla como hablas tú en la obra. Dices las partidas, metros o bultos y el sistema extrae precios, aplica tu IVA (10% o 21%) y maqueta el PDF con tus datos fiscales y logotipo.
+            </p>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-xs text-emerald-400 font-medium">
+            ⚡ En 3 segundos directo en tu chat
+          </div>
+        </div>
+
+        <!-- Funcionalidad 2: Firma Digital en Móvil -->
+        <div class="p-7 rounded-3xl bg-slate-900/60 border border-slate-800 card-hover flex flex-col justify-between">
+          <div>
+            <div class="w-12 h-12 rounded-2xl bg-teal-500/10 border border-teal-500/20 flex items-center justify-center text-2xl mb-6">
+              ✍️
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">Firma Digital en el Móvil</h3>
+            <p class="text-sm text-slate-400 leading-relaxed mb-4">
+              Tu cliente abre un enlace corto desde su teléfono, revisa las condiciones y firma deslizando el dedo. Recibes aviso en WhatsApp y ambas partes reciben la copia oficial en PDF por correo.
+            </p>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-xs text-teal-400 font-medium">
+            🛡️ Sin imprimir papeles ni desplazamientos
+          </div>
+        </div>
+
+        <!-- Funcionalidad 3: Mermas y Cálculo de Materiales -->
+        <div class="p-7 rounded-3xl bg-slate-900/60 border border-slate-800 card-hover flex flex-col justify-between">
+          <div>
+            <div class="w-12 h-12 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-2xl mb-6">
+              📐
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">Cálculo de Mermas y Material</h3>
+            <p class="text-sm text-slate-400 leading-relaxed mb-4">
+              Cálculos exactos por oficio: sacos de cemento cola C2TE y mermas (+10%) para alicatados, montantes cada 40 cm y placas de pladur, botes de pintura según rendimiento o metros de tubería.
+            </p>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-xs text-cyan-400 font-medium">
+            🧱 No te quedes corto ni compres de más
+          </div>
+        </div>
+
+        <!-- Funcionalidad 4: Lista de la Compra para Almacén -->
+        <div class="p-7 rounded-3xl bg-slate-900/60 border border-slate-800 card-hover flex flex-col justify-between">
+          <div>
+            <div class="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-2xl mb-6">
+              🛒
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">Lista de Compra para el Almacén</h3>
+            <p class="text-sm text-slate-400 leading-relaxed mb-4">
+              Agrupa todos los suministros del presupuesto en una lista de la compra organizada. Vas a Obramat, Bricomart o a tu almacén de confianza con las cantidades exactas en el WhatsApp.
+            </p>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-xs text-amber-400 font-medium">
+            📋 Compras rápidas y sin olvidos
+          </div>
+        </div>
+
+        <!-- Funcionalidad 5: Facturación y Cobro de Anticipos -->
+        <div class="p-7 rounded-3xl bg-slate-900/60 border border-slate-800 card-hover flex flex-col justify-between">
+          <div>
+            <div class="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-2xl mb-6">
+              🧾
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">Facturas y Control de Cobros</h3>
+            <p class="text-sm text-slate-400 leading-relaxed mb-4">
+              Dices por voz <em>"Factura el anticipo del 30% a Juan"</em> y emite la factura legal con numeración correlativa. Registra pagos parciales y te dice en cualquier momento cuánto te deben.
+            </p>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-xs text-emerald-400 font-medium">
+            💰 Control absoluto de tus anticipos
+          </div>
+        </div>
+
+        <!-- Funcionalidad 6: Agenda y Google Maps -->
+        <div class="p-7 rounded-3xl bg-slate-900/60 border border-slate-800 card-hover flex flex-col justify-between">
+          <div>
+            <div class="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-2xl mb-6">
+              📅
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">Visitas y Enlace a Google Maps</h3>
+            <p class="text-sm text-slate-400 leading-relaxed mb-4">
+              Dicta tus citas con clientes. El bot las agenda, te envía recordatorios el día anterior y te genera un enlace directo a Google Maps para abrir la ruta en el GPS del móvil con un solo toque.
+            </p>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-xs text-indigo-400 font-medium">
+            🗺️ Llegas a la obra sin buscar direcciones
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- CALCULADORA DE IMPACTO Y ROI -->
+  <section id="calculadora" class="py-24 border-t border-slate-800/60 px-4 sm:px-6 bg-[#060a0f]">
     <div class="max-w-6xl mx-auto">
       <div class="max-w-lg mb-16">
-        <p class="text-xs uppercase font-semibold text-emerald-500 tracking-widest mb-3">Calculadora de impacto</p>
+        <p class="text-xs uppercase font-bold text-emerald-400 tracking-widest mb-3">Calculadora de impacto</p>
         <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight leading-tight">
-          Calcula cuánto tiempo (y dinero) ahorras cada mes.
+          Calcula cuánto tiempo y dinero ahorras cada mes.
         </h2>
       </div>
 
@@ -227,8 +525,8 @@
           </div>
         </div>
 
-        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8">
-          <p class="text-xs uppercase font-semibold text-slate-500 tracking-widest mb-6">Resultado del análisis</p>
+        <div class="bg-slate-900 border border-slate-800 rounded-3xl p-8">
+          <p class="text-xs uppercase font-bold text-slate-500 tracking-widest mb-6">Resultado del análisis</p>
 
           <div class="space-y-5">
             <div class="flex justify-between items-baseline border-b border-slate-800 pb-4">
@@ -249,7 +547,9 @@
             </div>
           </div>
 
-          <a href="#precios" class="block mt-8 bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-center py-3 rounded-xl text-sm transition-colors">
+          <a href="https://wa.me/34601022367?text=Hola%20Alberto%2C%20quiero%20probar%20PresuVoz%20gratis" 
+             target="_blank" 
+             class="block mt-8 bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold text-center py-3.5 rounded-xl text-sm transition-colors shadow-lg shadow-emerald-500/20">
             Empezar prueba gratuita de 15 días
           </a>
         </div>
@@ -257,95 +557,95 @@
     </div>
   </section>
 
-  <!-- Pricing -->
-  <section id="precios" class="py-24 border-t border-slate-800/60 px-6">
+  <!-- PRECIOS -->
+  <section id="precios" class="py-24 border-t border-slate-800/60 px-4 sm:px-6">
     <div class="max-w-6xl mx-auto">
       <div class="max-w-lg mb-16">
-        <p class="text-xs uppercase font-semibold text-emerald-500 tracking-widest mb-3">Precios</p>
+        <p class="text-xs uppercase font-bold text-emerald-400 tracking-widest mb-3">Precios transparentes</p>
         <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight leading-tight">
-          Sin permanencias. Sin sorpresas. Cancelas cuando quieras.
+          Sin permanencias. Cancelas cuando quieras.
         </h2>
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-3xl">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
 
         <!-- Plan Autónomo -->
-        <div class="bg-slate-900/50 border border-slate-800 rounded-2xl p-8 flex flex-col card-hover">
+        <div class="bg-slate-900/50 border border-slate-800 rounded-3xl p-8 flex flex-col card-hover">
           <div class="mb-6">
-            <h3 class="text-base font-bold text-white mb-1">Autónomo</h3>
-            <p class="text-xs text-slate-500">Para profesionales independientes</p>
+            <h3 class="text-lg font-bold text-white mb-1">Plan Autónomo</h3>
+            <p class="text-xs text-slate-500">Para profesionales independientes y reformas</p>
           </div>
           <div class="mb-7">
-            <span class="text-4xl font-black text-white">39 €</span>
+            <span class="text-4xl sm:text-5xl font-black text-white">39 €</span>
             <span class="text-sm text-slate-500 ml-1">/ mes</span>
-            <p class="text-xs text-slate-600 mt-1">IVA no incluido</p>
+            <p class="text-xs text-slate-600 mt-1">IVA no incluido • 15 días de prueba gratis</p>
           </div>
-          <ul class="space-y-3 text-sm text-slate-400 mb-8 flex-1">
+          <ul class="space-y-3.5 text-sm text-slate-300 mb-8 flex-1">
             <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Hasta 30 presupuestos al mes
+              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Hasta 35 presupuestos completos al mes
             </li>
             <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Asistente por WhatsApp disponible 24/7
+              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Asistente en WhatsApp disponible 24/7
             </li>
             <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Enlace corto de aceptación y firma digital
+              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Enlace de aceptación y firma digital del cliente
             </li>
             <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Logotipo y datos fiscales de tu empresa
+              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Cálculo de mermas y lista de compra para almacén
             </li>
             <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Agenda de visitas y recordatorios automáticos
+              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Agenda de visitas y enlaces a Google Maps
             </li>
           </ul>
-          <a href="https://wa.me/34601022367?text=Hola%2C%20quiero%20probar%20PresuVoz%20Plan%20Aut%C3%B3nomo" target="_blank" class="w-full text-center bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-semibold py-3 rounded-xl text-sm transition-colors cursor-pointer">
-            Empezar prueba de 15 días
+          <a href="https://wa.me/34601022367?text=Hola%2C%20quiero%20probar%20PresuVoz%20Plan%20Aut%C3%B3nomo" target="_blank" class="w-full text-center bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold py-3.5 rounded-xl text-sm transition-colors cursor-pointer">
+            Empezar prueba de 15 días gratis
           </a>
         </div>
 
         <!-- Plan Pro -->
-        <div class="plan-recommended border-2 border-emerald-500/40 rounded-2xl p-8 flex flex-col relative card-hover">
-          <div class="absolute -top-3 left-6">
-            <span class="bg-emerald-500 text-black font-bold text-[10px] uppercase px-3 py-1 rounded-full tracking-widest">
-              Recomendado
+        <div class="plan-recommended border-2 border-emerald-500/40 rounded-3xl p-8 flex flex-col relative card-hover">
+          <div class="absolute -top-3 left-8">
+            <span class="bg-emerald-500 text-black font-extrabold text-[10px] uppercase px-3 py-1 rounded-full tracking-widest shadow-md shadow-emerald-500/30">
+              Más elegido por empresas
             </span>
           </div>
           <div class="mb-6 mt-2">
-            <h3 class="text-base font-bold text-white mb-1">Pro / Cuadrilla</h3>
-            <p class="text-xs text-slate-500">Para empresas con varios técnicos</p>
+            <h3 class="text-lg font-bold text-white mb-1">Plan Pro / Cuadrilla</h3>
+            <p class="text-xs text-slate-400">Para empresas con varios operarios o encargados</p>
           </div>
           <div class="mb-7">
-            <span class="text-4xl font-black text-white">59 €</span>
+            <span class="text-4xl sm:text-5xl font-black text-white">59 €</span>
             <span class="text-sm text-slate-500 ml-1">/ mes</span>
-            <p class="text-xs text-slate-600 mt-1">IVA no incluido</p>
+            <p class="text-xs text-slate-600 mt-1">IVA no incluido • Sin permanencia</p>
           </div>
-          <ul class="space-y-3 text-sm text-slate-300 mb-8 flex-1">
+          <ul class="space-y-3.5 text-sm text-slate-200 mb-8 flex-1">
             <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Presupuestos ilimitados
+              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Presupuestos ILIMITADOS
             </li>
             <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Hasta 5 números de WhatsApp conectados
+              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Hasta 5 números de WhatsApp de tu equipo conectados
             </li>
             <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Avisos automáticos de presupuestos pendientes
+              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Facturas oficiales y control de anticipos
             </li>
             <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Control de cobros, anticipos y recibos en PDF
+              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Seguimiento automático de presupuestos sin firmar
             </li>
             <li class="flex items-start gap-2.5">
-              <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
-              Soporte prioritario directo
+              <svg class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+              Soporte prioritario directo por WhatsApp
             </li>
           </ul>
-          <a href="https://wa.me/34601022367?text=Hola%2C%20quiero%20probar%20PresuVoz%20Plan%20Pro" target="_blank" class="w-full text-center bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-3 rounded-xl text-sm transition-colors cursor-pointer">
+          <a href="https://wa.me/34601022367?text=Hola%2C%20quiero%20probar%20PresuVoz%20Plan%20Pro" target="_blank" class="w-full text-center bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold py-3.5 rounded-xl text-sm transition-colors shadow-lg shadow-emerald-500/20 cursor-pointer">
             Activar Plan Pro — 15 días gratis
           </a>
         </div>
@@ -354,148 +654,157 @@
     </div>
   </section>
 
-  <!-- FAQ -->
-  <section id="faq" class="py-24 border-t border-slate-800/60 px-6">
-    <div class="max-w-6xl mx-auto">
+  <!-- PREGUNTAS FRECUENTES (FAQ) -->
+  <section id="faq" class="py-24 border-t border-slate-800/60 px-4 sm:px-6 bg-[#060a0f]">
+    <div class="max-w-4xl mx-auto">
       <div class="max-w-lg mb-16">
-        <p class="text-xs uppercase font-semibold text-emerald-500 tracking-widest mb-3">Preguntas frecuentes</p>
+        <p class="text-xs uppercase font-bold text-emerald-400 tracking-widest mb-3">Dudas resueltas</p>
         <h2 class="text-3xl sm:text-4xl font-bold text-white tracking-tight leading-tight">
-          Las dudas más comunes, resueltas.
+          Preguntas frecuentes
         </h2>
       </div>
 
-      <div class="max-w-3xl space-y-px">
-        <div class="faq-item bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden">
-          <button class="w-full text-left p-6 flex justify-between items-center gap-4" onclick="toggleFaq(this)">
-            <span class="text-sm font-semibold text-white">¿Mi cliente tiene que instalarse alguna aplicación para firmar?</span>
+      <div class="space-y-4">
+        
+        <div class="faq-item bg-slate-900/40 border border-slate-800 rounded-2xl overflow-hidden">
+          <button class="w-full text-left p-6 flex justify-between items-center gap-4 cursor-pointer" onclick="toggleFaq(this)">
+            <span class="text-base font-semibold text-white">¿Por qué enviar el presupuesto rápido me hace ganar más obras?</span>
             <svg class="faq-arrow w-4 h-4 text-slate-500 shrink-0 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
           </button>
-          <div class="faq-body hidden px-6 pb-6">
-            <p class="text-sm text-slate-400 leading-relaxed">No. Al cliente le llega un enlace corto por WhatsApp o correo. Lo abre en el navegador de su teléfono, lee el presupuesto y firma deslizando el dedo sobre la pantalla. Sin descargas, sin registros, sin contraseñas.</p>
+          <div class="faq-body hidden px-6 pb-6 text-sm text-slate-400 leading-relaxed border-t border-slate-800/50 pt-4">
+            Los clientes que piden reformas casi siempre piden 2 o 3 presupuestos a diferentes profesionales. Los estudios del sector demuestran que <strong>el 68% de las personas contratan a la primera empresa que les entrega el presupuesto</strong> con las partidas claras. Si tardas dos días en sentarte al ordenador, tu cliente ya habrá aceptado el trabajo con la competencia.
           </div>
         </div>
 
-        <div class="faq-item bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden mt-3">
-          <button class="w-full text-left p-6 flex justify-between items-center gap-4" onclick="toggleFaq(this)">
-            <span class="text-sm font-semibold text-white">¿La firma tiene validez legal si el cliente no paga?</span>
+        <div class="faq-item bg-slate-900/40 border border-slate-800 rounded-2xl overflow-hidden">
+          <button class="w-full text-left p-6 flex justify-between items-center gap-4 cursor-pointer" onclick="toggleFaq(this)">
+            <span class="text-base font-semibold text-white">¿Mi cliente tiene que descargarse alguna app o registrarse para firmar?</span>
             <svg class="faq-arrow w-4 h-4 text-slate-500 shrink-0 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
           </button>
-          <div class="faq-body hidden px-6 pb-6">
-            <p class="text-sm text-slate-400 leading-relaxed">PresuVoz registra la aceptación electrónica, el NIF, la fecha y hora y genera una copia PDF para ambas partes. No es una firma electrónica cualificada ni garantiza por sí sola un resultado judicial; consulta con un profesional jurídico según cada caso.</p>
+          <div class="faq-body hidden px-6 pb-6 text-sm text-slate-400 leading-relaxed border-t border-slate-800/50 pt-4">
+            No, en absoluto. A tu cliente le llega un enlace corto de WhatsApp. Lo abre en el navegador de su teléfono, lee el documento y firma deslizando el dedo sobre la pantalla táctil. Sin registros, sin contraseñas y sin descargar nada.
           </div>
         </div>
 
-        <div class="faq-item bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden mt-3">
-          <button class="w-full text-left p-6 flex justify-between items-center gap-4" onclick="toggleFaq(this)">
-            <span class="text-sm font-semibold text-white">¿Esto sustituye a mi gestoría o contabilidad oficial ante Hacienda?</span>
+        <div class="faq-item bg-slate-900/40 border border-slate-800 rounded-2xl overflow-hidden">
+          <button class="w-full text-left p-6 flex justify-between items-center gap-4 cursor-pointer" onclick="toggleFaq(this)">
+            <span class="text-base font-semibold text-white">¿Funciona si hablo con jerga o expresiones de obra?</span>
             <svg class="faq-arrow w-4 h-4 text-slate-500 shrink-0 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
           </button>
-          <div class="faq-body hidden px-6 pb-6">
-            <p class="text-sm text-slate-400 leading-relaxed">No. PresuVoz es un asistente de generación documental y presupuestos en PDF para agilizar el día a día del profesional. El autónomo o su gestoría siguen siendo los únicos responsables de la revisión fiscal, del tipo de IVA aplicable y de su contabilidad oficial.</p>
+          <div class="faq-body hidden px-6 pb-6 text-sm text-slate-400 leading-relaxed border-t border-slate-800/50 pt-4">
+            Exactamente para eso está creado. PresuVoz entiende expresiones reales de albañiles, fontaneros, electricistas y carpinteros en España: sacos de cemento cola, botes de imprimación, tabiques de pladur a 40 cm, termos, cuadros eléctricos, etc. Tú hablas en voz normal y él lo redacta en un lenguaje técnico impecable para tu cliente.
           </div>
         </div>
+
+        <div class="faq-item bg-slate-900/40 border border-slate-800 rounded-2xl overflow-hidden">
+          <button class="w-full text-left p-6 flex justify-between items-center gap-4 cursor-pointer" onclick="toggleFaq(this)">
+            <span class="text-base font-semibold text-white">¿Cómo se configura el logotipo y datos de mi empresa?</span>
+            <svg class="faq-arrow w-4 h-4 text-slate-500 shrink-0 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <div class="faq-body hidden px-6 pb-6 text-sm text-slate-400 leading-relaxed border-t border-slate-800/50 pt-4">
+            En el primer mensaje que envías por WhatsApp, el asistente te pide tu nombre comercial, CIF/NIF y que le adjuntes tu logotipo como una foto normal. A partir de ese momento, todos los PDFs y recibos que generes llevarán tu membrete profesional de forma automática.
+          </div>
+        </div>
+
       </div>
     </div>
   </section>
 
-  <!-- Contact & Business Details (Required by Meta Business Verification) -->
-  <section id="contacto" class="py-16 border-t border-slate-800/60 px-6 bg-[#0a0f14]">
+  <!-- CONTACTO Y DATOS LEGALES -->
+  <section id="contacto" class="py-16 border-t border-slate-800/60 px-4 sm:px-6 bg-[#0a0f14]">
     <div class="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8 text-sm">
       <div>
-        <p class="text-xs uppercase font-semibold text-emerald-500 tracking-widest mb-2">Titular y Contacto</p>
+        <p class="text-xs uppercase font-bold text-emerald-400 tracking-widest mb-2">Titular del Servicio</p>
         <p class="text-white font-semibold">PresuVoz — Alberto Martín Martín</p>
-        <p class="text-slate-400 mt-1">Soluciones de software y asistencia documental por voz para profesionales.</p>
+        <p class="text-slate-400 mt-1">Soluciones de software de asistencia documental, cálculo y presupuestos por voz para profesionales de reformas.</p>
       </div>
       <div>
-        <p class="text-xs uppercase font-semibold text-emerald-500 tracking-widest mb-2">Dirección Postal</p>
+        <p class="text-xs uppercase font-bold text-emerald-400 tracking-widest mb-2">Sede y Ubicación</p>
         <p class="text-slate-300">Sevilla, 41008</p>
         <p class="text-slate-400">Andalucía, España</p>
       </div>
       <div>
-        <p class="text-xs uppercase font-semibold text-emerald-500 tracking-widest mb-2">Atención al Cliente</p>
-        <p class="text-slate-300">Teléfono / WhatsApp: <a href="tel:+34601022367" class="text-emerald-400 hover:underline">+34 601 02 23 67</a></p>
-        <p class="text-slate-400 mt-1">Email: <a href="mailto:albertomartinmartin201@gmail.com" class="hover:text-white">albertomartinmartin201@gmail.com</a></p>
+        <p class="text-xs uppercase font-bold text-emerald-400 tracking-widest mb-2">Atención y Soporte Directo</p>
+        <p class="text-slate-300">Teléfono / WhatsApp: <a href="tel:+34601022367" class="text-emerald-400 font-bold hover:underline">+34 601 02 23 67</a></p>
+        <p class="text-slate-400 mt-1">Email: <a href="mailto:firmas@presuvoz.online" class="hover:text-white">firmas@presuvoz.online</a></p>
       </div>
     </div>
   </section>
 
-  <!-- Footer -->
-  <footer class="border-t border-slate-800/60 py-12 px-6">
-    <div class="max-w-6xl mx-auto flex flex-col sm:flex-row justify-between items-start gap-6">
+  <!-- Footer Oficial con Logo -->
+  <footer class="border-t border-slate-800/80 py-12 px-4 sm:px-6 bg-[#05080c]">
+    <div class="max-w-6xl mx-auto flex flex-col sm:flex-row justify-between items-start gap-8">
       <div>
-        <div class="flex items-center gap-2.5 mb-3">
-          <div class="w-6 h-6 rounded-md bg-emerald-500 flex items-center justify-center">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round">
-              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-            </svg>
+        <div class="flex items-center gap-3 mb-3">
+          <div class="w-8 h-8 rounded-lg overflow-hidden border border-emerald-500/40 bg-slate-900">
+            <img src="/logo_web_nav.png" alt="PresuVoz Logo" class="w-full h-full object-cover">
           </div>
-          <span class="font-bold text-sm text-white">PresuVoz</span>
+          <span class="font-extrabold text-base text-white">PresuVoz</span>
         </div>
         <p class="text-xs text-slate-500 max-w-md leading-relaxed">
           © 2026 PresuVoz (presuvoz.online) · Sevilla (41008), España · Tel: +34 601 02 23 67.<br>
-          Condiciones de uso: PresuVoz actúa exclusivamente como asistente de generación documental y presupuestos en PDF. El profesional o su asesoría fiscal son los responsables finales de la validación tributaria y contabilidad oficial.
+          Condiciones de uso: PresuVoz actúa como asistente inteligente de gestión documental, mermas y presupuestos en PDF para profesionales y autónomos.
         </p>
       </div>
 
       <div class="flex gap-12 text-xs text-slate-500">
         <div class="space-y-2">
-          <p class="font-semibold text-slate-400 mb-3">Producto</p>
-          <a href="#como-funciona" class="block hover:text-slate-300 transition-colors">Cómo funciona</a>
+          <p class="font-bold text-slate-400 mb-3">Producto</p>
+          <a href="/demo" class="block text-emerald-400 font-semibold hover:text-emerald-300 transition-colors">Vídeo Demo (1m)</a>
+          <a href="#funcionalidades" class="block hover:text-slate-300 transition-colors">Funcionalidades</a>
+          <a href="#tiempo-vs-competencia" class="block hover:text-slate-300 transition-colors">20s vs Competencia</a>
           <a href="#precios" class="block hover:text-slate-300 transition-colors">Precios</a>
-          <a href="studio/whatsapp.html" class="block hover:text-slate-300 transition-colors">Simulador Demo</a>
         </div>
         <div class="space-y-2">
-          <p class="font-semibold text-slate-400 mb-3">Legal y Soporte</p>
+          <p class="font-bold text-slate-400 mb-3">Soporte y Legal</p>
           <a href="#faq" class="block hover:text-slate-300 transition-colors">Preguntas frecuentes</a>
-          <a href="#contacto" class="block hover:text-slate-300 transition-colors">Aviso legal y Contacto</a>
+          <a href="#contacto" class="block hover:text-slate-300 transition-colors">Contacto directo</a>
+          <a href="https://wa.me/34601022367" target="_blank" class="block hover:text-slate-300 transition-colors">Soporte WhatsApp</a>
         </div>
       </div>
     </div>
   </footer>
 
+  <!-- Scripts para Calculadora y FAQ -->
   <script>
-    const inQuotes = document.getElementById('inputQuotes');
-    const inHours = document.getElementById('inputHours');
-    const inRate = document.getElementById('inputRate');
+    function toggleFaq(btn) {
+      const body = btn.nextElementSibling;
+      const arrow = btn.querySelector('.faq-arrow');
+      body.classList.toggle('hidden');
+      arrow.classList.toggle('rotate-180');
+    }
+
+    const quotesInput = document.getElementById('inputQuotes');
+    const hoursInput = document.getElementById('inputHours');
+    const rateInput = document.getElementById('inputRate');
 
     function updateCalc() {
-      const q = parseInt(inQuotes.value);
-      const h = parseFloat(inHours.value);
-      const r = parseInt(inRate.value);
+      const q = parseFloat(quotesInput.value);
+      const h = parseFloat(hoursInput.value);
+      const r = parseFloat(rateInput.value);
 
       document.getElementById('valQuotes').textContent = q;
       document.getElementById('valHours').textContent = h + ' h';
       document.getElementById('valRate').textContent = r + ' €';
 
       const totalHours = q * h;
-      const totalCost = totalHours * r;
-      const savedHours = Math.round(totalHours * 0.87);
-      const roi = Math.round(((totalCost - 39) / 39) * 100);
+      const cost = totalHours * r;
+      const hoursSavedVal = Math.round(totalHours * 0.85);
+      const presuvozCost = 39;
+      const netSavings = (hoursSavedVal * r) - presuvozCost;
+      const roiVal = Math.round((netSavings / presuvozCost) * 100);
 
-      document.getElementById('costResult').textContent = totalCost.toLocaleString('es-ES') + ' €';
-      document.getElementById('hoursSaved').textContent = savedHours + ' h';
-      document.getElementById('roi').textContent = '+' + roi.toLocaleString('es-ES') + '%';
+      document.getElementById('costResult').textContent = cost.toLocaleString('es-ES') + ' €';
+      document.getElementById('hoursSaved').textContent = hoursSavedVal + ' h';
+      document.getElementById('roi').textContent = '+' + roiVal.toLocaleString('es-ES') + '%';
     }
 
-    inQuotes.addEventListener('input', updateCalc);
-    inHours.addEventListener('input', updateCalc);
-    inRate.addEventListener('input', updateCalc);
-    updateCalc();
-
-    function toggleFaq(btn) {
-      const body = btn.nextElementSibling;
-      const arrow = btn.querySelector('.faq-arrow');
-      const isOpen = !body.classList.contains('hidden');
-
-      document.querySelectorAll('.faq-body').forEach(b => b.classList.add('hidden'));
-      document.querySelectorAll('.faq-arrow').forEach(a => a.style.transform = '');
-
-      if (!isOpen) {
-        body.classList.remove('hidden');
-        arrow.style.transform = 'rotate(180deg)';
-      }
+    if (quotesInput && hoursInput && rateInput) {
+      quotesInput.addEventListener('input', updateCalc);
+      hoursInput.addEventListener('input', updateCalc);
+      rateInput.addEventListener('input', updateCalc);
+      updateCalc();
     }
   </script>
-
 </body>
 </html>

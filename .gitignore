@@ -57,3 +57,7 @@ videos/
 *.mp4
 !presuvoz_demo_e2e_editada.mp4
 
+# Antigravity IDE agent cache
+.agents/
+skills-lock.json
+
