@@ -72,20 +72,36 @@
     <div class="max-w-4xl mx-auto">
 
       <!-- Encabezado de la Demo -->
-      <div class="text-center max-w-2xl mx-auto mb-8 sm:mb-12">
-        <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/90 border border-emerald-500/30 text-emerald-400 text-xs font-semibold mb-4 shadow-sm">
+      <div class="text-center max-w-2xl mx-auto mb-6 sm:mb-8">
+        <div id="demoBadge" class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/90 border border-emerald-500/30 text-emerald-400 text-xs font-semibold mb-4 shadow-sm">
           <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-          DEMO EN VÍDEO REAL • 63 SEGUNDOS
+          <span>DEMO EN VÍDEO REAL • 63 SEGUNDOS</span>
         </div>
 
-        <h1 class="text-3xl sm:text-5xl font-black text-white tracking-tight leading-tight sm:leading-[1.15] mb-4">
+        <h1 id="demoTitle" class="text-3xl sm:text-5xl font-black text-white tracking-tight leading-tight sm:leading-[1.15] mb-4">
           De una nota de voz al <br class="hidden sm:inline">
           <span class="text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400">presupuesto firmado</span>
         </h1>
 
-        <p class="text-slate-400 text-sm sm:text-base leading-relaxed">
+        <p id="demoDesc" class="text-slate-400 text-sm sm:text-base leading-relaxed">
           Diseñado para <strong class="text-slate-200">albañiles, fontaneros, carpinteros, electricistas y empresas de reformas</strong>. Mira cómo funciona en un móvil real sin tocar un ordenador ni instalar aplicaciones.
         </p>
+      </div>
+
+      <!-- Selector de Vídeos / Pestañas de Demostración -->
+      <div class="flex flex-wrap items-center justify-center gap-2 sm:gap-2.5 mb-8 max-w-3xl mx-auto">
+        <button onclick="switchVideo('presupuesto')" id="tab-presupuesto" class="video-tab px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all border border-emerald-500 bg-emerald-500/15 text-emerald-300 shadow-md shadow-emerald-500/10 cursor-pointer">
+          ⭐ Presupuesto Completo (63s)
+        </button>
+        <button onclick="switchVideo('visitas')" id="tab-visitas" class="video-tab px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all border border-slate-800 bg-slate-900/70 text-slate-300 hover:text-white hover:border-slate-700 cursor-pointer">
+          📍 Visitas + Maps (28s)
+        </button>
+        <button onclick="switchVideo('pladur')" id="tab-pladur" class="video-tab px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all border border-slate-800 bg-slate-900/70 text-slate-300 hover:text-white hover:border-slate-700 cursor-pointer">
+          🏗️ Cálculo de Pladur (31s)
+        </button>
+        <button onclick="switchVideo('compra')" id="tab-compra" class="video-tab px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all border border-slate-800 bg-slate-900/70 text-slate-300 hover:text-white hover:border-slate-700 cursor-pointer">
+          🛒 Lista de Compra (28s)
+        </button>
       </div>
 
       <!-- Contenedor del Vídeo Principal -->
@@ -128,10 +144,10 @@
       </div>
 
       <!-- Capítulos interactivos del vídeo -->
-      <div class="mb-16">
+      <div id="chaptersSection" class="mb-16">
         <div class="flex items-center justify-between mb-4">
           <h2 class="text-xl sm:text-2xl font-bold text-white tracking-tight flex items-center gap-2">
-            <span>Pasos clave en el vídeo</span>
+            <span>Pasos clave en este vídeo</span>
           </h2>
           <span class="text-xs text-slate-400">Haz clic para saltar al paso</span>
         </div>
@@ -199,35 +215,65 @@
         </div>
       </div>
 
-      <!-- Sección: Próximos tutoriales y casos de uso -->
+      <!-- Galería de Vídeos Rápidos por Funcionalidad -->
       <div class="mb-16 p-6 sm:p-8 rounded-3xl bg-slate-900/40 border border-slate-800/80">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
           <div>
-            <h2 class="text-xl font-bold text-white tracking-tight">Más demostraciones y casos de uso</h2>
-            <p class="text-xs sm:text-sm text-slate-400 mt-1">Nuevos vídeos y ejemplos reales de aplicación por oficio.</p>
+            <h2 class="text-xl font-bold text-white tracking-tight">Vídeos Rápidos por Funcionalidad</h2>
+            <p class="text-xs sm:text-sm text-slate-400 mt-1">Demostraciones en 30 segundos con interfaz simulada y voz en off.</p>
           </div>
           <span class="text-xs text-emerald-400 font-semibold bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-full self-start sm:self-auto">
-            Próximamente
+            Disponibles ahora
           </span>
         </div>
 
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div class="p-4 rounded-2xl bg-slate-950/60 border border-slate-800/70">
-            <div class="flex items-center gap-2 text-xs font-semibold text-slate-400 mb-2">
-              <span class="w-2 h-2 rounded-full bg-slate-600"></span>
-              Albañilería y Reformas de Baño
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <!-- Card 1 -->
+          <div onclick="switchVideo('visitas')" class="p-5 rounded-2xl bg-slate-950/70 border border-slate-800 hover:border-emerald-500/40 transition-all cursor-pointer group flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between mb-3">
+                <span class="text-2xl">📍</span>
+                <span class="text-[10px] font-bold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-md">28 seg</span>
+              </div>
+              <h4 class="text-sm font-bold text-white group-hover:text-emerald-400 transition-colors mb-1">Agendar Visitas + Maps</h4>
+              <p class="text-xs text-slate-400 leading-relaxed">Cómo dictar una cita por voz y recibir la ruta directa en Google Maps.</p>
             </div>
-            <h4 class="text-sm font-semibold text-slate-200 mb-1">Cómo sacar mermas y alicatados por voz</h4>
-            <p class="text-xs text-slate-500">Ejemplo práctico de medición de azulejos, sacos de mortero y adhesivo flexible en obra real.</p>
+            <button class="mt-4 text-xs font-bold text-emerald-400 group-hover:text-emerald-300 flex items-center gap-1.5 pt-2 border-t border-slate-800/60 cursor-pointer">
+              <span>Ver vídeo ahora</span>
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+            </button>
           </div>
 
-          <div class="p-4 rounded-2xl bg-slate-950/60 border border-slate-800/70">
-            <div class="flex items-center gap-2 text-xs font-semibold text-slate-400 mb-2">
-              <span class="w-2 h-2 rounded-full bg-slate-600"></span>
-              Fontanería y Electricidad
+          <!-- Card 2 -->
+          <div onclick="switchVideo('pladur')" class="p-5 rounded-2xl bg-slate-950/70 border border-slate-800 hover:border-emerald-500/40 transition-all cursor-pointer group flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between mb-3">
+                <span class="text-2xl">🏗️</span>
+                <span class="text-[10px] font-bold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-md">31 seg</span>
+              </div>
+              <h4 class="text-sm font-bold text-white group-hover:text-emerald-400 transition-colors mb-1">Cálculo de Pladur y Mermas</h4>
+              <p class="text-xs text-slate-400 leading-relaxed">Desglose de placas, canales, montantes a 40cm y +10% de mermas de corte.</p>
             </div>
-            <h4 class="text-sm font-semibold text-slate-200 mb-1">Cierre de anticipos en visitas urgentes</h4>
-            <p class="text-xs text-slate-500">Cómo cobrar el 40% de anticipo y formalizar la firma legal en el momento de la avería.</p>
+            <button class="mt-4 text-xs font-bold text-emerald-400 group-hover:text-emerald-300 flex items-center gap-1.5 pt-2 border-t border-slate-800/60 cursor-pointer">
+              <span>Ver vídeo ahora</span>
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+            </button>
+          </div>
+
+          <!-- Card 3 -->
+          <div onclick="switchVideo('compra')" class="p-5 rounded-2xl bg-slate-950/70 border border-slate-800 hover:border-emerald-500/40 transition-all cursor-pointer group flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between mb-3">
+                <span class="text-2xl">🛒</span>
+                <span class="text-[10px] font-bold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-md">28 seg</span>
+              </div>
+              <h4 class="text-sm font-bold text-white group-hover:text-emerald-400 transition-colors mb-1">Lista de Compra Obramat</h4>
+              <p class="text-xs text-slate-400 leading-relaxed">Organización por almacén con casillas para tachar y compartir con el peón.</p>
+            </div>
+            <button class="mt-4 text-xs font-bold text-emerald-400 group-hover:text-emerald-300 flex items-center gap-1.5 pt-2 border-t border-slate-800/60 cursor-pointer">
+              <span>Ver vídeo ahora</span>
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+            </button>
           </div>
         </div>
       </div>
@@ -271,10 +317,90 @@
     </div>
   </footer>
 
-  <!-- Script interactivo de reproducción -->
+  <!-- Script interactivo de reproducción y cambio de vídeo -->
   <script>
     const video = document.getElementById('mainVideo');
     const cards = document.querySelectorAll('.chapter-card');
+    const chaptersSection = document.getElementById('chaptersSection');
+    const demoBadge = document.getElementById('demoBadge');
+    const demoTitle = document.getElementById('demoTitle');
+    const demoDesc = document.getElementById('demoDesc');
+
+    const VIDEOS = {
+      presupuesto: {
+        badge: 'DEMO EN VÍDEO REAL • 63 SEGUNDOS',
+        title: 'De una nota de voz al <br class="hidden sm:inline"><span class="text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400">presupuesto firmado</span>',
+        desc: 'Diseñado para <strong class="text-slate-200">albañiles, fontaneros, carpinteros, electricistas y empresas de reformas</strong>. Mira cómo funciona en un móvil real sin tocar un ordenador ni instalar aplicaciones.',
+        src: '/presuvoz_demo_e2e_editada.mp4',
+        poster: '/demo_poster.jpg',
+        hasChapters: true
+      },
+      visitas: {
+        badge: 'VÍDEO TUTORIAL ANIMADO • 28 SEGUNDOS',
+        title: 'Agendar <span class="text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400">visitas y Google Maps</span> por nota de voz',
+        desc: 'Di la fecha, cliente y dirección por audio. PresuVoz te agenda la visita, te deja el enlace a Maps en un toque y programa el recordatorio para el cliente.',
+        src: '/presuvoz_demo_visitas_maps.mp4',
+        poster: '',
+        hasChapters: false
+      },
+      pladur: {
+        badge: 'VÍDEO TUTORIAL ANIMADO • 31 SEGUNDOS',
+        title: 'Cálculo de <span class="text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400">materiales y mermas</span> de pladur',
+        desc: 'Canta las medidas del tabique y el bot te desglosa al segundo placas, canales, montantes a 40cm, tornillos, pasta y el +10% de mermas de corte.',
+        src: '/presuvoz_demo_calculo_pladur.mp4',
+        poster: '',
+        hasChapters: false
+      },
+      compra: {
+        badge: 'VÍDEO TUTORIAL ANIMADO • 28 SEGUNDOS',
+        title: 'Lista de la compra <span class="text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400">organizada por almacén</span>',
+        desc: 'Dicta los materiales que necesitas mientras sales de la obra. PresuVoz te los organiza para Obramat con casillas para tachar y compartir con tu peón.',
+        src: '/presuvoz_demo_lista_compra.mp4',
+        poster: '',
+        hasChapters: false
+      }
+    };
+
+    let currentKey = 'presupuesto';
+
+    function switchVideo(key) {
+      const data = VIDEOS[key];
+      if (!data || !video) return;
+      currentKey = key;
+
+      // Actualizar textos
+      if (demoBadge) demoBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span><span>${data.badge}</span>`;
+      if (demoTitle) demoTitle.innerHTML = data.title;
+      if (demoDesc) demoDesc.innerHTML = data.desc;
+
+      // Actualizar tabs activas
+      document.querySelectorAll('.video-tab').forEach(tab => {
+        tab.classList.remove('border-emerald-500', 'bg-emerald-500/15', 'text-emerald-300', 'shadow-md', 'shadow-emerald-500/10');
+        tab.classList.add('border-slate-800', 'bg-slate-900/70', 'text-slate-300');
+      });
+      const activeTab = document.getElementById('tab-' + key);
+      if (activeTab) {
+        activeTab.classList.remove('border-slate-800', 'bg-slate-900/70', 'text-slate-300');
+        activeTab.classList.add('border-emerald-500', 'bg-emerald-500/15', 'text-emerald-300', 'shadow-md', 'shadow-emerald-500/10');
+      }
+
+      // Mostrar u ocultar capítulos
+      if (chaptersSection) {
+        if (data.hasChapters) {
+          chaptersSection.classList.remove('hidden');
+        } else {
+          chaptersSection.classList.add('hidden');
+        }
+      }
+
+      // Cargar y reproducir vídeo
+      video.pause();
+      video.src = data.src;
+      video.poster = data.poster || '';
+      video.load();
+      video.play().catch(() => {});
+      video.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
 
     function seekTo(seconds) {
       if (!video) return;
@@ -286,6 +412,7 @@
     if (video) {
       const chapterTimes = [0, 10.5, 22, 34, 43, 54.5];
       video.addEventListener('timeupdate', () => {
+        if (currentKey !== 'presupuesto') return;
         const ct = video.currentTime;
         let activeIdx = 0;
         for (let i = 0; i < chapterTimes.length; i++) {
@@ -300,6 +427,15 @@
         });
       });
     }
+
+    // Comprobar parámetros de URL (ej. /demo?v=visitas o /demo?v=pladur)
+    window.addEventListener('DOMContentLoaded', () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const vParam = urlParams.get('v');
+      if (vParam && VIDEOS[vParam]) {
+        switchVideo(vParam);
+      }
+    });
   </script>
 </body>
 </html>

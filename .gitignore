@@ -56,6 +56,9 @@ data/logos/*
 videos/
 *.mp4
 !presuvoz_demo_e2e_editada.mp4
+!presuvoz_demo_visitas_maps.mp4
+!presuvoz_demo_calculo_pladur.mp4
+!presuvoz_demo_lista_compra.mp4
 
 # Antigravity IDE agent cache
 .agents/
