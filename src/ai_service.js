@@ -213,12 +213,18 @@ Tu función es:
         c) Materiales generales / sin cliente (ej: "apunta a la lista 50 m2 de madera", sin nombrar cliente):
            Pon 'clientName: null' en ese artículo (NUNCA asumas el cliente del presupuesto activo ni inventes un cliente).
         En 'shoppingItems', rellena en CADA elemento su 'clientName' específico (ej: "Alberto López", "María García", o null). Rellena 'clientName' general a nivel de raíz con el primer cliente o null si hay varios.
-    - CONSULTAR LISTA DE MATERIALES / COMPRAS: Si el profesional pregunta qué tiene que comprar o pide ver la lista (ej: "¿qué materiales tengo que comprar?", "¿qué tengo que comprar para Carlos?", "lista de la compra", "materiales pendientes de Alberto", "qué tengo que comprar"):
-      pon 'action: "list_shopping_items"' y si menciona un cliente concreto pon 'clientName': "Carlos" (o null si pide la lista general de todas las obras o no menciona cliente).
+    - CONSULTAR LISTA DE MATERIALES / COMPRAS: Si el profesional pregunta qué o cuántos materiales tiene que comprar o pide ver la lista (ej: "¿qué materiales tengo que comprar?", "¿cuántos materiales tengo que comprar?", "¿cuánto material tengo que comprar?", "¿cuántas cosas tengo que comprar?", "¿qué tengo que comprar para Carlos?", "lista de la compra", "materiales pendientes de Alberto", "qué tengo que comprar"):
+      pon 'action: "list_shopping_items"' y si menciona un cliente concreto pon 'clientName': "Carlos" (o null si pide la lista general de todas las obras o no menciona cliente). NOTA: Si pregunta "¿cuántos materiales tengo que comprar?" sin especificar un trabajo técnico ni medidas de obra (como m², pladur, azulejos, pintura...), SIEMPRE es 'list_shopping_items'.
     - MARCAR MATERIALES COMO COMPRADOS / TACHADOS: Si el profesional indica que un material YA ESTÁ COMPRADO, ya se compró, o pide tacharlo (ej: "los 30 m2 de pladur de la obra de José Luis Perales ya está comprado", "el bote de pintura de color verde ya está comprado", "ya he comprado el cemento de Carlos", "el pladur ya está comprado", "eso ya está comprado", "ya compré la pintura", "tacha el azulejo gris", "comprado cemento cola"):
       pon 'action: "mark_shopping_items"'. NUNCA lo clasifiques como 'add_shopping_items'.
       Rellena 'shoppingQuery' con el material a tachar (ej: "pladur", "bote de pintura verde", "cemento cola").
       REGLA DE CLIENTE: Rellena 'clientName' ÚNICAMENTE si el profesional lo nombra de forma EXPLÍCITA en este mensaje exacto (ej: "de la obra de José Luis Perales" -> "José Luis Perales"). Si NO menciona cliente (ej: "el bote de pintura de color verde ya está comprado"), pon 'clientName': null (NUNCA asumas el cliente del presupuesto activo). Si dice que compró todo lo de una o varias obras/clientes, conserva todos los nombres de clientes; NUNCA lo interpretes como vaciar/borrar la lista.
+    - ELIMINAR O QUITAR UN ARTÍCULO CONCRETO DE LA LISTA DE COMPRAS: Si el profesional pide quitar, borrar, eliminar o sacar un material o artículo específico de la lista de la compra porque ya no lo necesita o se equivocó al apuntarlo (ej: "quita el cemento de la lista de la compra", "borra los 3 botes de pintura de la lista", "elimina el azulejo gris de la compra de Carlos", "saca la silicona de la lista de la compra"):
+      pon 'action: "remove_shopping_items"'. NUNCA uses 'clear_shopping_list' para borrar un artículo suelto.
+      Rellena 'shoppingQuery' con el material a eliminar (ej: "cemento", "botes de pintura", "azulejo gris", "silicona") y 'clientName' solo si menciona explícitamente al cliente (o null si no).
+    - EDITAR O MODIFICAR UN ARTÍCULO DE LA LISTA DE COMPRAS: Si el profesional pide cambiar, modificar o editar la cantidad, unidad o descripción de un material que ya está en la lista de la compra (ej: "cambia los 3 botes de pintura de la lista a 5", "en la lista de la compra de Carlos pon 8 placas de pladur en vez de 4", "modifica el cemento cola a 10 sacos en la lista", "edita la pintura blanca de la lista a 4 botes"):
+      pon 'action: "update_shopping_item"'.
+      Rellena 'shoppingQuery' con el material original a buscar en la lista (ej: "botes de pintura", "placas de pladur", "cemento cola", "pintura blanca"), 'shoppingUpdate': { "qty": 5, "unit": "ud", "newDescription": null } (pon 'newDescription' solo si cambia también el nombre/color del material, o null si solo cambia la cantidad/unidad), y 'clientName' solo si menciona explícitamente al cliente (o null si no).
     - MODO OBRA / CONSULTAR ESTADO O QUÉ FALTA EN UNA OBRA: Si el profesional pregunta por el estado de una obra, cómo va o qué le falta por hacer/comprar (ej: "¿qué nos falta en la obra de Juan?", "¿qué falta en la obra de Juan?", "modo obra Juan", "estado de la obra de Carlos", "cómo va la obra de Alberto", "ficha de obra de Juan"):
       pon 'action: "query_work_status"', rellena 'clientName': "Juan", y si pregunta explícitamente qué falta pon 'onlyMissing': true (o false si pide el estado general).
     - MARCAR TAREA O FASE DE OBRA TERMINADA: Si el profesional indica que una tarea o fase de obra está hecha, terminada o lista (ej: "ya hemos terminado la demolición de Juan", "marca fontanería como hecha en la obra de Carlos", "alicatado listo", "tarea hecha alicatado"):
@@ -328,7 +334,7 @@ Tu función es:
 
 FORMATO DE RESPUESTA (JSON estricto):
 {
-  "action": "budget", // "budget" | "calculate_materials" | "show_budget" | "list_budgets" | "invoice" | "phase_invoice" | "final_invoice" | "rectification_invoice" | "query_pending_to_invoice" | "advance_invoice" | "payment" | "query_balance" | "query_revenue" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "update_appointment" | "complete_appointments" | "accept_budget" | "cancel_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates" | "purchase_invoice"
+  "action": "budget", // "budget" | "calculate_materials" | "show_budget" | "list_budgets" | "invoice" | "phase_invoice" | "final_invoice" | "rectification_invoice" | "query_pending_to_invoice" | "advance_invoice" | "payment" | "query_balance" | "query_revenue" | "configure_company" | "show_company" | "export_quarter" | "configure_gestoria" | "schedule_appointment" | "list_appointments" | "cancel_appointment" | "update_appointment" | "complete_appointments" | "accept_budget" | "cancel_budget" | "add_shopping_items" | "list_shopping_items" | "mark_shopping_items" | "remove_shopping_items" | "update_shopping_item" | "clear_shopping_list" | "query_work_status" | "update_work_task" | "update_work_dates" | "purchase_invoice"
   "materialCalculationInfo": null,
   "revenueQuery": null, // { "period": "month"|"quarter"|"four_month"|"week"|"today"|"year", "queryType": "collected"|"invoiced"|"all", "month": 1-12, "quarter": 1-4, "fourMonth": 1-3, "year": 2026 }
   "taskQuery": null,
@@ -368,6 +374,7 @@ FORMATO DE RESPUESTA (JSON estricto):
     }
   ],
   "shoppingQuery": null,
+  "shoppingUpdate": null, // { "qty": 5, "unit": "ud", "newDescription": null }
   "budgetFilter": "all", // "pending_signature" | "accepted" | "draft" | "all"
   "appointmentInfo": {
     "clientName": "Nombre cliente",

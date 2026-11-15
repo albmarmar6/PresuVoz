@@ -119,6 +119,8 @@ import {
   listShoppingItems,
   markShoppingItemBought,
   markShoppingItemsBoughtForClients,
+  deleteShoppingItem,
+  updateShoppingItem,
   clearShoppingList,
   getWorkMemory,
   updateWorkTaskStatus,
@@ -1986,23 +1988,27 @@ export function detectShoppingListQueryIntent(text) {
   if (detectBoughtShoppingListQueryIntent(text)) return null;
   const t = text.trim().toLowerCase();
 
-  // Excluir acciones explícitas sobre compras
-  if (/\b(?:ya\s+compr[eé]|comprad[oa]s?|tachad[oa]s?|tachar|borrar\s+lista|vaciar\s+lista|limpiar\s+lista)\b/i.test(t)) {
+  // Excluir acciones explícitas sobre compras (tachar, borrar, quitar, editar, vaciar)
+  if (/\b(?:ya\s+compr[eé]|comprad[oa]s?|tachad[oa]s?|tachar|borrar|vaciar|limpiar|quitar|quita|elimina|eliminar|cambia|cambiar|modifica|modificar|edita|editar)\b/i.test(t)) {
     return null;
   }
   // Excluir cualquier orden de apuntar / añadir / meter / poner / guardar / agregar / comprar materiales
   if (/(?:^|\s)(?:apunt|anot|a[ñn][aá]d|an[aá]d|met|pon|guard|agreg|inclu|pas(?:a|á|e|alo|alos)|comprar\s+\d+)/i.test(t)) {
     return null;
   }
+  // Excluir consultas de cálculo técnico de materiales (con medidas m2, metros, dimensiones o estancias)
+  if (/\b(?:\d+\s*(?:m2|m²|m3|m³|ml|metros?)|\d+\s*x\s*\d+|para\s+(?:un|una|el|la|pintar|alicatar|solar|hacer|levantar)\s+(?:ba[ñn]o|cocina|habitaci[oó]n|sal[oó]n|tabique|muro|pared|techo|suelo|tejado|fachada))\b/i.test(t)) {
+    return null;
+  }
 
-  // Patrones naturales de consulta de compras / materiales
+  // Patrones naturales de consulta de compras / materiales (incluye "¿qué materiales tengo que comprar?" y "¿cuántos materiales tengo que comprar?")
   const isShoppingQuery =
-    /\b(?:lista\s+de\s+(?:la\s+)?compras?|lista\s+de\s+materiales|materiales\s+pendientes|compras?\s+pendientes)\b/i.test(t)
-    || /\b(?:qu[eé]\s+(?:materiales?\s+)?(?:tengo\s+que|hay\s+que|tengo|queda[n]?|falta[n]?|me\s+falta[n]?)\s+(?:por\s+)?comprar)\b/i.test(t)
-    || /\b(?:qu[eé]\s+materiales?\s+(?:tengo|hay)\s+pendientes?(?:\s+(?:por|de)\s+comprar)?)\b/i.test(t)
-    || /\b(?:qu[eé]\s+tengo\s+(?:pendiente\s+)?(?:de|por)\s+comprar)\b/i.test(t)
-    || /\b(?:materiales?\s+(?:por\s+comprar|pendientes?(?:\s+de\s+compra)?))\b/i.test(t)
-    || /^(?:compras|mis\s+compras|ver\s+compras?|materiales)$/i.test(t);
+    /\b(?:lista\s+de\s+(?:la\s+)?compras?|lista\s+de\s+material(?:es)?|material(?:es)?\s+pendientes?|compras?\s+pendientes?)\b/i.test(t)
+    || /\b(?:(?:qu[eé]|cu[aá]nt[oa]s?)\s+(?:material(?:es)?\s+|cosas?\s+)?(?:tengo\s+que|hay\s+que|tengo|queda[n]?|falta[n]?|me\s+falta[n]?)\s+(?:por\s+)?comprar)\b/i.test(t)
+    || /\b(?:(?:qu[eé]|cu[aá]nt[oa]s?)\s+material(?:es)?\s+(?:tengo|hay)\s+pendientes?(?:\s+(?:por|de)\s+comprar)?)\b/i.test(t)
+    || /\b(?:(?:qu[eé]|cu[aá]nto)\s+tengo\s+(?:pendiente\s+)?(?:de|por)\s+comprar)\b/i.test(t)
+    || /\b(?:material(?:es)?\s+(?:por\s+comprar|pendientes?(?:\s+de\s+compra)?))\b/i.test(t)
+    || /^(?:compras|mis\s+compras|ver\s+compras?|material(?:es)?)$/i.test(t);
 
   if (!isShoppingQuery) return null;
 
@@ -3870,6 +3876,212 @@ export async function handleMarkShoppingItemBought(sock, remoteJid, session, que
     }
     return { success: false, error: err.message };
   }
+}
+
+export async function handleRemoveShoppingItem(sock, remoteJid, session, query, clientQuery = null, explicitBudgetId = null) {
+  try {
+    const companyId = session?.companyId || session?.authContext?.companyId;
+    if (!companyId) {
+      console.warn(`🛑 [Tenant Authority] handleRemoveShoppingItem rechazado: sesión sin companyId para JID '${remoteJid}'`);
+      if (sock?.sendMessage) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      }
+      return { success: false, error: 'UNAUTHORIZED_NO_COMPANY_ID' };
+    }
+    const tenantContext = { companyId, company: session.company, phone: session.phone };
+
+    if (clientQuery && !explicitBudgetId) {
+      const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'remove_shopping_items', { query });
+      if (isDis) return { success: true, disambiguation: true };
+    }
+
+    const deleted = deleteShoppingItem(tenantContext, query, clientQuery);
+    if (deleted.length === 0) {
+      if (sock?.sendMessage) {
+        const sentNotFound = await sock.sendMessage(remoteJid, {
+          text: `ℹ️ No he encontrado ningún material en tu lista de la compra que coincida con *"${query}"*${clientQuery ? ` para la obra de ${clientQuery}` : ''}.\n\nEscribe *"lista de la compra"* para ver tus materiales actuales.`
+        });
+        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+      }
+      return { success: false, error: 'NOT_FOUND' };
+    }
+
+    const names = deleted.map(d => `*${d.qty ? `${d.qty} ${d.unit || 'ud'} de ` : ''}${d.description}*${d.clientName ? ` (Obra: ${d.clientName})` : ' (Almacén / General)'}`).join(', ');
+    if (sock?.sendMessage) {
+      const sentOk = await sock.sendMessage(remoteJid, {
+        text: `🗑️ *Eliminado de tu lista de la compra:* ${names}`
+      });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    }
+    return { success: true, deleted };
+  } catch (err) {
+    console.error('❌ Error eliminando material de la lista:', err.message);
+    if (sock?.sendMessage) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error eliminando material:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+    return { success: false, error: err.message };
+  }
+}
+
+export async function handleUpdateShoppingItem(sock, remoteJid, session, query, updates = {}, clientQuery = null, explicitBudgetId = null) {
+  try {
+    const companyId = session?.companyId || session?.authContext?.companyId;
+    if (!companyId) {
+      console.warn(`🛑 [Tenant Authority] handleUpdateShoppingItem rechazado: sesión sin companyId para JID '${remoteJid}'`);
+      if (sock?.sendMessage) {
+        const sentErr = await sock.sendMessage(remoteJid, {
+          text: '⚠️ *Acceso no autorizado:* Tu cuenta de WhatsApp no está vinculada a ninguna empresa registrada.'
+        });
+        if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+      }
+      return { success: false, error: 'UNAUTHORIZED_NO_COMPANY_ID' };
+    }
+    const tenantContext = { companyId, company: session.company, phone: session.phone };
+
+    if (clientQuery && !explicitBudgetId) {
+      const isDis = await checkDisambiguation(sock, remoteJid, session, clientQuery, 'update_shopping_item', { query, updates });
+      if (isDis) return { success: true, disambiguation: true };
+    }
+
+    const updated = updateShoppingItem(tenantContext, query, updates, clientQuery);
+    if (updated.length === 0) {
+      if (sock?.sendMessage) {
+        const sentNotFound = await sock.sendMessage(remoteJid, {
+          text: `ℹ️ No he encontrado ningún material en tu lista de la compra que coincida con *"${query}"*${clientQuery ? ` para la obra de ${clientQuery}` : ''}.\n\nEscribe *"lista de la compra"* para ver tus materiales actuales.`
+        });
+        if (sentNotFound?.key?.id) botSentMessageIds.add(sentNotFound.key.id);
+      }
+      return { success: false, error: 'NOT_FOUND' };
+    }
+
+    const summary = updated.map(u => {
+      const scope = u.clientName ? ` (Obra: ${u.clientName})` : ' (Almacén / General)';
+      return `• *${u.description}*${scope}: antes *${u.previousQty} ${u.previousUnit || 'ud'}* ➡️ ahora *${u.qty} ${u.unit || 'ud'}*`;
+    }).join('\n');
+
+    if (sock?.sendMessage) {
+      const sentOk = await sock.sendMessage(remoteJid, {
+        text: `✏️ *Material actualizado en tu lista de la compra:*\n${summary}`
+      });
+      if (sentOk?.key?.id) botSentMessageIds.add(sentOk.key.id);
+    }
+    return { success: true, updated };
+  } catch (err) {
+    console.error('❌ Error editando material de la lista:', err.message);
+    if (sock?.sendMessage) {
+      const sentErr = await sock.sendMessage(remoteJid, {
+        text: `⚠️ *Error editando material:* ${err.message}`
+      });
+      if (sentErr?.key?.id) botSentMessageIds.add(sentErr.key.id);
+    }
+    return { success: false, error: err.message };
+  }
+}
+
+export function parseShoppingRemoveCommand(rawText) {
+  if (!rawText || typeof rawText !== 'string') return null;
+  const clean = rawText.trim().replace(/[¿?¡!.,;:]+$/g, '').trim();
+  // No capturar "borrar lista de la compra" o "vaciar lista de compras"
+  if (/^(?:borrar|vaciar|limpiar|eliminar)\s+(?:toda\s+)?(?:la\s+)?lista\s+de\s+(?:la\s+)?compras?$/i.test(clean)) {
+    return null;
+  }
+  if (/\b(?:todos?\s+los\s+materiales|toda\s+la\s+lista)\b/i.test(clean)) {
+    return null;
+  }
+
+  // Patrón 1: "quita/borra/elimina/saca [item] de la lista (de la compra) (de [cliente])"
+  const m1 = clean.match(/^(?:quita(?:r|me)?|borra(?:r|me)?|elimina(?:r|me)?|saca(?:r|me)?)\s+(.+?)\s+de\s+(?:mi\s+|la\s+)?(?:lista\s+de\s+(?:la\s+)?compras?|lista\s+de\s+materiales|lista|compras?)(?:\s+(?:de\s+la\s+obra\s+de|de|para)\s+(.+))?$/i);
+  if (m1) {
+    let itemQuery = m1[1].replace(/^(?:el|la|los|las|un|una|unos|unas)\s+/i, '').trim();
+    let clientQuery = m1[2] ? m1[2].trim() : null;
+    // Si el cliente estaba dentro de itemQuery: ej. "quita el cemento de Carlos de la lista de la compra"
+    if (!clientQuery) {
+      const innerClient = itemQuery.match(/^(.+?)\s+(?:de\s+la\s+obra\s+de|en\s+la\s+obra\s+de|para)\s+([a-záéíóúñA-ZÁÉÍÓÚÑ\s]{2,35})$/i);
+      if (innerClient) {
+        itemQuery = innerClient[1].trim();
+        clientQuery = innerClient[2].trim();
+      }
+    }
+    if (itemQuery && !/^(?:toda\s+la\s+lista|la\s+lista)$/i.test(itemQuery)) {
+      return { itemQuery, clientQuery };
+    }
+  }
+
+  // Patrón 2: "de la lista de la compra (de [cliente]) quita/borra/elimina [item]"
+  const m2 = clean.match(/^(?:en|de)\s+(?:mi\s+|la\s+)?(?:lista\s+de\s+(?:la\s+)?compras?|lista\s+de\s+materiales)(?:\s+(?:de\s+la\s+obra\s+de|de|para)\s+([a-záéíóúñA-ZÁÉÍÓÚÑ\s]{2,35}))?\s+(?:quita(?:r|me)?|borra(?:r|me)?|elimina(?:r|me)?|saca(?:r|me)?)\s+(.+)$/i);
+  if (m2) {
+    const clientQuery = m2[1] ? m2[1].trim() : null;
+    const itemQuery = m2[2].replace(/^(?:el|la|los|las|un|una|unos|unas)\s+/i, '').trim();
+    if (itemQuery) {
+      return { itemQuery, clientQuery };
+    }
+  }
+
+  return null;
+}
+
+export function parseShoppingUpdateCommand(rawText) {
+  if (!rawText || typeof rawText !== 'string') return null;
+  const clean = rawText.trim().replace(/[¿?¡!.,;:]+$/g, '').trim();
+
+  // Debe hacer referencia a la lista de compras o usar "en vez de" con cantidades de material
+  const mentionsList = /\b(?:lista(?:\s+de\s+(?:la\s+)?compras?|\s+de\s+materiales)?|compras?)\b/i.test(clean);
+  if (!mentionsList) return null;
+
+  // Patrón 1: "(en la lista de la compra [de Cliente]) pon [qty] [unit/desc] en vez de [oldQty/oldDesc]"
+  const mInstead = clean.match(/(?:(?:en\s+(?:la\s+)?lista(?:\s+de\s+(?:la\s+)?compras?)?(?:\s+(?:de\s+la\s+obra\s+de|de|para)\s+([a-záéíóúñA-ZÁÉÍÓÚÑ\s]+?))?\s+)?(?:pon(?:me)?|cambia(?:me)?|deja)\s+)(\d+(?:[.,]\d+)?)\s*([a-záéíóúñA-ZÁÉÍÓÚÑ²³]+)?\s+(?:de\s+)?(.+?)\s+en\s+(?:vez|lugar)\s+de\s+(.+?)(?:\s+en\s+(?:la\s+)?lista(?:\s+de\s+(?:la\s+)?compras?)?(?:\s+(?:de|para)\s+([a-záéíóúñA-ZÁÉÍÓÚÑ\s]+))?)?$/i);
+  if (mInstead) {
+    const clientQuery = (mInstead[1] || mInstead[6] || '').trim() || null;
+    const qty = parseFloat(String(mInstead[2]).replace(',', '.'));
+    const unitRaw = (mInstead[3] || '').trim();
+    const itemDesc = (mInstead[4] || '').replace(/\s+en\s+(?:la\s+)?lista.*$/i, '').trim();
+    return {
+      itemQuery: itemDesc,
+      clientQuery,
+      updates: {
+        qty,
+        unit: unitRaw || null,
+        newDescription: null
+      }
+    };
+  }
+
+  // Patrón 2: "cambia/modifica/edita [item] de la lista (de la compra) (de [cliente]) a/por [qty] [unit] [newDesc]"
+  const mChange = clean.match(/^(?:cambia(?:r|me)?|modifica(?:r|me)?|edita(?:r|me)?|actualiza(?:r|me)?)\s+(.+?)\s+(?:de|en)\s+(?:mi\s+|la\s+)?(?:lista\s+de\s+(?:la\s+)?compras?|lista\s+de\s+materiales|lista|compras?)(?:\s+(?:de\s+la\s+obra\s+de|de|para)\s+([a-záéíóúñA-ZÁÉÍÓÚÑ\s]+?))?\s+(?:a|por)\s+(\d+(?:[.,]\d+)?)(?:\s+([a-záéíóúñA-ZÁÉÍÓÚÑ²³]+))?(?:\s+(?:de\s+)?(.+))?$/i);
+  if (mChange) {
+    const itemQuery = mChange[1].replace(/^(?:el|la|los|las|un|una|unos|unas)\s+/i, '').trim();
+    const clientQuery = mChange[2] ? mChange[2].trim() : null;
+    const qty = parseFloat(String(mChange[3]).replace(',', '.'));
+    const unit = mChange[4] ? mChange[4].trim() : null;
+    const newDescription = mChange[5] ? mChange[5].trim() : null;
+    return {
+      itemQuery,
+      clientQuery,
+      updates: { qty, unit, newDescription }
+    };
+  }
+
+  // Patrón 3: "cambia/modifica/edita [item] a [qty] [unit] en la lista (de la compra) (de [cliente])"
+  const mChangeTrailing = clean.match(/^(?:cambia(?:r|me)?|modifica(?:r|me)?|edita(?:r|me)?|actualiza(?:r|me)?)\s+(.+?)\s+(?:a|por)\s+(\d+(?:[.,]\d+)?)(?:\s+([a-záéíóúñA-ZÁÉÍÓÚÑ²³]+))?\s+en\s+(?:mi\s+|la\s+)?(?:lista\s+de\s+(?:la\s+)?compras?|lista\s+de\s+materiales|lista)(?:\s+(?:de\s+la\s+obra\s+de|de|para)\s+([a-záéíóúñA-ZÁÉÍÓÚÑ\s]+))?$/i);
+  if (mChangeTrailing) {
+    const itemQuery = mChangeTrailing[1].replace(/^(?:el|la|los|las|un|una|unos|unas)\s+/i, '').trim();
+    const qty = parseFloat(String(mChangeTrailing[2]).replace(',', '.'));
+    const unit = mChangeTrailing[3] ? mChangeTrailing[3].trim() : null;
+    const clientQuery = mChangeTrailing[4] ? mChangeTrailing[4].trim() : null;
+    return {
+      itemQuery,
+      clientQuery,
+      updates: { qty, unit, newDescription: null }
+    };
+  }
+
+  return null;
 }
 
 export async function handleClearShoppingList(sock, remoteJid, session) {
@@ -6976,10 +7188,43 @@ async function startWhatsAppGateway() {
       return;
     }
 
+    // 15b. Eliminar / quitar un artículo concreto de la lista de la compra
+    if (aiResult?.action === 'remove_shopping_items') {
+      const parsedRem = parseShoppingRemoveCommand(recognizedUserText || '');
+      const itemQuery = aiResult.shoppingQuery || parsedRem?.itemQuery || (aiResult.shoppingItems?.[0]?.description) || '';
+      const clientQuery = aiResult.clientName || parsedRem?.clientQuery || null;
+      await handleRemoveShoppingItem(sock, remoteJid, session, itemQuery, clientQuery);
+      return;
+    }
+
+    // 15c. Editar / modificar la cantidad o nombre de un artículo de la lista de la compra
+    if (aiResult?.action === 'update_shopping_item') {
+      const parsedUpd = parseShoppingUpdateCommand(recognizedUserText || '');
+      const itemQuery = aiResult.shoppingQuery || parsedUpd?.itemQuery || (aiResult.shoppingItems?.[0]?.description) || '';
+      const updates = aiResult.shoppingUpdate || parsedUpd?.updates || (aiResult.shoppingItems?.[0] ? {
+        qty: aiResult.shoppingItems[0].qty,
+        unit: aiResult.shoppingItems[0].unit,
+        newDescription: aiResult.shoppingItems[0].description
+      } : {});
+      const clientQuery = aiResult.clientName || parsedUpd?.clientQuery || null;
+      await handleUpdateShoppingItem(sock, remoteJid, session, itemQuery, updates, clientQuery);
+      return;
+    }
+
     // 16. Vaciar lista de compras (Nivel B: Confirmación simple)
     if (aiResult?.action === 'clear_shopping_list') {
-      const sourceText = recognizedUserText;
-      const explicitClear = /\b(?:vaciar|limpiar|borrar|eliminar)\b.{0,45}\b(?:lista\s+de\s+(?:la\s+)?compras?|materiales\s+de\s+la\s+compra)\b/i.test(sourceText)
+      const sourceText = recognizedUserText || '';
+      const singleItemRemove = parseShoppingRemoveCommand(sourceText);
+      if (singleItemRemove) {
+        await handleRemoveShoppingItem(sock, remoteJid, session, singleItemRemove.itemQuery, singleItemRemove.clientQuery || aiResult.clientName || null);
+        return;
+      }
+      if (aiResult.shoppingQuery && !/\b(?:toda\s+la\s+lista|todos\s+los\s+materiales|lista\s+entera|lista\s+completa)\b/i.test(sourceText)) {
+        await handleRemoveShoppingItem(sock, remoteJid, session, aiResult.shoppingQuery, aiResult.clientName || null);
+        return;
+      }
+
+      const explicitClear = /\b(?:vaciar|limpiar|borrar|eliminar)\s+(?:toda\s+)?(?:la\s+|mi\s+)?(?:lista\s+de\s+(?:la\s+)?compras?|materiales\s+de\s+la\s+compra)\b/i.test(sourceText)
         || /\b(?:vaciar|limpiar|borrar|eliminar)\s+(?:todos\s+)?(?:los\s+)?materiales\s+de\s+mi\s+lista\b/i.test(sourceText);
       if (explicitClear) {
         await handleClearShoppingList(sock, remoteJid, session);
@@ -7991,6 +8236,12 @@ async function startWhatsAppGateway() {
             return;
           } else if (dis.actionType === 'mark_shopping_items') {
             await handleMarkShoppingItemBought(sock, remoteJid, session, dis.originalPayload?.query, selectedCandidate.clientName, selectedCandidate.id);
+            return;
+          } else if (dis.actionType === 'remove_shopping_items') {
+            await handleRemoveShoppingItem(sock, remoteJid, session, dis.originalPayload?.query, selectedCandidate.clientName, selectedCandidate.id);
+            return;
+          } else if (dis.actionType === 'update_shopping_item') {
+            await handleUpdateShoppingItem(sock, remoteJid, session, dis.originalPayload?.query, dis.originalPayload?.updates || {}, selectedCandidate.clientName, selectedCandidate.id);
             return;
           } else if (dis.actionType === 'rename_client') {
             if (dis.originalPayload?.newName) {
@@ -9053,11 +9304,25 @@ async function startWhatsAppGateway() {
         }
       }
 
-      // Comando directo para consultar lista de compras / materiales: ej. "lista de la compra", "¿qué tengo que comprar?", "¿qué tengo que comprar para Carlos?"
-      const listShoppingMatch = rawUserText.match(/^(?:lista\s+de\s+(?:la\s+)?compras?|materiales\s+pendientes|qu[eé]\s+(?:tengo\s+que|hay\s+que)\s+comprar|ver\s+compras?|mis\s+compras|materiales)(?:\s+(?:de|para|en\s+la\s+obra\s+de)\s+(.+))?$/i);
+      // Comando directo para consultar lista de compras / materiales: ej. "lista de la compra", "¿qué tengo que comprar?", "¿cuántos materiales tengo que comprar?"
+      const listShoppingMatch = rawUserText.match(/^(?:[¿¡]?\s*)?(?:lista\s+de\s+(?:la\s+)?compras?|material(?:es)?\s+pendientes?|(?:qu[eé]|cu[aá]nt[oa]s?)\s+(?:material(?:es)?\s+|cosas?\s+)?(?:tengo\s+que|hay\s+que)\s+comprar|ver\s+compras?|mis\s+compras|material(?:es)?)(?:\s+(?:de|para|en\s+la\s+obra\s+de)\s+([^?¿!¡]+))?[?¿!¡]*$/i);
       if (listShoppingMatch) {
         const clientFilter = (listShoppingMatch[1] || '').trim() || null;
         await handleListShoppingItems(sock, remoteJid, session, clientFilter);
+        return;
+      }
+
+      // Comando directo para editar o modificar un material de la lista de compras
+      const updateShoppingCmd = parseShoppingUpdateCommand(rawUserText);
+      if (updateShoppingCmd) {
+        await handleUpdateShoppingItem(sock, remoteJid, session, updateShoppingCmd.itemQuery, updateShoppingCmd.updates, updateShoppingCmd.clientQuery);
+        return;
+      }
+
+      // Comando directo para quitar o eliminar un material suelto de la lista de compras
+      const removeShoppingCmd = parseShoppingRemoveCommand(rawUserText);
+      if (removeShoppingCmd) {
+        await handleRemoveShoppingItem(sock, remoteJid, session, removeShoppingCmd.itemQuery, removeShoppingCmd.clientQuery);
         return;
       }
 

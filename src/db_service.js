@@ -3887,6 +3887,150 @@ export function clearShoppingList(companyContextOrIdOrPhone) {
   return { deletedCount: result.changes || 0 };
 }
 
+function findMatchingShoppingCandidates(companyId, queryOrId, clientQuery = null) {
+  const normalize = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+  const qNorm = normalize(queryOrId);
+  const stopWords = new Set([
+    'de', 'la', 'el', 'los', 'las', 'un', 'una', 'unos', 'unas', 'del', 'al',
+    'color', 'para', 'por', 'con', 'sin', 'en', 'obra', 'lista', 'compra', 'compras',
+    'material', 'materiales', 'articulo', 'articulos', 'elemento', 'elementos',
+    'm2', 'm', 'ml', 'ud', 'uds', 'unidad', 'unidades', 'kg', 'l', 'litros', 'litro',
+    'botes', 'bote', 'sacos', 'saco', 'placas', 'placa', 'cajas', 'caja', 'rollos', 'rollo',
+    'metros', 'metro', 'tubos', 'tubo', 'paquetes', 'paquete', 'bolsas', 'bolsa'
+  ]);
+  const rawWords = qNorm.split(' ').filter(Boolean);
+  const qWords = rawWords.filter(w => w.length > 1 && !stopWords.has(w) && !/^\d+(?:[.,]\d+)?$/.test(w));
+  const fallbackWords = qWords.length > 0 ? qWords : rawWords.filter(w => w.length > 1 && !/^\d+(?:[.,]\d+)?$/.test(w));
+
+  const allPending = db.prepare(`
+    SELECT * FROM shopping_items
+    WHERE company_id = ? AND status = 'PENDING'
+    ORDER BY created_at DESC
+  `).all(companyId);
+
+  const allItems = allPending.length > 0
+    ? allPending
+    : db.prepare(`SELECT * FROM shopping_items WHERE company_id = ? ORDER BY created_at DESC`).all(companyId);
+
+  if (allItems.length === 0) return [];
+
+  function itemMatches(it) {
+    if (it.id === queryOrId) return true;
+    const dNorm = normalize(it.description);
+    const fullNorm = normalize(`${it.qty || ''} ${it.unit || ''} ${it.description || ''}`);
+    if (qNorm && (dNorm.includes(qNorm) || qNorm.includes(dNorm) || fullNorm.includes(qNorm))) return true;
+    if (fallbackWords.length === 0) return false;
+    const dWords = fullNorm.split(' ').filter(w => w.length > 1);
+    return fallbackWords.every(qw => dWords.some(dw => dw.includes(qw) || qw.includes(dw)));
+  }
+
+  let candidates = [];
+  if (clientQuery && typeof clientQuery === 'string' && clientQuery.trim() !== '') {
+    const cNorm = normalize(clientQuery);
+    const clientItems = allItems.filter(it => {
+      const itClient = normalize(it.client_name);
+      return itClient && (itClient.includes(cNorm) || cNorm.includes(itClient));
+    });
+    const matchedInClient = clientItems.filter(itemMatches);
+    if (matchedInClient.length > 0) {
+      candidates = matchedInClient;
+    }
+  }
+
+  if (candidates.length === 0) {
+    candidates = allItems.filter(itemMatches);
+  }
+
+  return candidates;
+}
+
+export function deleteShoppingItem(companyContextOrIdOrPhone, queryOrId, clientQuery = null) {
+  if (!companyContextOrIdOrPhone || !queryOrId) return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  if (!companyId) return [];
+
+  const candidates = findMatchingShoppingCandidates(companyId, queryOrId, clientQuery);
+  if (candidates.length === 0) return [];
+
+  const deleteStmt = db.prepare(`
+    DELETE FROM shopping_items
+    WHERE id = ? AND company_id = ?
+  `);
+
+  const deleted = [];
+  for (const r of candidates) {
+    const res = deleteStmt.run(r.id, companyId);
+    if (res.changes > 0) {
+      deleted.push({
+        id: r.id,
+        companyId: r.company_id,
+        companyPhone: r.company_phone,
+        clientName: r.client_name,
+        budgetId: r.budget_id ? extractPublicEntityId(r.budget_id) : r.budget_id,
+        description: r.description,
+        qty: r.qty,
+        unit: r.unit,
+        status: r.status
+      });
+    }
+  }
+  return deleted;
+}
+
+export function updateShoppingItem(companyContextOrIdOrPhone, queryOrId, updates = {}, clientQuery = null) {
+  if (!companyContextOrIdOrPhone || !queryOrId || !updates || typeof updates !== 'object') return [];
+  const tenant = resolveCompanyTenant(companyContextOrIdOrPhone);
+  const companyId = tenant?.companyId;
+  if (!companyId) return [];
+
+  const candidates = findMatchingShoppingCandidates(companyId, queryOrId, clientQuery);
+  if (candidates.length === 0) return [];
+
+  const updateStmt = db.prepare(`
+    UPDATE shopping_items
+    SET qty = ?, unit = ?, description = ?, client_name = ?
+    WHERE id = ? AND company_id = ?
+  `);
+
+  // Si hay varios candidatos pero solo queremos editar el más reciente/específico a menos que coincidan exactamente
+  const targetCandidates = candidates.length > 1 ? [candidates[0]] : candidates;
+
+  const updated = [];
+  for (const r of targetCandidates) {
+    const parsedQty = updates.qty !== undefined && updates.qty !== null && !Number.isNaN(Number(updates.qty)) && Number(updates.qty) > 0
+      ? Number(updates.qty)
+      : r.qty;
+    const newUnit = updates.unit && String(updates.unit).trim() !== ''
+      ? String(updates.unit).trim()
+      : r.unit;
+    const rawNewDesc = updates.newDescription || updates.description;
+    const newDesc = rawNewDesc && String(rawNewDesc).trim() !== ''
+      ? String(rawNewDesc).trim()
+      : r.description;
+    const newClient = updates.newClientName !== undefined
+      ? (updates.newClientName ? String(updates.newClientName).trim() : null)
+      : r.client_name;
+
+    updateStmt.run(parsedQty, newUnit, newDesc, newClient, r.id, companyId);
+    updated.push({
+      id: r.id,
+      companyId: r.company_id,
+      companyPhone: r.company_phone,
+      clientName: newClient,
+      budgetId: r.budget_id ? extractPublicEntityId(r.budget_id) : r.budget_id,
+      description: newDesc,
+      qty: parsedQty,
+      unit: newUnit,
+      previousDescription: r.description,
+      previousQty: r.qty,
+      previousUnit: r.unit,
+      status: r.status
+    });
+  }
+  return updated;
+}
+
 // ─── Métodos de Modo Obra (Memoria y Estado de Obra en Vivo) ─────────────────
 
 export function getWorkMemory(phoneOrCompany, clientOrBudgetId = null) {
